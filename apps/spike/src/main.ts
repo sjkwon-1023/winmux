@@ -118,6 +118,11 @@ class App {
     this.applyGrid(this.tiles.length + 1);
     const tile = await TerminalTile.create(this.grid, this.renderer, {
       onClosed: (t) => this.removeTile(t),
+      // paste 진단 등 타일의 상태 메시지를 OSC 로그 패널에 함께 표시한다
+      onDiagnostic: (t, message) => {
+        this.oscLog.push({ id: t.id ?? 0, kind: "diag", title: "", body: message, at: new Date() });
+        this.renderOscLog();
+      },
     });
     this.tiles.push(tile);
   }

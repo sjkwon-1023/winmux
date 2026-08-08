@@ -24,6 +24,8 @@ export type RendererKind = "dom" | "webgl";
 export interface TerminalTileEvents {
   /** 닫기 버튼으로 dispose가 끝난 뒤 호출 — 앱이 그리드에서 타일을 제거한다. */
   onClosed(tile: TerminalTile): void;
+  /** 진단 메시지 — paste 경로 등 Windows 재검증에서 봐야 하는 상태를 UI 로그로 올린다. */
+  onDiagnostic(tile: TerminalTile, message: string): void;
 }
 
 export class TerminalTile {
@@ -109,6 +111,24 @@ export class TerminalTile {
     this.term.open(this.host);
     // 초기 fit — 여기서 잡힌 cols/rows를 create_terminal에 그대로 전달한다
     this.fit();
+
+    // Ctrl+V / Ctrl+Shift+V — WebView2에서 브라우저 기본 paste accelerator가 동작하지
+    // 않는 문제(ADR-0001 known issue)의 우회: 클립보드를 직접 읽어 xterm의 paste
+    // 경로로 넣는다. term.paste()는 앱이 켠 bracketed paste 모드 상태를 존중한다.
+    this.term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === "keydown" && ev.ctrlKey && !ev.altKey && (ev.key === "v" || ev.key === "V")) {
+        void this.pasteFromClipboard();
+        return false;
+      }
+      return true;
+    });
+
+    // 우클릭/네이티브 paste 진단 — `^[[200~` 노출 원인((a) ConPTY 입력 변형 vs
+    // (b) TUI 종료 후 stale mode) 구분용. paste 순간의 모드 상태를 로그로 남긴다.
+    this.host.addEventListener("paste", (ev) => {
+      const len = ev.clipboardData?.getData("text").length ?? 0;
+      this.diag(`paste(native): ${len} chars, bracketed=${String(this.term.modes.bracketedPasteMode)}`);
+    });
 
     const channel = new Channel<OutputChunk>();
     channel.onmessage = (chunk): void => {
@@ -211,6 +231,25 @@ export class TerminalTile {
         console.error("close_terminal failed", err);
       }
     }
+  }
+
+  /** Ctrl+V 경로: 클립보드를 읽어 xterm paste로 주입한다. 실패도 진단 로그로 남긴다 —
+   *  WebView2가 clipboard-read 권한을 거부하는 환경이면 여기 로그가 그 증거가 되고,
+   *  그 경우 Tauri clipboard-manager 플러그인 경로로 전환한다. */
+  private async pasteFromClipboard(): Promise<void> {
+    try {
+      const text = await navigator.clipboard.readText();
+      this.diag(
+        `paste(ctrl+v): ${text.length} chars, bracketed=${String(this.term.modes.bracketedPasteMode)}`,
+      );
+      if (text.length > 0) this.term.paste(text);
+    } catch (err) {
+      this.diag(`paste(ctrl+v) clipboard read failed: ${String(err)}`);
+    }
+  }
+
+  private diag(message: string): void {
+    this.events.onDiagnostic(this, message);
   }
 
   private onOutput(chunk: OutputChunk): void {
