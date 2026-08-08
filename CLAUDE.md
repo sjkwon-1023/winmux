@@ -6,8 +6,10 @@ wmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and cod
 ## Current state
 
 Spike executed and verified on Windows (2026-08-08); **candidate A adopted** — see
-ADR-0001. Next phase: MVP (계획 v2 section 17, stages 10–21). First open work item:
-the paste bug recorded in ADR-0001 "Known issues".
+ADR-0001. The paste bug from ADR-0001 "Known issues" is resolved (Windows Terminal
+copy/paste convention; interception list in `apps/spike/src/terminal-tile.ts`).
+Next phase: MVP (계획 v2 section 17, stages 10–21), starting with stage 10
+(data model + command dispatcher + stable IDs).
 
 ## Layout
 

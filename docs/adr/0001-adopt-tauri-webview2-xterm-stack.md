@@ -50,6 +50,10 @@ Functional results:
   literal `^[[200~` (bracketed-paste marker) into the input line. First MVP work item.
   Suspects: WebView2 accelerator/clipboard-permission handling for the former; bracketed
   paste mode tracking across the ConPTY input path for the latter. Root cause TBD.
+  - **Resolved (2026-08-08, commits `9d48f5a`/`c27b95f`)**: the actual root cause of the
+    no-op was xterm mapping Ctrl+V to `\x16`. Paste now goes through a single
+    clipboard → `term.paste()` path, and copy follows the Windows Terminal convention
+    (Ctrl+C copies when a selection exists, otherwise sends SIGINT). Verified on Windows.
 
 ## Follow-ups carried from the spike
 
