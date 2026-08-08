@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Spike default capability — main window needs core APIs (event listen for osc-event/terminal-exit).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
