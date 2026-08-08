@@ -1,9 +1,10 @@
 # Windows Build Guide
 
 How to set up a Windows machine to build and run `apps/spike` (Tauri v2 + xterm.js), and how
-to run the Windows-side Spike verification. This machine's WSL host has no Rust/MSVC toolchain
-for Windows targets, so the build and the ConPTY/IME/RAM checks in
-[`docs/plans/spike-plan.md`](plans/spike-plan.md) section 6 must be done on Windows directly.
+to run the Windows-side verification. The Spike sign-off itself was completed on 2026-08-08
+(candidate A adopted — see [`docs/adr/0001`](adr/0001-adopt-tauri-webview2-xterm-stack.md));
+this guide remains the reference for building and for re-running the checks as regression
+tests during MVP work.
 
 ## 1. Prerequisites
 
@@ -107,12 +108,10 @@ or persist it for your user account (`setx WMUX_DISTRO "Ubuntu-24.04"`, new shel
 
 ## 4. Verification
 
-Once the app builds and runs, the actual Spike sign-off checklist — OSC passthrough, Claude
-Code/Codex behavior, IME, flow control, renderer comparison, RAM measurement — is
-[`docs/plans/spike-plan.md`](plans/spike-plan.md) section 6 ("Windows Spike 검증 체크리스트").
-Run through it in order; step 1 (OSC passthrough) is the highest-priority gate because it can
-force a switch to the file/socket fallback path (see spike-plan.md section 4.1 and
-터미널-계획-v2.md section 2's "단일 실패점").
+The verification checklist — OSC passthrough, Claude Code/Codex behavior, IME, flow control,
+renderer comparison, RAM measurement — is [`docs/plans/spike-plan.md`](plans/spike-plan.md)
+section 6 ("Windows Spike 검증 체크리스트"). It was fully executed for the Spike sign-off
+(results in ADR-0001) and doubles as the regression checklist for MVP-era changes.
 
 Scripts referenced by that checklist:
 

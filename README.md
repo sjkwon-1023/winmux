@@ -4,9 +4,10 @@ A lightweight cmux-style terminal for Windows, centered on WSL2 and coding agent
 (Claude Code / Codex). Windows 11 ARM64 first, x64 supported.
 
 - Product plan (Korean): [`터미널-계획-v2.md`](./터미널-계획-v2.md)
-- Current phase: **Spike** — validating candidate A (Tauri v2 + single WebView2 + xterm.js
-  + ConPTY → wsl.exe) against the memory/latency budget before building the MVP.
-  Execution plan: [`docs/plans/spike-plan.md`](./docs/plans/spike-plan.md)
+- Current phase: **post-Spike → MVP**. The spike verdict (2026-08-08) adopted candidate A
+  (Tauri v2 + single WebView2 + xterm.js + ConPTY → wsl.exe): 4 panes at 113MB private
+  working set, OSC 777/9/7 passthrough confirmed. See
+  [`docs/adr/0001-adopt-tauri-webview2-xterm-stack.md`](./docs/adr/0001-adopt-tauri-webview2-xterm-stack.md).
 
 ## Layout
 
