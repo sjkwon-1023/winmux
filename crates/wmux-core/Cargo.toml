@@ -6,3 +6,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 portable-pty = "0.9"
+# 상태 모델·command bus 직렬화 계약용. 하한 1.0.186 = rename_all_fields 필요 버전.
+serde = { version = "1.0.186", features = ["derive"] }
+
+[dev-dependencies]
+# golden fixture round-trip 테스트용
+serde_json = "1"

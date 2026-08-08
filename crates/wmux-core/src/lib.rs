@@ -4,7 +4,9 @@
 //! flow control 상태 머신, PTY 세션 관리를 제공한다. 모듈별 계약은
 //! `docs/plans/spike-plan.md` 4장을 참조.
 
+pub mod command;
 pub mod flow;
+pub mod model;
 pub mod osc;
 pub mod replay;
 pub mod session;

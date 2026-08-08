@@ -4333,6 +4333,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "portable-pty",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
