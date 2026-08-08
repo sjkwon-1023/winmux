@@ -89,6 +89,13 @@ class App {
     }
     if (cmd.type === "focusPane") {
       this.wsView.requestFocus({ kind: "pane", pane: cmd.pane });
+      return;
+    }
+    if (cmd.type === "closeTab" || cmd.type === "closePane" || cmd.type === "closeWorkspace") {
+      // 닫힌 xterm 이 DOM 에서 사라지면 focus 가 body 로 떨어져 키 입력이 죽는다
+      // (리뷰 finding) — 닫기 후 어디가 남는지는 스냅샷이 아는 것이므로, 렌더
+      // 시점의 activePane 으로 보상한다.
+      this.wsView.requestFocus({ kind: "activePane" });
     }
   }
 

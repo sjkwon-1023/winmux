@@ -48,7 +48,12 @@ type DispatchFn = (cmd: Command) => Promise<CommandOutput | null>;
 
 /** focus 보상 대상 (계획 D7). "pane" 은 그 pane 의 표시 중 뷰를 뜻한다 —
  *  FocusPane 은 cmd 에 pane 이 있어 activePane 스냅샷 도착을 기다릴 필요가 없다. */
-export type FocusRequest = { kind: "tab"; tab: TabId } | { kind: "pane"; pane: PaneId };
+export type FocusRequest =
+  | { kind: "tab"; tab: TabId }
+  | { kind: "pane"; pane: PaneId }
+  /** 렌더 시점의 활성 워크스페이스 activePane — CloseTab/ClosePane 처럼 "닫힌 뒤
+   *  어디가 남는지"를 스냅샷이 알려줘야 하는 보상에 쓴다. */
+  | { kind: "activePane" };
 
 /** 활성 워크스페이스 해석 — 없으면 null (main.ts 상태 라인과 공유). */
 export function activeWorkspace(snapshot: StateSnapshot): Workspace | null {
@@ -74,7 +79,14 @@ export class WorkspaceView {
 
   /** 탭별 keep-alive 터미널 뷰 — 앱 수준 레지스트리 (계획 D3). */
   private readonly views = new Map<TabId, TerminalView>();
-  private pendingFocus: FocusRequest | null = null;
+  /** 보상 focus 보류 1칸. rendersLeft: 미해소 렌더가 이만큼 지나면 stale 로
+   *  폐기한다 — invoke 응답이 앞선 무관 이벤트 렌더보다 먼저 처리되는 race 에서
+   *  구 revision 렌더가 보상을 조기 폐기하지 않게 하면서(리뷰 finding), 닫힌 탭
+   *  대상 요청이 영구 보류로도 남지 않게 한다. */
+  private pendingFocus: { req: FocusRequest; rendersLeft: number } | null = null;
+  /** detach 스윕 전이 추적 — 직전 렌더에서 이미 미부착이던 세션은 재스윕하지
+   *  않는다 (멱등이지만 매 revision 반복 invoke 는 잡음 — 리뷰 finding). */
+  private sweptSessions = new Set<SessionId>();
   /** 부트 보상 focus 를 첫 리컨실(워크스페이스 존재) 1회로 제한하는 래치. */
   private booted = false;
 
@@ -113,16 +125,26 @@ export class WorkspaceView {
     // updatePanes 가 가시성·lazy attach 를 만진다 (계획 D3·D4-b).
     const plan = planViewSync(this.views.keys(), snapshot);
     for (const tab of plan.dispose) {
-      this.views.get(tab)?.dispose();
+      // 한 뷰의 dispose 이상이 나머지 정리·렌더 전체를 중단시키지 않게 격리.
+      try {
+        this.views.get(tab)?.dispose();
+      } catch (err) {
+        console.error("view dispose failed", tab, err);
+      }
       this.views.delete(tab);
     }
+    const unattached = new Set(plan.detachSessions);
     for (const session of plan.detachSessions) {
       // fire-and-forget 스윕 (멱등) — 부트 첫 스냅샷 포함. F5 후 미방문 탭
       // 세션의 죽은 채널이 paused 에 고착되는 것을 여기서 치운다 (D4-b).
+      // 직전 렌더에서 이미 미부착이던 세션은 건너뛴다 — 전이 시점 1회면 충분
+      // (매 revision 반복 invoke 잡음 방지, 리뷰 finding).
+      if (this.sweptSessions.has(session)) continue;
       void detachTerminal(session).catch((err) =>
         console.error("detach sweep failed", session, err),
       );
     }
+    this.sweptSessions = unattached;
 
     const ws = activeWorkspace(snapshot);
     if (ws === null) {
@@ -143,7 +165,9 @@ export class WorkspaceView {
     // 부트/리로드 보상 focus (D7) — 첫 리컨실 후 활성 pane 의 뷰 1곳.
     if (!this.booted) {
       this.booted = true;
-      if (this.pendingFocus === null) this.pendingFocus = { kind: "pane", pane: ws.activePane };
+      if (this.pendingFocus === null) {
+        this.pendingFocus = { req: { kind: "pane", pane: ws.activePane }, rendersLeft: 1 };
+      }
     }
     this.tryResolveFocus(true);
   }
@@ -151,27 +175,34 @@ export class WorkspaceView {
   /** focus 보상 요청 (main.dispatchUI 성공 경로 — 계획 D7). 즉시 1회 시도하고,
    *  대상이 아직 없으면(스냅샷 미도착) 다음 render 가 해소한다. */
   requestFocus(req: FocusRequest): void {
-    this.pendingFocus = req;
+    // rendersLeft 3: 명령 결과 스냅샷보다 앞선 무관 이벤트 렌더가 1~2개 끼어도
+    // 보상이 살아남고, 정말 stale 한 요청(대상 탭이 닫힘)은 몇 렌더 안에 폐기된다.
+    this.pendingFocus = { req, rendersLeft: 3 };
     this.tryResolveFocus(false);
   }
 
-  /** pendingFocus 해소 시도. atRender 면 미해소 시 폐기한다 — 렌더 시점에도
-   *  대상이 없는 요청은 stale(탭이 그새 닫힘 등)이라 보류를 남기지 않는다. */
+  /** pendingFocus 해소 시도. atRender 면 미해소마다 rendersLeft 를 줄이고 0 이
+   *  되면 폐기한다 (stale 요청이 보류로 영구히 남지 않게). */
   private tryResolveFocus(atRender: boolean): void {
-    const req = this.pendingFocus;
-    if (req === null) return;
-    const view = this.focusTarget(req);
+    const pending = this.pendingFocus;
+    if (pending === null) return;
+    const view = this.focusTarget(pending.req);
     if (view !== null) {
       view.focus();
       this.pendingFocus = null;
       return;
     }
-    if (atRender) this.pendingFocus = null;
+    if (atRender && --pending.rendersLeft <= 0) this.pendingFocus = null;
   }
 
   /** 요청 → focus 할 뷰. 숨은 뷰는 대상이 아니다 (display:none 은 focus 불가) —
    *  표시 여부는 pane 의 shownTab 으로 판정한다. */
   private focusTarget(req: FocusRequest): TerminalView | null {
+    if (req.kind === "activePane") {
+      const ws = this.lastSnapshot === null ? null : activeWorkspace(this.lastSnapshot);
+      if (ws === null) return null;
+      return this.focusTarget({ kind: "pane", pane: ws.activePane });
+    }
     if (req.kind === "pane") {
       const paneView = this.paneViews.get(req.pane);
       const shown = paneView?.shownTab ?? null;

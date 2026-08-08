@@ -94,9 +94,11 @@ export class PaneView {
 
     this.root.addEventListener(
       "mousedown",
-      () => {
+      (ev) => {
         // 비활성 pane 클릭 → 모델 포커스 이동. preventDefault 금지 (파일 상단).
         // 탭 클릭도 이 경로가 FocusPane 을 담당한다 (onTabClick 주석 참조).
+        // 주 버튼만 — 우/중클릭은 컨텍스트 메뉴·붙여넣기 등 다른 의미를 갖는다.
+        if (ev.button !== 0) return;
         if (!this.isActive) void this.dispatch({ type: "focusPane", pane: this.paneId });
       },
       { capture: true },
@@ -195,8 +197,20 @@ export class PaneView {
     }
   }
 
+  /** 직전 렌더의 탭 모델 직렬화 키 — 무변경 시 DOM 재조립을 건너뛰기 위한 캐시. */
+  private lastStripKey = "";
+
+  /** 탭 모델이 변했을 때만 strip DOM 을 재조립한다. 클릭 진행 중(mousedown~click
+   *  사이)에 무관 스냅샷 렌더가 눌린 탭 엘리먼트를 갈아치우면 브라우저가 click 을
+   *  발화하지 않아 "비활성 pane 탭은 두 번 클릭해야 먹는" 버그가 된다 (리뷰 high
+   *  finding). FocusPane 스냅샷은 이 pane 의 탭 모델을 바꾸지 않으므로 이 스킵이
+   *  유실 창을 닫는다. */
   private renderTabStrip(pane: Pane): void {
-    this.tabStripEl.replaceChildren(...tabStripModel(pane).map((m) => this.tabButton(m)));
+    const model = tabStripModel(pane);
+    const key = JSON.stringify(model);
+    if (key === this.lastStripKey) return;
+    this.lastStripKey = key;
+    this.tabStripEl.replaceChildren(...model.map((m) => this.tabButton(m)));
   }
 
   private tabButton(model: TabButtonModel): HTMLElement {

@@ -233,10 +233,15 @@ gates. All UI here is mouse-driven; the dev hook is only needed where noted.
    new pane.
 2. **Splitter drag survives reload** — drag a splitter (live preview while dragging, no
    command spam), release, then F5. The adjusted ratio must persist (it lives in Rust
-   state, not the DOM).
+   state, not the DOM). Also observe: if a structural change arrives mid-drag (e.g. a
+   session exits in another pane), the drag is deliberately abandoned — the preview snaps
+   back and no resize command is sent (expected behavior, not a bug).
 3. **Tabs: create/switch/close** — multiple terminal tabs per pane via the header icon;
    switching is instant with **no replay flash** (keep-alive views — the terminal content
    must not visibly re-render from scratch); closing a tab kills only that session.
+   **A single click on an *inactive* pane's tab must land** (activate the tab, not just
+   focus the pane) — regression guard for a mid-click re-render that used to require two
+   clicks.
 4. **Hidden tab keeps flowing** — run `bash ~/code/wmux/scripts/wsl/flood.sh 10` in a
    tab, switch away, wait, switch back: the buffer shows the latest output and
    `get_stats` shows `paused: false` throughout (hidden views keep acking).
@@ -248,6 +253,8 @@ gates. All UI here is mouse-driven; the dev hook is only needed where noted.
 6. **Last tab closes the pane** — closing the last tab of a pane collapses the pane
    (sibling takes the space, focus falls back); closing the last tab of the *last* pane
    leaves an empty pane with the placeholder, and the header icons still work from there.
+   After any tab close, keyboard input must land in the surviving tab **without an extra
+   click** (focus compensation — a removed xterm otherwise drops focus to the body).
 7. **2×2 reload** — build a 2×2 layout with running TUIs (e.g. `htop`), F5: all four
    panes re-attach with their sessions and text intact, and the TUIs redraw after the
    resize nudge. Pane/Tab/Split ids unchanged (`get_state`).
