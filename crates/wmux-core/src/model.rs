@@ -335,9 +335,10 @@ impl SplitTree {
     }
 }
 
-/// pane(= TabContainer). 탭이 0개인 빈 pane 은 **워크스페이스의 마지막 pane**
-/// 에서만 남는다 — 그 외의 pane 은 마지막 탭이 닫히면 CloseTab auto-collapse 로
-/// 제거된다 (11~12단계 계획 D6, `Command::CloseTab` rustdoc 참조).
+/// pane(= TabContainer). 탭이 0개인 빈 pane 이 남는 경로는 두 가지다:
+/// **워크스페이스의 마지막 pane**(CloseTab auto-collapse 의 예외 — 11~12단계 계획
+/// D6, `Command::CloseTab` rustdoc 참조)과 `SplitPane { tab: None }`(dev 훅·MCP 용
+/// 존치 경로 — UI 분할 아이콘은 항상 tab 을 실어 원자 생성한다).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pane {

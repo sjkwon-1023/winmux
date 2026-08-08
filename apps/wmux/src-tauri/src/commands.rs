@@ -113,7 +113,8 @@ pub fn attach_terminal(
     Ok(Response::new(body))
 }
 
-/// 출력 채널 분리 — 뷰 dispose·부트 리컨실 스윕 시 호출된다. 채널 분리 후 이후
+/// 출력 채널 분리 — 뷰 dispose 시, 그리고 부트 리컨실 스윕(attach 하지 않는 전
+/// 터미널 세션 대상 — 프론트 배선은 12단계 청크 C)에서 호출된다. 채널 분리 후 이후
 /// 출력은 Dropped(detach 모드)로 보상 롤백된다 (`TerminalSink::detach` rustdoc).
 /// 이어서 `reset_flow()` 로 flow 계정까지 리셋한다 (계획 D4 자동 치유) — 이미
 /// paused 인 세션은 리더가 read 를 안 해 Dropped 롤백 경로 자체가 실행되지
