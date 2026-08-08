@@ -1,5 +1,10 @@
 # MVP 10단계 실행 계획 — 데이터 모델 + command dispatcher + 안정 ID
 
+> **구현 착지 완료 (청크 A~D, 2026-08-08).** 아키텍처 결정은
+> [`docs/adr/0002-stage10-architecture.md`](../adr/0002-stage10-architecture.md)로 증류됨.
+> 남은 것은 **Windows 수동 체크리스트**(`docs/WINDOWS-BUILD.md` 6장, 6항목) — 통과하면
+> 10단계 종료이며, 이 문서는 거버넌스에 따라 삭제한다.
+
 계획 v2 17장 10단계의 확정 실행계획. plan-drafter 초안 → plan-critic 반증(revise) →
 메인 취합으로 확정됐다. 초안 뼈대(4청크·spike 동결·ID 체계·attach 프로토콜)는 채택,
 반증 findings는 아래 "반영 사항"대로 반영.
