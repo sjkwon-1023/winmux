@@ -41,7 +41,7 @@ Build Tools — not the full Visual Studio IDE.
    selected:
    - **x64**: `MSVC v143 - VS 2022 C++ x64/x86 build tools` (this dev machine's target)
    - **ARM64**: `MSVC v143 - VS 2022 C++ ARM64 build tools` (only needed if you'll build for
-     ARM64 — see section 7)
+     ARM64 — see section 8)
 4. Also confirm a **Windows 10/11 SDK** component is selected (the installer usually pulls one
    in automatically with the C++ workload).
 
@@ -207,19 +207,58 @@ four pass.
    dev hook's command output) before reloading, reload, and confirm they're unchanged
    afterward.
 5. **Background tab stays free-running** — create a second terminal tab, start a long
-   noisy command in it (e.g. `seq 1000000`), switch back to the first tab (the view for
-   the second is disposed and its channel detached), wait a few seconds, then check
-   `window.__wmux` dev hook → `get_stats` (or `invoke("get_stats")`): the background
-   session must show `paused: false` and keep making progress. This exercises the
-   detach-on-dispose path (review finding: a leaked channel would accumulate unacked
-   pending until the session froze at the high-water mark).
+   noisy command in it (e.g. `seq 1000000`), switch back to the first tab, wait a few
+   seconds, then check `window.__wmux` dev hook → `get_stats` (or `invoke("get_stats")`):
+   the background session must show `paused: false` and keep making progress.
+   *(Historical note: when this item was written, tab switching disposed the view and
+   detached its channel. Since stage 12 landed keep-alive views, switching tabs keeps the
+   hidden view attached and acking — the item still holds, it now verifies the keep-alive
+   ack path instead of detach-on-dispose.)*
 6. **`root_path` workspace spawns in the right directory** — dispatch
    `createWorkspace` with a `rootPath` (absolute **Linux** path, e.g. `/home/<user>`),
    create a terminal tab in it, and confirm `pwd` prints that path. This is the first
    real-world use of the `wsl.exe --cd <path>` mapping (spike only ever used
    `wsl.exe -- bash -l`); relative or Windows-style paths are not supported there.
 
-## 7. ARM64 cross-build notes
+## 7. Stage 11–12 manual verification checklist
+
+Run against `apps/wmux` after the stage 11/12 chunks land — this is the completion gate
+for stages 11–12 (`docs/plans/mvp-stage11-12-plan.md` section 2), on top of the automated
+gates. All UI here is mouse-driven; the dev hook is only needed where noted.
+
+1. **Splits render and nest** — use the pane-header icons to split left/right and
+   top/bottom, then split one of the halves again. Layout must match the icon direction
+   (horizontal = side by side, vertical = stacked), each new pane opens with a running
+   terminal tab (atomic `SplitPane{tab}` — no empty-pane flash), and focus moves to the
+   new pane.
+2. **Splitter drag survives reload** — drag a splitter (live preview while dragging, no
+   command spam), release, then F5. The adjusted ratio must persist (it lives in Rust
+   state, not the DOM).
+3. **Tabs: create/switch/close** — multiple terminal tabs per pane via the header icon;
+   switching is instant with **no replay flash** (keep-alive views — the terminal content
+   must not visibly re-render from scratch); closing a tab kills only that session.
+4. **Hidden tab keeps flowing** — run `bash ~/code/wmux/scripts/wsl/flood.sh 10` in a
+   tab, switch away, wait, switch back: the buffer shows the latest output and
+   `get_stats` shows `paused: false` throughout (hidden views keep acking).
+5. **Unvisited tab after reload keeps flowing** — create a second tab, start `seq
+   1000000` in it, F5, and do **not** click that tab. Check `get_stats`: the session must
+   show `paused: false` (the boot reconcile sweeps `detach_terminal` over unattached
+   sessions — the post-reload freeze fix). Then click the tab: latest output appears via
+   replay.
+6. **Last tab closes the pane** — closing the last tab of a pane collapses the pane
+   (sibling takes the space, focus falls back); closing the last tab of the *last* pane
+   leaves an empty pane with the placeholder, and the header icons still work from there.
+7. **2×2 reload** — build a 2×2 layout with running TUIs (e.g. `htop`), F5: all four
+   panes re-attach with their sessions and text intact, and the TUIs redraw after the
+   resize nudge. Pane/Tab/Split ids unchanged (`get_state`).
+8. **Errors surface** — from the dev console, dispatch `resizeSplit` with a stale id
+   (e.g. `{ type: "resizeSplit", split: 9999, ratio: 0.5 }`): the status line shows the
+   error and the layout stays consistent.
+9. **RAM reference** — with the 2×2 layout idle, run `scripts/win/measure.ps1
+   -ProcessName wmux` and note the total against the 계획 v2 section 16 budget
+   (≤150MB); this is a reference point, not a hard gate for these stages.
+
+## 8. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
 (터미널-계획-v2.md section 13) is ARM64. Cross-compiling *from* this x64 Windows machine *for*

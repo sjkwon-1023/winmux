@@ -8,11 +8,12 @@ wmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and cod
 Spike executed and verified on Windows (2026-08-08); **candidate A adopted** — see
 ADR-0001. The paste bug from ADR-0001 "Known issues" is resolved (Windows Terminal
 copy/paste convention; interception list in `apps/spike/src/terminal-tile.ts`).
-MVP stage 10 (data model + command dispatcher + stable IDs) is **implemented** — all
-chunks (A core session API, B model+dispatcher, C `apps/wmux` app, D docs) have landed;
-architecture decisions are distilled in ADR-0002. Stage 10 **closes after the Windows
-manual checklist** (`docs/WINDOWS-BUILD.md` section 6) passes; then stages 11–12
-(split/tab UI) follow per `docs/plans/mvp-stage10-plan.md`'s scope notes.
+MVP stages 10–12 are **implemented**: stage 10 (data model + command dispatcher + stable
+IDs — ADR-0002) and stages 11–12 (split/tab UI: SplitId addressing, atomic
+SplitPane{tab}, splitter drag, keep-alive tab views, CloseTab auto-collapse, self-healing
+detach — see `docs/plans/mvp-stage11-12-plan.md`). Stages close after the Windows manual
+checklists pass (`docs/WINDOWS-BUILD.md` sections 6 and 7); ADR distillation of the
+11–12 decisions follows that verification. Next: stage 13 (workspace sidebar).
 
 ## Layout
 
