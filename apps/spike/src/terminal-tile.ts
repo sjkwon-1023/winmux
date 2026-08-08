@@ -1,6 +1,11 @@
 // 터미널 타일 — xterm 인스턴스 1개와 백엔드 PTY 세션 1개를 묶는다 (spike-plan.md 4.6).
 // 출력 수신(raw channel) → term.write → 완료 콜백에서 AckBatcher 집계 → ack_output,
-// 입력은 xterm 기본 onData 경로 그대로 write_stdin (앱 단축키 가로채기 없음).
+// 입력은 xterm 기본 onData 경로 그대로 write_stdin.
+//
+// 가로채기 키 목록 (계획 v2 3장 — 이 목록 외 입력은 전부 PTY로 간다):
+// - Ctrl+V, Ctrl+Shift+V, Shift+Insert: 붙여넣기 (클립보드 → term.paste 단일 경로)
+// - Ctrl+C·Ctrl+Shift+C·Ctrl+Insert (선택 있을 때만): 복사. 선택 없는 Ctrl+C는
+//   그대로 SIGINT — Windows Terminal과 같은 컨벤션.
 
 import { Terminal } from "@xterm/xterm";
 import type { IDisposable } from "@xterm/xterm";
@@ -112,12 +117,36 @@ export class TerminalTile {
     // 초기 fit — 여기서 잡힌 cols/rows를 create_terminal에 그대로 전달한다
     this.fit();
 
-    // Ctrl+V / Ctrl+Shift+V — WebView2에서 브라우저 기본 paste accelerator가 동작하지
-    // 않는 문제(ADR-0001 known issue)의 우회: 클립보드를 직접 읽어 xterm의 paste
-    // 경로로 넣는다. term.paste()는 앱이 켠 bracketed paste 모드 상태를 존중한다.
+    // 복사/붙여넣기 키 처리. 붙여넣기는 반드시 preventDefault로 네이티브 paste를
+    // 막고 클립보드 → term.paste() 단일 경로로 보낸다 — xterm의 기본 처리(\x16 전송)와
+    // 네이티브 paste가 겹치면 무반응(이전) 또는 이중 붙여넣기(수정 1차)가 된다.
+    // 복사는 선택이 있을 때만 가로채고, 선택 없는 Ctrl+C는 SIGINT로 통과시킨다.
     this.term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type === "keydown" && ev.ctrlKey && !ev.altKey && (ev.key === "v" || ev.key === "V")) {
+      if (ev.type !== "keydown") return true;
+      if (ev.key === "Insert") {
+        // Windows 고전 조합 — 터미널 앱과 충돌하지 않는다.
+        if (ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+          ev.preventDefault();
+          void this.pasteFromClipboard();
+          return false;
+        }
+        if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && this.term.hasSelection()) {
+          ev.preventDefault();
+          void this.copySelection();
+          return false;
+        }
+        return true;
+      }
+      if (!ev.ctrlKey || ev.altKey) return true;
+      const key = ev.key.toLowerCase();
+      if (key === "v") {
+        ev.preventDefault();
         void this.pasteFromClipboard();
+        return false;
+      }
+      if (key === "c" && this.term.hasSelection()) {
+        ev.preventDefault();
+        void this.copySelection();
         return false;
       }
       return true;
@@ -143,7 +172,7 @@ export class TerminalTile {
     this.sessionId = id;
     this.titleEl.textContent = `#${id}`;
 
-    // 입력은 xterm 기본 onData 경로 — Ctrl+C 등 제어 입력도 그대로 PTY로 간다
+    // 입력은 xterm 기본 onData 경로 — 파일 상단의 가로채기 목록 외에는 그대로 PTY로 간다
     this.onDataSub = this.term.onData((data) => {
       if (!this.alive) return;
       writeStdin(id, data).catch((err) => console.error("write_stdin failed", err));
@@ -233,7 +262,21 @@ export class TerminalTile {
     }
   }
 
-  /** Ctrl+V 경로: 클립보드를 읽어 xterm paste로 주입한다. 실패도 진단 로그로 남긴다 —
+  /** 선택 영역을 클립보드로 복사하고 선택을 해제한다 — 해제 덕에 곧바로 한 번 더
+   *  누르는 Ctrl+C는 SIGINT로 나간다 (Windows Terminal과 같은 동작). */
+  private async copySelection(): Promise<void> {
+    const text = this.term.getSelection();
+    if (text.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      this.term.clearSelection();
+      this.diag(`copy: ${text.length} chars`);
+    } catch (err) {
+      this.diag(`copy failed: ${String(err)}`);
+    }
+  }
+
+  /** 붙여넣기 경로: 클립보드를 읽어 xterm paste로 주입한다. 실패도 진단 로그로 남긴다 —
    *  WebView2가 clipboard-read 권한을 거부하는 환경이면 여기 로그가 그 증거가 되고,
    *  그 경우 Tauri clipboard-manager 플러그인 경로로 전환한다. */
   private async pasteFromClipboard(): Promise<void> {
