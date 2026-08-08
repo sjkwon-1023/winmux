@@ -12,8 +12,9 @@
    saturating_sub로 ack가 소실되는 래칫이 생긴다.)
 2. **WebView 리로드의 10단계 수용 수위 = "세션 생존 + 텍스트 보존"**. TUI 화면 무결
    재구성은 14단계(teardown/재구성) 게이트로 유예 — replay escape 절단(ADR-0001
-   follow-up #3)은 그때 해결한다. 단 `attach_terminal` 직후 **resize nudge**(cols-1 →
-   cols)로 SIGWINCH 재그리기 유도는 10단계에 포함.
+   follow-up #3)은 그때 해결한다. 단 `attach_terminal` 직후 **resize nudge**(rows-1 →
+   rows 2단 — 프론트는 PTY 현재 크기를 모르므로 조건 없이 항상)로 SIGWINCH 재그리기
+   유도는 10단계에 포함.
 3. **잠금 배치 확정**: `SessionManager`와 sink 채널 레지스트리는 **Dispatcher Mutex
    밖** 자체 동기화. 핫패스(write/ack/resize/attach/출력)는 Dispatcher lock을 절대
    타지 않는다. dispatch(구조 변이)만 Dispatcher lock을 쥐며, 그 안의 스폰까지 보유

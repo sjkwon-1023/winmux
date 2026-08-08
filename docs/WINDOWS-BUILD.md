@@ -1,10 +1,16 @@
 # Windows Build Guide
 
-How to set up a Windows machine to build and run `apps/spike` (Tauri v2 + xterm.js), and how
-to run the Windows-side verification. The Spike sign-off itself was completed on 2026-08-08
-(candidate A adopted — see [`docs/adr/0001`](adr/0001-adopt-tauri-webview2-xterm-stack.md));
-this guide remains the reference for building and for re-running the checks as regression
-tests during MVP work.
+How to set up a Windows machine to build and run wmux, and how to run the Windows-side
+verification. Two apps share this guide:
+
+- **`apps/wmux`** — the MVP app, active development from 계획 v2 section 17 stage 10
+  onward (section 3 below).
+- **`apps/spike`** — the Tauri v2 + xterm.js spike. Its sign-off was completed on
+  2026-08-08 (candidate A adopted — see
+  [`docs/adr/0001`](adr/0001-adopt-tauri-webview2-xterm-stack.md)); it's now **frozen as
+  a measurement harness** — no new features land there, only compiling is kept green —
+  and its build steps (section 2) and checklist (section 5) remain the reference for
+  re-running those checks as regression tests during MVP work.
 
 ## 1. Prerequisites
 
@@ -35,7 +41,7 @@ Build Tools — not the full Visual Studio IDE.
    selected:
    - **x64**: `MSVC v143 - VS 2022 C++ x64/x86 build tools` (this dev machine's target)
    - **ARM64**: `MSVC v143 - VS 2022 C++ ARM64 build tools` (only needed if you'll build for
-     ARM64 — see section 5)
+     ARM64 — see section 7)
 4. Also confirm a **Windows 10/11 SDK** component is selected (the installer usually pulls one
    in automatically with the C++ workload).
 
@@ -86,15 +92,55 @@ a plain `wmux-spike.exe` under `apps\spike\src-tauri\target\release\`. This is t
 [`scripts/win/measure.ps1`](../scripts/win/measure.ps1) expects by default (`-ProcessName
 wmux-spike`, matching `productName` in `src-tauri/tauri.conf.json`).
 
-## 3. `WMUX_DISTRO` environment variable
+## 3. Build and run `apps/wmux`
 
-The spike app spawns the WSL shell as `wsl.exe [-d $WMUX_DISTRO] -- bash -l` (see spike-plan.md
-section 4.5). `WMUX_DISTRO` selects which WSL distribution to spawn into:
+`apps/wmux` is the MVP app (계획 v2 section 17, stage 10 onward) — same Tauri v2 +
+Node/npm toolchain as `apps/spike` above, but its Rust glue drives the `wmux-core`
+`Dispatcher` over the single `Command` bus instead of spike's thin per-call commands.
+Module contracts: [`docs/plans/mvp-stage10-plan.md`](plans/mvp-stage10-plan.md).
+
+From the repo root on Windows:
+
+```powershell
+cd apps\wmux
+npm install
+```
+
+### Development (hot reload, dev console)
+
+```powershell
+npm run tauri dev
+```
+
+Same rebuild behavior as spike: Rust changes under `src-tauri/` or `crates/wmux-core`
+trigger a rebuild, frontend changes hot-reload. On boot the app itself dispatches
+`CreateWorkspace` + `CreateTab` (from Tauri `setup`, before the frontend ever attaches),
+so a terminal tab is already running when the window opens. There is no pointer/keyboard
+UI for splits/tabs yet (that lands in stages 11–13) — drive further commands from the
+WebView dev console via the dev hook `window.__wmux.dispatch(command)`. See section 6
+below for the stage 10 manual checklist that exercises this.
+
+### Distributable exe (no installer/bundle)
+
+```powershell
+npm run tauri build -- --no-bundle
+```
+
+Leaves a plain `wmux.exe` under `apps\wmux\src-tauri\target\release\` (distinct from
+spike's `wmux-spike.exe` — the two apps' binaries don't collide).
+
+## 4. `WMUX_DISTRO` environment variable
+
+Both apps spawn the WSL shell as `wsl.exe [-d $WMUX_DISTRO] -- bash -l` — spike's glue
+reads it directly per spawn (see spike-plan.md section 4.5); wmux threads it through
+`wmux-core`'s `Command::CreateWorkspace` → `ShellSpawnReq::distro` (see
+`crates/wmux-core/src/command.rs`), same underlying `wsl.exe` invocation either way.
+`WMUX_DISTRO` selects which WSL distribution to spawn into:
 
 - **Unset**: `wsl.exe` uses your default distribution (`wsl -l -v` shows which one has `*`).
 - **Set**: `wsl.exe -d <name>` targets that distribution explicitly — useful if you have more
   than one installed (e.g. a plain Ubuntu install alongside an isolated/sandboxed distro for
-  agent work) and want the Spike app to consistently target one of them regardless of which is
+  agent work) and want the app to consistently target one of them regardless of which is
   marked default.
 
 Set it for the current PowerShell session before launching the app:
@@ -106,12 +152,14 @@ npm run tauri dev
 
 or persist it for your user account (`setx WMUX_DISTRO "Ubuntu-24.04"`, new shells only).
 
-## 4. Verification
+## 5. Spike verification checklist (regression reference)
 
 The verification checklist — OSC passthrough, Claude Code/Codex behavior, IME, flow control,
 renderer comparison, RAM measurement — is [`docs/plans/spike-plan.md`](plans/spike-plan.md)
 section 6 ("Windows Spike 검증 체크리스트"). It was fully executed for the Spike sign-off
-(results in ADR-0001) and doubles as the regression checklist for MVP-era changes.
+(results in ADR-0001) and, now that `apps/spike` is frozen as a measurement harness (section
+2), doubles as the regression checklist for MVP-era changes. This runs against `apps/spike`;
+`apps/wmux`'s own stage 10 checklist is section 6 below.
 
 Scripts referenced by that checklist:
 
@@ -135,7 +183,43 @@ Scripts referenced by that checklist:
 
   No administrator privileges are required.
 
-## 5. ARM64 cross-build notes
+## 6. Stage 10 manual verification checklist
+
+Run this against `apps/wmux` (section 3) after chunk C of
+[`docs/plans/mvp-stage10-plan.md`](plans/mvp-stage10-plan.md) lands — it's that plan's
+completion gate for stage 10 (plan section 4), on top of the automated gates in
+`CLAUDE.md`. Anything that fails gets a follow-up commit; stage 10 isn't closed until all
+four pass.
+
+1. **Boot** — launching the app auto-creates a workspace and a terminal tab (the
+   dispatcher issues `CreateWorkspace` + `CreateTab` from Tauri `setup`, dogfooding the
+   same `Command` bus the UI will use later); the terminal accepts input immediately.
+2. **Reload survives** — type something with a distinguishable marker (e.g. `echo
+   RELOAD-MARK-1`), then reload the WebView (F5, or via a dev-hook-triggered reload).
+   The session and its printed text must still be there afterward — that's the stage 10
+   bar ("세션 생존 + 텍스트 보존"); pixel-perfect redraw of the TUI screen itself is out
+   of scope until stage 14 (plan section 0-2).
+3. **Dev-hook commands land** — from the WebView dev console, drive
+   `window.__wmux.dispatch(...)` with `CreateTab`, `CloseTab`, and `SplitPane` commands.
+   Each should update the `state-changed` snapshot, and closing tabs/panes must not leave
+   orphaned WSL/shell processes behind (check via Task Manager, or `ps` inside WSL).
+4. **IDs are stable across reload** — note the `Pane`/`Tab` ids from `get_state` (or the
+   dev hook's command output) before reloading, reload, and confirm they're unchanged
+   afterward.
+5. **Background tab stays free-running** — create a second terminal tab, start a long
+   noisy command in it (e.g. `seq 1000000`), switch back to the first tab (the view for
+   the second is disposed and its channel detached), wait a few seconds, then check
+   `window.__wmux` dev hook → `get_stats` (or `invoke("get_stats")`): the background
+   session must show `paused: false` and keep making progress. This exercises the
+   detach-on-dispose path (review finding: a leaked channel would accumulate unacked
+   pending until the session froze at the high-water mark).
+6. **`root_path` workspace spawns in the right directory** — dispatch
+   `createWorkspace` with a `rootPath` (absolute **Linux** path, e.g. `/home/<user>`),
+   create a terminal tab in it, and confirm `pwd` prints that path. This is the first
+   real-world use of the `wsl.exe --cd <path>` mapping (spike only ever used
+   `wsl.exe -- bash -l`); relative or Windows-style paths are not supported there.
+
+## 7. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
 (터미널-계획-v2.md section 13) is ARM64. Cross-compiling *from* this x64 Windows machine *for*

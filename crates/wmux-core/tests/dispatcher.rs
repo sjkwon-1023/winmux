@@ -6,8 +6,8 @@
 //! (fixture 파일이 기준).
 
 use serde::{Deserialize, Serialize};
-use wmux_core::command::Command;
-use wmux_core::model::AppState;
+use wmux_core::command::{Command, CommandError, CommandOutput};
+use wmux_core::model::{AppState, PaneId, TabId, WorkspaceId};
 
 fn read_fixture(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,6 +56,42 @@ fn empty_snapshot_fixture_round_trips() {
     assert_eq!(original, serde_json::to_value(&parsed).unwrap());
     assert!(parsed.state.workspaces.is_empty());
     assert_eq!(parsed.state.active_workspace, None);
+}
+
+#[test]
+fn outputs_fixture_matches_serialization() {
+    // dispatch 응답 표면(dev 훅·MCP 가 물릴 CommandOutput/CommandError JSON)도
+    // fixture 로 잠근다. 두 타입은 Serialize 전용이므로 "타입 → JSON == fixture"
+    // 단방향만 검증한다 (round-trip 불가).
+    let text = read_fixture("stage10-outputs.json");
+    let fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    // 전 CommandOutput variant 1개씩 (4종) — variant 추가 시 fixture 도 갱신할 것.
+    let outputs = vec![
+        CommandOutput::WorkspaceCreated {
+            workspace: WorkspaceId(1),
+            pane: PaneId(2),
+        },
+        CommandOutput::PaneCreated { pane: PaneId(9) },
+        CommandOutput::TabCreated {
+            tab: TabId(4),
+            session: Some(11),
+        },
+        CommandOutput::Done,
+    ];
+    // 전 CommandError variant 1개씩 (3종).
+    let errors = vec![
+        CommandError::UnknownTarget {
+            target: "pane 99".to_string(),
+        },
+        CommandError::LastPane,
+        CommandError::SpawnFailed {
+            message: "wsl.exe: program not found".to_string(),
+        },
+    ];
+
+    let expected = serde_json::json!({ "outputs": outputs, "errors": errors });
+    assert_eq!(fixture, expected);
 }
 
 #[test]

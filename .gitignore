@@ -33,4 +33,4 @@ target/
 claude-code-migration-20260808/
 
 # Tauri build artifacts
-apps/spike/src-tauri/gen/
+apps/*/src-tauri/gen/

@@ -1,0 +1,13 @@
+{
+  "outputs": [
+    { "type": "workspaceCreated", "workspace": 1, "pane": 2 },
+    { "type": "paneCreated", "pane": 9 },
+    { "type": "tabCreated", "tab": 4, "session": 11 },
+    { "type": "done" }
+  ],
+  "errors": [
+    { "type": "unknownTarget", "target": "pane 99" },
+    { "type": "lastPane" },
+    { "type": "spawnFailed", "message": "wsl.exe: program not found" }
+  ]
+}

@@ -8,15 +8,23 @@ wmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and cod
 Spike executed and verified on Windows (2026-08-08); **candidate A adopted** — see
 ADR-0001. The paste bug from ADR-0001 "Known issues" is resolved (Windows Terminal
 copy/paste convention; interception list in `apps/spike/src/terminal-tile.ts`).
-Next phase: MVP (계획 v2 section 17, stages 10–21), starting with stage 10
-(data model + command dispatcher + stable IDs).
+MVP stage 10 (data model + command dispatcher + stable IDs) is **in progress** — see
+`docs/plans/mvp-stage10-plan.md`. Chunks A (core session API redesign) and B
+(`wmux-core::model` + `wmux-core::command`) have landed; chunk C (`apps/wmux` app
+scaffold) is in progress.
 
 ## Layout
 
 - `crates/wmux-core` — pure Rust core (PTY session, flow control, OSC scanner, replay
-  buffer). No Tauri dependency; this is where unit/integration tests live.
-- `apps/spike` — Tauri v2 spike app (vanilla TS + xterm.js frontend, thin command glue
-  in `src-tauri`). Module contracts: `docs/plans/spike-plan.md` section 4.
+  buffer, and the `model`/`command` state + dispatcher). No Tauri dependency; this is
+  where unit/integration tests live.
+- `apps/wmux` — the MVP app (계획 v2 section 17, stage 10 onward): Tauri v2 + vanilla TS
+  frontend driving the `wmux-core` `Dispatcher` over a single serializable `Command` bus.
+  Module contracts: `docs/plans/mvp-stage10-plan.md`.
+- `apps/spike` — **frozen as the measurement harness** (ADR-0001 reproduction rig):
+  feature work stops here, only compiling is maintained going forward. Its checklist and
+  scripts keep serving as the MVP-era regression check (`docs/plans/spike-plan.md`
+  sections 4 and 6).
 - `scripts/wsl`, `scripts/win` — verification scripts (OSC emission, flood, RAM
   measurement).
 
@@ -28,6 +36,7 @@ cargo test -p wmux-core
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --workspace --target x86_64-pc-windows-msvc
 cd apps/spike && npm run build && npx vitest run
+cd apps/wmux && npm run build && npx vitest run
 ```
 
 - `src-tauri` cannot compile for the Linux host (no webkit2gtk) — the Windows-target

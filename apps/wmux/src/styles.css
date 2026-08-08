@@ -1,0 +1,64 @@
+/* wmux 최소 다크 테마 — 10단계는 상태 라인 + 단일 터미널 뷰만.
+   분할·탭바 UI 는 11~12단계에서 얹는다. */
+
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --bg-panel: #252526;
+  --fg: #d4d4d4;
+  --border: #3c3c3c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 상단 상태 라인 — 워크스페이스 이름·탭 수·revision 표시 */
+#status-line {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-family: monospace;
+  white-space: pre-wrap;
+}
+
+/* 뷰 영역 — 활성 탭 1개 전면 (터미널 뷰 또는 placeholder 텍스트) */
+#view {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px;
+  overflow: hidden;
+  font-size: 13px;
+  font-family: monospace;
+}
+
+/* xterm 호스트가 뷰 영역을 꽉 채우게 */
+.term-host {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.term-host .xterm {
+  height: 100%;
+}
