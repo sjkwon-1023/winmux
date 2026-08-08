@@ -13,6 +13,10 @@ import type { Command, CommandOutput, SplitDirection, SplitId } from "./types";
 /** 드래그 클램프의 pane 최소 픽셀 — 이보다 작게는 줄일 수 없다 (D2 픽셀 클램프). */
 export const MIN_PANE_PX = 80;
 
+/** 드래그 시작값과 이 폭 미만 차이면 dispatch 를 생략한다 — 제자리 드래그가
+ *  무변경 revision 을 만드는 잡음 방지 (리뷰 메모). */
+export const RATIO_NOOP_EPS = 0.001;
+
 /** 드래그 활성 SplitId 집합의 등록/해제 — workspace-view 가 소유한다. */
 export interface DragGuard {
   begin(id: SplitId): void;
@@ -38,6 +42,9 @@ export class Splitter {
   readonly handle: HTMLDivElement;
   private dragging = false;
   private lastRatio: number | null = null;
+  /** 드래그 시작 시점의 ratio — pointerup 의 no-op 판정 기준. 모델 값을 직접
+   *  받지 않으므로 현재 flex-grow 쌍(applyRatio 가 설정)에서 역산한다. */
+  private startRatio: number | null = null;
   private disposed = false;
 
   constructor(private readonly opts: SplitterOptions) {
@@ -57,6 +64,10 @@ export class Splitter {
     this.handle.setPointerCapture(ev.pointerId);
     this.dragging = true;
     this.lastRatio = null;
+    const g1 = Number.parseFloat(this.opts.first.style.flexGrow);
+    const g2 = Number.parseFloat(this.opts.second.style.flexGrow);
+    this.startRatio =
+      Number.isFinite(g1) && Number.isFinite(g2) && g1 + g2 > 0 ? g1 / (g1 + g2) : null;
     this.opts.guard.begin(this.opts.splitId);
   }
 
@@ -81,8 +92,16 @@ export class Splitter {
     this.dragging = false;
     this.opts.guard.end(this.opts.splitId);
     const ratio = this.lastRatio;
+    const startRatio = this.startRatio;
     this.lastRatio = null;
+    this.startRatio = null;
     if (ratio === null) return; // 이동 없는 클릭 — 프리뷰도 dispatch 도 없었다
+    if (startRatio !== null && Math.abs(ratio - startRatio) < RATIO_NOOP_EPS) {
+      // 제자리 드래그 — dispatch 생략(무변경 revision 잡음 방지)하고 서브-eps
+      // 프리뷰 잔재만 모델 값으로 되돌린다.
+      this.opts.restore();
+      return;
+    }
     void this.opts
       .dispatch({ type: "resizeSplit", split: this.opts.splitId, ratio })
       .then((out) => {
@@ -96,6 +115,7 @@ export class Splitter {
     if (!this.dragging) return;
     this.dragging = false;
     this.lastRatio = null;
+    this.startRatio = null;
     this.opts.guard.end(this.opts.splitId);
     this.opts.restore(); // 적용된 프리뷰 잔재를 모델 값으로 되돌린다
   }

@@ -1,17 +1,25 @@
-// pane 1개의 뷰 — 헤더(탭 생성·분할 아이콘) + 콘텐츠 영역 (11단계 청크 B).
+// pane 1개의 뷰 — 헤더(탭바 + 탭 생성·분할 아이콘) + keep-alive 콘텐츠 영역
+// (12단계 청크 C).
 //
-// [임시 구조 — 12단계(청크 C)에서 교체 예정] 콘텐츠 렌더는 10단계 main.ts 의
-// 단일 뷰 로직을 pane 단위로 일반화한 것이다: 활성 탭 1개만 TerminalView 로
-// 렌더하고 탭/세션이 바뀌면 dispose 후 재생성한다. 탭별 keep-alive(뷰 Map +
-// display:none 유지, 계획 D3)·탭바·pane 당 ResizeObserver 1개(D7)는 다음 청크가
-// 이 파일을 교체하며 얹는다.
+// 콘텐츠는 keep-alive 다 (계획 D3): 탭별 TerminalView 는 앱 수준 레지스트리
+// (workspace-view 소유 Map<TabId, TerminalView>)가 소유하고, 여기서는 ViewRegistry
+// 를 통해 얻어 setVisible(display 토글)로 전환만 한다 — 탭 전환에 dispose/재생성·
+// replay 왕복이 없다. 어떤 탭이 보일지는 view-reconcile(planViewSync)의 visible
+// 판정을 workspace-view 가 pane 별로 내려준다 (판정 로직 단일화). 뷰 생성(lazy
+// attach)은 첫 가시화 때 ensure 로 일어난다.
+//
+// fit 은 pane 당 ResizeObserver 1개(콘텐츠 영역 관찰 — 계획 D7)가 표시 중인 뷰의
+// scheduleFit 만 부른다. 뷰당 observer 는 없다 (terminal-view 참조).
 //
 // 클릭 포커스(계획 1-B): 컨테이너 mousedown 을 capture 단계에서 받아 비활성
 // pane 이면 FocusPane 을 dispatch 한다. preventDefault 는 하지 않는다 — xterm 의
 // 포커스·선택 처리를 강탈하면 안 되기 때문이다. DOM 포커스는 그대로 흘러가고
 // 모델의 active_pane 만 따라온다.
 
-import { TerminalView } from "./terminal-view";
+import { tabStripModel } from "./tab-strip-model";
+import type { TabButtonModel } from "./tab-strip-model";
+import type { TerminalView } from "./terminal-view";
+import type { VisibleView } from "./view-reconcile";
 import type {
   Command,
   CommandOutput,
@@ -19,6 +27,7 @@ import type {
   PaneId,
   SessionId,
   Tab,
+  TabId,
   TabKind,
 } from "./types";
 
@@ -26,19 +35,26 @@ import type {
  *  null 로 돌아온다 (reject 하지 않는다). */
 type DispatchFn = (cmd: Command) => Promise<CommandOutput | null>;
 
-/** 터미널 뷰를 붙일 세션 — terminal 탭이고 ptySession 이 있을 때만. */
-function sessionOf(tab: Tab | null): SessionId | null {
-  if (tab === null || tab.kind.type !== "terminal") return null;
-  return tab.kind.ptySession;
+/** keep-alive 뷰 레지스트리 접근 계약 — 소유자는 workspace-view 다.
+ *  ensure 는 없으면 생성 + attach 시작(lazy)하고, attach 실패 시 뷰를 정리한 뒤
+ *  onAttachError 로 알린다 (호출한 pane 이 placeholder 에 에러를 노출한다). */
+export interface ViewRegistry {
+  get(tab: TabId): TerminalView | undefined;
+  ensure(
+    tab: TabId,
+    session: SessionId,
+    parent: HTMLElement,
+    onAttachError: (message: string) => void,
+  ): TerminalView;
 }
 
-/** 콘텐츠 영역 placeholder 텍스트 (터미널 뷰가 없는 경우 — 영어 UI 텍스트). */
+/** 콘텐츠 placeholder 텍스트 (터미널 뷰가 없는 경우 — 영어 UI 텍스트). */
 function placeholderText(tab: Tab | null): string {
-  if (tab === null) return "(no tabs — use the header buttons)";
+  if (tab === null) return "no tabs — press + to open a new terminal tab";
   const kind: TabKind = tab.kind;
   switch (kind.type) {
     case "terminal":
-      // sessionOf 가 null 을 준 경우 — ptySession 없는 terminal 탭.
+      // ptySession 없는 terminal 탭 — visible 판정에서 제외된 경우.
       return "(terminal tab without pty session)";
     case "folderBrowser":
       return `folderBrowser: ${kind.path} (viewer lands in stage 21)`;
@@ -52,29 +68,50 @@ function placeholderText(tab: Tab | null): string {
 export class PaneView {
   readonly root: HTMLDivElement;
   private readonly contentEl: HTMLDivElement;
-  private view: TerminalView | null = null;
-  private viewSession: SessionId | null = null;
+  private readonly tabStripEl: HTMLDivElement;
+  private readonly placeholderEl: HTMLDivElement;
+  private readonly resizeObserver: ResizeObserver;
   private isActive = false;
+  private shown: TabId | null = null;
 
   constructor(
     readonly paneId: PaneId,
     private readonly dispatch: DispatchFn,
+    private readonly views: ViewRegistry,
   ) {
     this.root = document.createElement("div");
     this.root.className = "pane";
 
     this.contentEl = document.createElement("div");
     this.contentEl.className = "pane-content";
+    this.placeholderEl = document.createElement("div");
+    this.placeholderEl.className = "pane-placeholder";
+    this.contentEl.append(this.placeholderEl);
+
+    this.tabStripEl = document.createElement("div");
+    this.tabStripEl.className = "pane-tabs";
     this.root.append(this.buildHeader(), this.contentEl);
 
     this.root.addEventListener(
       "mousedown",
       () => {
         // 비활성 pane 클릭 → 모델 포커스 이동. preventDefault 금지 (파일 상단).
+        // 탭 클릭도 이 경로가 FocusPane 을 담당한다 (onTabClick 주석 참조).
         if (!this.isActive) void this.dispatch({ type: "focusPane", pane: this.paneId });
       },
       { capture: true },
     );
+
+    // pane 당 observer 1개 (D7) — 표시 중인 뷰에만 fit 을 전달한다.
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.shown !== null) this.views.get(this.shown)?.scheduleFit();
+    });
+    this.resizeObserver.observe(this.contentEl);
+  }
+
+  /** 현재 표시 중인 탭 — workspace-view 의 focus 보상 경로가 조회한다. */
+  get shownTab(): TabId | null {
+    return this.shown;
   }
 
   private buildHeader(): HTMLElement {
@@ -85,6 +122,7 @@ export class PaneView {
     browser.disabled = true;
 
     header.append(
+      this.tabStripEl,
       this.iconButton("+", "New terminal tab", () => ({
         type: "createTab",
         pane: this.paneId,
@@ -126,49 +164,111 @@ export class PaneView {
     return btn;
   }
 
-  /** 스냅샷 반영 — 활성 테두리 토글 + 콘텐츠(활성 탭 1개) 갱신.
-   *  같은 세션이면 뷰를 유지한다 — revision 마다 재attach 하면 replay 왕복·
-   *  화면 리셋이 반복된다 (10단계 main.ts 로직 승계). */
-  update(pane: Pane, active: boolean): void {
+  /** 스냅샷 반영 — 활성 테두리·탭바 갱신 + keep-alive 뷰 가시성 전환.
+   *  visible 은 planViewSync 가 이 pane 에 대해 판정한 항목(없으면 null)이다. */
+  update(pane: Pane, active: boolean, visible: VisibleView | null): void {
     this.isActive = active;
     this.root.classList.toggle("active", active);
+    this.renderTabStrip(pane);
 
-    const tab = pane.tabs.find((t) => t.id === pane.activeTab) ?? null;
-    const session = sessionOf(tab);
-    if (session === this.viewSession) {
-      if (this.view === null) this.contentEl.textContent = placeholderText(tab);
-      return;
+    if (visible !== null) {
+      // 첫 가시화 때 lazy attach — 이미 있으면 레지스트리의 기존 뷰 그대로.
+      this.views.ensure(visible.tab, visible.session, this.contentEl, (message) =>
+        this.showAttachError(visible.tab, message),
+      );
+      this.shown = visible.tab;
+    } else {
+      this.shown = null;
     }
 
-    this.view?.dispose();
-    this.view = null;
-    this.viewSession = session;
-    this.contentEl.replaceChildren(); // placeholder 텍스트·뷰 잔재 제거
-
-    if (session === null) {
-      this.contentEl.textContent = placeholderText(tab);
-      return;
+    // 이 pane 탭들의 keep-alive 뷰 가시성 동기화 — 표시 1개, 나머지 숨김.
+    for (const tab of pane.tabs) {
+      this.views.get(tab.id)?.setVisible(tab.id === this.shown);
     }
 
-    const view = new TerminalView(this.contentEl, session);
-    this.view = view;
-    view.attach().catch((err) => {
-      // attach 실패는 가리지 않는다 — 뷰를 정리하고 에러를 화면에 노출.
-      console.error("attach_terminal failed", err);
-      if (this.view !== view) return; // 이미 다른 뷰로 전환됨
-      view.dispose();
-      this.view = null;
-      this.viewSession = null;
-      this.contentEl.textContent = `attach failed (session ${session}): ${String(err)}`;
-    });
+    if (this.shown === null) {
+      const tab = pane.tabs.find((t) => t.id === pane.activeTab) ?? null;
+      this.placeholderEl.textContent = placeholderText(tab);
+      this.placeholderEl.style.display = ""; // 스타일시트의 flex 복원
+    } else {
+      this.placeholderEl.style.display = "none";
+    }
   }
 
-  /** pane 뷰 해제 — 터미널 뷰 dispose(채널 detach 포함) + DOM 제거.
-   *  세션 수명은 dispatcher 소유 — 여기서 세션을 죽이지 않는다. */
+  private renderTabStrip(pane: Pane): void {
+    this.tabStripEl.replaceChildren(...tabStripModel(pane).map((m) => this.tabButton(m)));
+  }
+
+  private tabButton(model: TabButtonModel): HTMLElement {
+    // 컨테이너는 div — X 가 <button> 이라 버튼 중첩을 피한다.
+    const el = document.createElement("div");
+    el.className = "tab";
+    if (model.active) el.classList.add("active");
+    if (model.exited) el.classList.add("exited");
+    el.title = model.title; // 잘린 제목의 툴팁
+
+    const title = document.createElement("span");
+    title.className = "tab-title";
+    title.textContent = model.title;
+    el.append(title);
+
+    if (model.notification) {
+      const dot = document.createElement("span");
+      dot.className = "tab-dot";
+      dot.textContent = "●";
+      el.append(dot);
+    }
+    if (model.exited) {
+      const badge = document.createElement("span");
+      badge.className = "tab-exited";
+      badge.textContent = "exited";
+      el.append(badge);
+    }
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "tab-close";
+    close.textContent = "×";
+    close.title = "Close tab";
+    close.addEventListener("click", (ev) => {
+      ev.stopPropagation(); // 탭 활성화 클릭과 분리
+      void this.dispatch({ type: "closeTab", tab: model.tab });
+    });
+    el.append(close);
+
+    el.addEventListener("click", () => this.onTabClick(model));
+    return el;
+  }
+
+  /** 탭 클릭 처리. 비활성 pane 의 FocusPane 은 root 의 mousedown capture 가
+   *  같은 제스처(mousedown → click 순서)에서 이미 dispatch 했다 — 여기서 또
+   *  보내면 무변경 revision 잡음이 된다. */
+  private onTabClick(model: TabButtonModel): void {
+    if (!model.active) {
+      // ActivateTab 성공 시의 뷰 focus 는 main.dispatchUI 의 보상 경로가
+      // requestFocus 로 처리한다 (계획 D7).
+      void this.dispatch({ type: "activateTab", tab: model.tab });
+      return;
+    }
+    // 이미 active 탭: dispatch 없이(no-op 스킵) 뷰 focus 만. pane 이 비활성인
+    // 경우는 mousedown 의 FocusPane 성공 보상이 focus 를 처리한다.
+    if (this.isActive) this.views.get(model.tab)?.focus();
+  }
+
+  /** attach 실패 노출 — 레지스트리(ensure)가 뷰를 정리한 뒤 부른다. 실패한 탭이
+   *  아직 표시 대상이면 placeholder 에 에러를 띄운다 (다음 스냅샷 렌더가 재시도). */
+  private showAttachError(tab: TabId, message: string): void {
+    if (this.shown !== tab) return;
+    this.shown = null;
+    this.placeholderEl.textContent = message;
+    this.placeholderEl.style.display = "";
+  }
+
+  /** pane 뷰 해제 — observer·DOM 만 정리한다. 터미널 뷰는 레지스트리 소유라
+   *  여기서 dispose 하지 않는다 — pane 이 닫히면 그 탭들이 스냅샷에서 사라져
+   *  view-reconcile 의 dispose 목록으로 정리된다 (계획 D3). */
   dispose(): void {
-    this.view?.dispose();
-    this.view = null;
-    this.viewSession = null;
+    this.resizeObserver.disconnect();
     this.root.remove();
   }
 }

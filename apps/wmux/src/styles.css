@@ -1,13 +1,15 @@
-/* wmux 최소 다크 테마 — 상태 라인 + 활성 워크스페이스 split tree (11단계).
-   탭바 스타일은 12단계에서 얹는다. */
+/* wmux 최소 다크 테마 — 상태 라인 + 활성 워크스페이스 split tree (11단계)
+   + pane 탭바·배지·placeholder (12단계). */
 
 :root {
   color-scheme: dark;
   --bg: #1e1e1e;
   --bg-panel: #252526;
   --fg: #d4d4d4;
+  --fg-muted: #8a8a8a;
   --border: #3c3c3c;
   --accent: #007acc;
+  --error: #f48771;
 }
 
 * {
@@ -145,6 +147,82 @@ body {
   cursor: default;
 }
 
+/* ── 탭바 (12단계) ─────────────────────────────────────────────────── */
+
+.pane-tabs {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden; /* 넘치는 탭은 잘린다 — 스크롤 UX 는 후속 단계 */
+}
+
+.tab {
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 180px;
+  padding: 1px 2px 1px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tab:hover {
+  background: var(--border);
+}
+
+.tab.active {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab.exited .tab-title {
+  opacity: 0.6;
+}
+
+/* 미확인 알림 dot */
+.tab-dot {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 7px;
+}
+
+/* Exited 배지 — 세션이 끝난 terminal 탭 (replay 만 표시 중) */
+.tab-exited {
+  flex: 0 0 auto;
+  padding: 0 3px;
+  border: 1px solid var(--error);
+  border-radius: 3px;
+  color: var(--error);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.pane-header .tab-close {
+  width: 16px;
+  height: 16px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.pane-header .tab-close:hover {
+  color: var(--fg);
+  background: var(--bg-panel);
+}
+
 .pane-content {
   flex: 1 1 auto;
   min-width: 0;
@@ -153,6 +231,18 @@ body {
   padding: 2px;
   font-size: 13px;
   font-family: monospace;
+}
+
+/* 빈 pane / 뷰 없는 탭 안내 — 표시 여부는 pane-view 가 inline display 로 토글 */
+.pane-placeholder {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 /* xterm 호스트가 pane 콘텐츠를 꽉 채우게 */

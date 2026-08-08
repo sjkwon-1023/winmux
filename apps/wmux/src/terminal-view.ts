@@ -1,4 +1,12 @@
-// 터미널 뷰 — 기존 PTY 세션에 attach 하는 xterm 1개 (10단계: 활성 탭 1개 전면 렌더).
+// 터미널 뷰 — 기존 PTY 세션에 attach 하는 xterm 1개 (12단계: 탭별 keep-alive).
+//
+// keep-alive 수명 (계획 D3·D7): 뷰는 탭 단위 앱 수준 레지스트리(workspace-view 의
+// Map<TabId, TerminalView>)가 소유하고, 탭 전환은 dispose 가 아니라 setVisible
+// (display 토글)로 처리한다 — 숨은 뷰도 채널을 유지하며 계속 ack 한다 (xterm 은
+// IntersectionObserver 로 렌더만 멈추고, 재표시 시 full refresh 한다). fit 은 뷰당
+// ResizeObserver 대신 pane 당 1개(pane-view 소유)가 표시 중인 뷰의 scheduleFit
+// 을 부른다. attach 말미 자동 focus 는 제거됐다 — 보상 경로(부트 리컨실·생성/
+// 활성화 성공 직후)는 workspace-view 의 pendingFocus 가 담당한다.
 //
 // attach 프로토콜 (계약은 코어 session.rs `PtySession::reattach` rustdoc):
 //   1) Channel 을 **attach_terminal 호출 전에** 만들어 onmessage 큐잉을 시작한다
@@ -41,11 +49,15 @@ export class TerminalView {
   private readonly fitAddon: FitAddon;
   private readonly gate = new AttachGate();
   private readonly batcher: AckBatcher;
-  private readonly resizeObserver: ResizeObserver;
   private onDataSub: IDisposable | null = null;
   private onResizeSub: IDisposable | null = null;
   private disposed = false;
   private fitScheduled = false;
+  private visible = true;
+  private opened = false;
+  /** attach(term.open) 전에 focus() 가 요청된 경우의 보류 플래그 —
+   *  textarea 가 아직 없어 term.focus() 가 조용히 무시되기 때문이다. */
+  private focusPending = false;
 
   constructor(
     parent: HTMLElement,
@@ -67,22 +79,44 @@ export class TerminalView {
     this.batcher = new AckBatcher((n) => {
       this.sendAck(n);
     });
+  }
 
-    this.resizeObserver = new ResizeObserver(() => {
-      // 연쇄 리사이즈를 프레임당 1회 fit 으로 합친다.
-      if (this.fitScheduled) return;
-      this.fitScheduled = true;
-      requestAnimationFrame(() => {
-        this.fitScheduled = false;
-        if (!this.disposed) this.fit();
-      });
+  /** keep-alive 가시성 토글 — display 만 바꾼다 (채널·ack 은 계속 돈다).
+   *  숨김→표시 전환 시에만 scheduleFit: 숨어 있는 동안 fit 이 크기 0 가드로
+   *  스킵돼 stale 해진 dims 를 여기서 따라잡는다. */
+  setVisible(v: boolean): void {
+    if (this.visible === v) return;
+    this.visible = v;
+    this.root.style.display = v ? "" : "none";
+    if (v) this.scheduleFit();
+  }
+
+  /** fit 요청 — rAF 로 프레임당 1회로 코얼레싱한다. 호출자는 pane-view 의
+   *  ResizeObserver(pane 당 1개 — 계획 D7)와 setVisible 전환이다. */
+  scheduleFit(): void {
+    if (this.fitScheduled) return;
+    this.fitScheduled = true;
+    requestAnimationFrame(() => {
+      this.fitScheduled = false;
+      if (!this.disposed) this.fit();
     });
+  }
+
+  /** 명시적 focus (D7 보상 경로 전용 — attach 자동 focus 는 없다).
+   *  term.open 전이면 보류했다가 attach 가 open 직후 적용한다. */
+  focus(): void {
+    if (!this.opened) {
+      this.focusPending = true;
+      return;
+    }
+    this.term.focus();
   }
 
   /** attach 수행 — 생성 직후 정확히 1회 호출한다. 실패는 그대로 reject 로
    *  올린다 (호출자가 뷰를 정리하고 에러를 노출한다 — 가리지 않는다). */
   async attach(): Promise<void> {
     this.term.open(this.root);
+    this.opened = true;
     // 초기 fit — 여기서 잡힌 실측 cols/rows 를 아래 resize nudge 에 쓴다.
     this.fit();
     this.installCopyPasteKeys();
@@ -110,7 +144,6 @@ export class TerminalView {
         console.error("resize failed", err),
       );
     });
-    this.resizeObserver.observe(this.root);
 
     // 4) resize nudge — SIGWINCH 재그리기 유도 (계획 0-2). 프론트는 PTY 의 현재
     //    크기를 모른다: 신규 스폰(80×24)이든 F5 리로드(직전 attach 의 실측 크기
@@ -127,10 +160,15 @@ export class TerminalView {
       console.error("resize nudge failed", err);
     }
 
-    this.term.focus();
+    // 자동 focus 없음 (D7) — attach 전에 focus() 가 요청된 경우만 여기서 적용한다.
+    // 숨은 상태로 attach 가 끝났으면 focus 는 버린다 (사용자가 이미 떠났다).
+    if (this.focusPending) {
+      this.focusPending = false;
+      if (this.visible) this.term.focus();
+    }
   }
 
-  /** 뷰 해제 — 옵저버·구독·xterm·배처를 정리한다. 세션은 죽이지 않는다
+  /** 뷰 해제 — 구독·xterm·배처를 정리한다. 세션은 죽이지 않는다
    *  (세션 수명은 dispatcher 소유 — 파일 상단 주석 참조). */
   dispose(): void {
     if (this.disposed) return;
@@ -138,12 +176,16 @@ export class TerminalView {
     // 백엔드 채널 슬롯도 분리한다 — 채널을 남겨두면 이후 출력이 Delivered 인데
     // ack 는 없는 상태로 pending 이 쌓여 백그라운드 세션이 paused 에 고착된다
     // (리뷰 finding). 분리 후 출력은 Dropped(detach 모드)로 보상 롤백되며 replay
-    // 에만 쌓인다. 분리 전 in-flight 잔여 chunk 몇 개의 pending 은 high_water 에
-    // 한참 못 미치고 다음 attach 의 flow reset 으로 정리된다.
+    // 에만 쌓인다. keep-alive 에서 dispose 는 탭이 스냅샷에서 사라졌을 때
+    // (view-reconcile 의 dispose 목록)와 워크스페이스 이탈 시에만 호출된다 —
+    // 탭 전환은 setVisible 로 처리되므로 "dispose 직후 같은 세션 재-attach"
+    // (stale detach 가 새 attach 를 밟는 경합) 표면은 사실상 사라졌다. 남는
+    // 유일한 재-attach 경로는 워크스페이스 복귀인데, 그때도 invoke 는 발행 순서
+    // (detach 먼저 → 이후 렌더의 attach)로 처리되고 reattach 의 flow reset 이
+    // 잔여를 정리한다.
     void detachTerminal(this.session).catch((err) =>
       console.error("detach_terminal failed", err),
     );
-    this.resizeObserver.disconnect();
     this.onDataSub?.dispose();
     this.onDataSub = null;
     this.onResizeSub?.dispose();
