@@ -69,7 +69,8 @@ pub trait SessionSink: Send + 'static {
     /// 상태에서 프론트가 사라지면(ack 두절) 리더는 read 자체를 안 하므로 Dropped
     /// 경로가 실행되지 않고 휴면이 지속되며, (b) Dropped 전환 시점의 잔여 pending
     /// 이 low_water 를 웃돌면 롤백 후에도 paused 가 남는다. 두 경우 모두
-    /// `reattach()`(flow reset) 또는 `kill()` 이 회복 경로다.
+    /// `reset_flow()`(detach 시점 자동 치유 — 계획 D4)·`reattach()`(flow reset
+    /// 포함) 또는 `kill()` 이 회복 경로다.
     fn on_output(&self, offset: u64, bytes: &[u8]) -> Delivery;
     /// 감지된 OSC 이벤트. 같은 chunk 의 `on_output` 보다 먼저 호출된다.
     fn on_osc(&self, event: &OscEvent);
@@ -245,9 +246,30 @@ impl PtySession {
         }
     }
 
+    /// flow 계정 리셋(pending = 0, paused = false) + paused 로 대기 중인 리더
+    /// wake — **detach 자동 치유 경로** (11~12단계 계획 D4).
+    ///
+    /// detach(채널 분리)만으로는 자유 진행이 보장되지 않는다: **이미 paused 인
+    /// 상태에서 채널이 죽으면**(F5 리로드 등 — dispose 를 타지 않는 소멸) 리더는
+    /// condvar 대기 중이라 read 자체를 하지 않고, 따라서 `Dropped` 보상 롤백
+    /// 경로가 실행되지 않아 세션이 paused 에 고착된다 (`SessionSink::on_output`
+    /// rustdoc 의 (a)·(b) 케이스). detach 시점에 이 함수를 호출하면 detach 된
+    /// 세션은 어떤 경로로든 paused 에 남지 않는다.
+    ///
+    /// 리셋 후 구채널의 잔여 ack 이 늦게 도착해도 saturating 으로 무해하다
+    /// (`FlowControl::reset` rustdoc). [`reattach`](Self::reattach) 는 이 리셋에
+    /// replay 스냅샷 확정까지 **한 lock 안에서** 묶은 상위 경로다 — 스냅샷 일관성
+    /// 계약 때문에 이 함수를 재사용하지 못하고 lock 구간을 따로 가진다.
+    pub fn reset_flow(&self) {
+        self.shared.inner.lock().unwrap().flow.reset();
+        // lock 을 놓은 뒤 notify — paused 로 대기하던 리더가 즉시 재개된다.
+        self.shared.cond.notify_all();
+    }
+
     /// 프론트 재접속 — 한 lock 안에서 flow 계정 리셋 + replay 스냅샷 + 스냅샷 끝
     /// 오프셋(= 현재 `bytes_out`)을 일관되게 확정해 반환하고, lock 해제 후
-    /// paused 로 대기 중이던 리더를 깨운다.
+    /// paused 로 대기 중이던 리더를 깨운다. (flow 리셋만 필요한 detach 치유는
+    /// [`reset_flow`](Self::reset_flow) — 스냅샷 없는 하위 경로.)
     ///
     /// 반환 `(end_offset, replay_bytes)`: `replay_bytes` 는 replay buffer 의 최근
     /// 출력으로, 스트림 오프셋 구간 `[end_offset - len, end_offset)` 에 해당한다.

@@ -6,10 +6,10 @@
 //!
 //! # 안정 ID
 //!
-//! [`WorkspaceId`]/[`PaneId`]/[`TabId`] 는 `AppState::next_id` **단일 u64 카운터**에서
-//! 발급되는 세션 내 안정 ID 다 (persistence 15단계·MCP v2 의 참조 대상). PTY 의
-//! 휘발성 [`SessionId`](crate::session::SessionId)(u32 alias)와는 newtype 으로
-//! 타입 수준에서 구분된다.
+//! [`WorkspaceId`]/[`PaneId`]/[`TabId`]/[`SplitId`] 는 `AppState::next_id` **단일
+//! u64 카운터**에서 발급되는 세션 내 안정 ID 다 (persistence 15단계·MCP v2 의
+//! 참조 대상). PTY 의 휘발성 [`SessionId`](crate::session::SessionId)(u32 alias)
+//! 와는 newtype 으로 타입 수준에서 구분된다.
 //!
 //! # 직렬화 계약
 //!
@@ -35,6 +35,12 @@ pub struct PaneId(pub u64);
 /// 탭의 안정 ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TabId(pub u64);
+
+/// split 노드의 안정 ID — ResizeSplit 등 커맨드의 대상 지정에 쓰인다. 경로
+/// 인덱스 주소는 트리 변이 후 다른 노드를 조용히 가리킬 수 있어(silent
+/// misdirection) 배제했다 (11~12단계 계획 D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SplitId(pub u64);
 
 /// 앱 전체 상태의 루트. 소유자는 Rust 쪽 dispatcher — 프론트는 스냅샷 뷰만 받는다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,6 +114,7 @@ impl Workspace {
     /// 상태 불변식 검사 (debug 빌드 전용).
     ///
     /// - layout 의 leaf 집합 == `panes` 키 집합 (중복 leaf 도 불허)
+    /// - layout 의 split id 는 트리 전체에서 유일
     /// - `active_pane` 은 `panes` 에 존재
     /// - 각 pane 의 `active_tab` 은 그 pane 의 `tabs` 에 존재
     pub fn debug_assert_invariants(&self) {
@@ -119,6 +126,15 @@ impl Workspace {
                 leaf_list.len(),
                 leaf_set.len(),
                 "workspace {:?}: layout 에 중복 leaf",
+                self.id
+            );
+            let split_list = self.layout.split_ids();
+            let split_set: std::collections::BTreeSet<SplitId> =
+                split_list.iter().copied().collect();
+            debug_assert_eq!(
+                split_list.len(),
+                split_set.len(),
+                "workspace {:?}: layout 에 중복 split id",
                 self.id
             );
             let key_set: std::collections::BTreeSet<PaneId> = self.panes.keys().copied().collect();
@@ -185,8 +201,11 @@ pub enum SplitTree {
     Leaf { pane: PaneId },
     #[serde(rename_all = "camelCase")]
     Split {
+        /// split 노드의 안정 ID — ResizeSplit 의 대상 주소 (계획 D1).
+        id: SplitId,
         direction: SplitDirection,
-        /// first 가 차지하는 비율 (0.0~1.0). 기본 0.5, resize 는 12단계.
+        /// first 가 차지하는 비율 (0.0~1.0 개구간). 생성 시 0.5, 이후
+        /// ResizeSplit 커맨드로 변경된다.
         /// f64 인 이유: JSON/TS 의 수 표현이 f64 라, f32 는 0.3 같은 값의
         /// 왕복에서 미세 변형을 일으켜 fixture 동등성·persistence 안정성을 깬다.
         ratio: f64,
@@ -197,12 +216,20 @@ pub enum SplitTree {
 
 impl SplitTree {
     /// `target` leaf 를 `Split` 로 치환한다. 기존 pane 이 `first`(좌/상),
-    /// 새 pane 이 `second`(우/하)로 들어가며 ratio 는 0.5.
+    /// 새 pane 이 `second`(우/하)로 들어가며 ratio 는 0.5. 새 split 노드의 id 는
+    /// 호출자가 발급해 주입한다 (트리는 allocator 접근이 없다 — 계획 D1).
     /// `target` 이 tree 에 없으면 false 를 반환하고 변경 없음.
-    pub fn split(&mut self, target: PaneId, direction: SplitDirection, new_pane: PaneId) -> bool {
+    pub fn split(
+        &mut self,
+        target: PaneId,
+        direction: SplitDirection,
+        new_pane: PaneId,
+        split_id: SplitId,
+    ) -> bool {
         match self {
             SplitTree::Leaf { pane } if *pane == target => {
                 *self = SplitTree::Split {
+                    id: split_id,
                     direction,
                     ratio: 0.5,
                     first: Box::new(SplitTree::Leaf { pane: target }),
@@ -212,8 +239,30 @@ impl SplitTree {
             }
             SplitTree::Leaf { .. } => false,
             SplitTree::Split { first, second, .. } => {
-                first.split(target, direction, new_pane)
-                    || second.split(target, direction, new_pane)
+                first.split(target, direction, new_pane, split_id)
+                    || second.split(target, direction, new_pane, split_id)
+            }
+        }
+    }
+
+    /// `target` split 노드의 ratio 를 갱신한다. 값 검증(개구간·finite)은
+    /// 호출자(ResizeSplit 핸들러) 책임이다. 없으면 false, 변경 없음.
+    pub fn set_ratio(&mut self, target: SplitId, ratio: f64) -> bool {
+        match self {
+            SplitTree::Leaf { .. } => false,
+            SplitTree::Split {
+                id,
+                ratio: r,
+                first,
+                second,
+                ..
+            } => {
+                if *id == target {
+                    *r = ratio;
+                    true
+                } else {
+                    first.set_ratio(target, ratio) || second.set_ratio(target, ratio)
+                }
             }
         }
     }
@@ -257,6 +306,26 @@ impl SplitTree {
         }
     }
 
+    /// split 노드 id 들을 전위(pre-order) 순으로 나열한다 (불변식 검사용).
+    pub fn split_ids(&self) -> Vec<SplitId> {
+        let mut out = Vec::new();
+        self.collect_split_ids(&mut out);
+        out
+    }
+
+    fn collect_split_ids(&self, out: &mut Vec<SplitId>) {
+        match self {
+            SplitTree::Leaf { .. } => {}
+            SplitTree::Split {
+                id, first, second, ..
+            } => {
+                out.push(*id);
+                first.collect_split_ids(out);
+                second.collect_split_ids(out);
+            }
+        }
+    }
+
     /// `pane` 이 leaf 로 존재하는지.
     pub fn contains(&self, pane: PaneId) -> bool {
         match self {
@@ -266,8 +335,9 @@ impl SplitTree {
     }
 }
 
-/// pane(= TabContainer). 탭이 0개인 빈 pane 도 허용된다 — 10단계 임시 상태이며
-/// 12단계 pane 정리 규칙에서 재결정한다 (10단계 계획 1장).
+/// pane(= TabContainer). 탭이 0개인 빈 pane 은 **워크스페이스의 마지막 pane**
+/// 에서만 남는다 — 그 외의 pane 은 마지막 탭이 닫히면 CloseTab auto-collapse 로
+/// 제거된다 (11~12단계 계획 D6, `Command::CloseTab` rustdoc 참조).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pane {
@@ -332,8 +402,9 @@ mod tests {
         SplitTree::Leaf { pane: PaneId(id) }
     }
 
-    fn split(direction: SplitDirection, first: SplitTree, second: SplitTree) -> SplitTree {
+    fn split(id: u64, direction: SplitDirection, first: SplitTree, second: SplitTree) -> SplitTree {
         SplitTree::Split {
+            id: SplitId(id),
             direction,
             ratio: 0.5,
             first: Box::new(first),
@@ -344,51 +415,95 @@ mod tests {
     #[test]
     fn split_replaces_leaf_with_split() {
         let mut tree = leaf(1);
-        assert!(tree.split(PaneId(1), SplitDirection::Horizontal, PaneId(2)));
-        assert_eq!(tree, split(SplitDirection::Horizontal, leaf(1), leaf(2)));
-    }
-
-    #[test]
-    fn split_nested_targets_inner_leaf() {
-        let mut tree = split(SplitDirection::Horizontal, leaf(1), leaf(2));
-        assert!(tree.split(PaneId(2), SplitDirection::Vertical, PaneId(3)));
+        assert!(tree.split(
+            PaneId(1),
+            SplitDirection::Horizontal,
+            PaneId(2),
+            SplitId(10)
+        ));
         assert_eq!(
             tree,
-            split(
-                SplitDirection::Horizontal,
-                leaf(1),
-                split(SplitDirection::Vertical, leaf(2), leaf(3)),
-            )
+            split(10, SplitDirection::Horizontal, leaf(1), leaf(2))
         );
     }
 
     #[test]
+    fn split_nested_targets_inner_leaf() {
+        let mut tree = split(10, SplitDirection::Horizontal, leaf(1), leaf(2));
+        assert!(tree.split(PaneId(2), SplitDirection::Vertical, PaneId(3), SplitId(11)));
+        assert_eq!(
+            tree,
+            split(
+                10,
+                SplitDirection::Horizontal,
+                leaf(1),
+                split(11, SplitDirection::Vertical, leaf(2), leaf(3)),
+            )
+        );
+        assert_eq!(tree.split_ids(), vec![SplitId(10), SplitId(11)]);
+    }
+
+    #[test]
     fn split_missing_target_is_noop() {
-        let mut tree = split(SplitDirection::Horizontal, leaf(1), leaf(2));
+        let mut tree = split(10, SplitDirection::Horizontal, leaf(1), leaf(2));
         let before = tree.clone();
-        assert!(!tree.split(PaneId(9), SplitDirection::Vertical, PaneId(3)));
+        assert!(!tree.split(PaneId(9), SplitDirection::Vertical, PaneId(3), SplitId(11)));
+        assert_eq!(tree, before);
+    }
+
+    #[test]
+    fn set_ratio_targets_split_by_id() {
+        let mut tree = split(
+            10,
+            SplitDirection::Horizontal,
+            leaf(1),
+            split(11, SplitDirection::Vertical, leaf(2), leaf(3)),
+        );
+        // 중첩 split 을 id 로 조준 — 다른 노드의 ratio 는 그대로.
+        assert!(tree.set_ratio(SplitId(11), 0.3));
+        let SplitTree::Split { ratio, second, .. } = &tree else {
+            panic!("split 이어야 함");
+        };
+        assert_eq!(*ratio, 0.5);
+        let SplitTree::Split { ratio: inner, .. } = &**second else {
+            panic!("split 이어야 함");
+        };
+        assert_eq!(*inner, 0.3);
+    }
+
+    #[test]
+    fn set_ratio_missing_id_is_noop() {
+        let mut tree = split(10, SplitDirection::Horizontal, leaf(1), leaf(2));
+        let before = tree.clone();
+        assert!(!tree.set_ratio(SplitId(99), 0.3));
         assert_eq!(tree, before);
     }
 
     #[test]
     fn remove_promotes_sibling_subtree() {
         // (1 | (2 / 3)) 에서 2 제거 → (1 | 3), 다시 3 제거 → 1 단일 leaf.
+        // collapse 로 사라지는 것은 제거 대상의 **부모 split 노드**(여기선 id 11)
+        // 이고, 승격되는 형제 subtree 는 자기 구조·id 를 유지한다.
         let mut tree = split(
+            10,
             SplitDirection::Horizontal,
             leaf(1),
-            split(SplitDirection::Vertical, leaf(2), leaf(3)),
+            split(11, SplitDirection::Vertical, leaf(2), leaf(3)),
         );
         assert!(tree.remove(PaneId(2)));
-        assert_eq!(tree, split(SplitDirection::Horizontal, leaf(1), leaf(3)));
+        assert_eq!(
+            tree,
+            split(10, SplitDirection::Horizontal, leaf(1), leaf(3))
+        );
         assert!(tree.remove(PaneId(3)));
         assert_eq!(tree, leaf(1));
     }
 
     #[test]
     fn remove_first_child_promotes_second() {
-        // ((1 / 2) | 3) 에서 3 제거 → (1 / 2) subtree 가 루트로 승격.
-        let inner = split(SplitDirection::Vertical, leaf(1), leaf(2));
-        let mut tree = split(SplitDirection::Horizontal, inner.clone(), leaf(3));
+        // ((1 / 2) | 3) 에서 3 제거 → (1 / 2) subtree 가 루트로 승격 (id 11 유지).
+        let inner = split(11, SplitDirection::Vertical, leaf(1), leaf(2));
+        let mut tree = split(10, SplitDirection::Horizontal, inner.clone(), leaf(3));
         assert!(tree.remove(PaneId(3)));
         assert_eq!(tree, inner);
     }
@@ -402,7 +517,7 @@ mod tests {
 
     #[test]
     fn remove_missing_target_is_noop() {
-        let mut tree = split(SplitDirection::Horizontal, leaf(1), leaf(2));
+        let mut tree = split(10, SplitDirection::Horizontal, leaf(1), leaf(2));
         let before = tree.clone();
         assert!(!tree.remove(PaneId(9)));
         assert_eq!(tree, before);
@@ -411,16 +526,18 @@ mod tests {
     #[test]
     fn leaves_are_in_left_to_right_order() {
         let tree = split(
+            10,
             SplitDirection::Horizontal,
-            split(SplitDirection::Vertical, leaf(1), leaf(2)),
+            split(11, SplitDirection::Vertical, leaf(1), leaf(2)),
             leaf(3),
         );
         assert_eq!(tree.leaves(), vec![PaneId(1), PaneId(2), PaneId(3)]);
+        assert_eq!(tree.split_ids(), vec![SplitId(10), SplitId(11)]);
     }
 
     #[test]
     fn contains_checks_leaves_only() {
-        let tree = split(SplitDirection::Horizontal, leaf(1), leaf(2));
+        let tree = split(10, SplitDirection::Horizontal, leaf(1), leaf(2));
         assert!(tree.contains(PaneId(1)));
         assert!(tree.contains(PaneId(2)));
         assert!(!tree.contains(PaneId(3)));
@@ -440,7 +557,7 @@ mod tests {
             distro: None,
             git_branch: None,
             git_dirty: None,
-            layout: split(SplitDirection::Horizontal, leaf(2), leaf(3)),
+            layout: split(4, SplitDirection::Horizontal, leaf(2), leaf(3)),
             panes: [(PaneId(2), pane(2)), (PaneId(3), pane(3))].into(),
             active_pane: PaneId(2),
             agent_status: AgentStatus::Idle,

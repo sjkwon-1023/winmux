@@ -8,7 +8,13 @@
   { "type": "switchWorkspace", "workspace": 1 },
   { "type": "closeWorkspace", "workspace": 1 },
   { "type": "focusPane", "pane": 3 },
-  { "type": "splitPane", "pane": 2, "direction": "vertical" },
+  {
+    "type": "splitPane",
+    "pane": 2,
+    "direction": "vertical",
+    "tab": { "type": "terminal", "cwd": null }
+  },
+  { "type": "resizeSplit", "split": 12, "ratio": 0.35 },
   { "type": "closePane", "pane": 3 },
   { "type": "createTab", "pane": 2, "tab": { "type": "terminal", "cwd": null } },
   { "type": "activateTab", "tab": 5 },

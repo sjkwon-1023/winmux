@@ -4,11 +4,12 @@
 // 키가 문자열 숫자인 점을 그대로 미러한다. types.test.ts 가 같은 fixture 를
 // 소비해 표류를 잠근다 (10단계 계획 0-7 — Rust round-trip 단독으론 무효).
 
-/** 안정 ID — Rust 쪽 u64 newtype(WorkspaceId/PaneId/TabId)은 JSON 에서 그냥
- *  숫자다. AppState 단일 카운터 발급이라 종류 불문 전역 유일하다. */
+/** 안정 ID — Rust 쪽 u64 newtype(WorkspaceId/PaneId/TabId/SplitId)은 JSON 에서
+ *  그냥 숫자다. AppState 단일 카운터 발급이라 종류 불문 전역 유일하다. */
 export type WorkspaceId = number;
 export type PaneId = number;
 export type TabId = number;
+export type SplitId = number;
 
 /** 휘발성 PTY 세션 id (u32) — 안정 ID 와 별개 공간 (model.rs 참조). */
 export type SessionId = number;
@@ -55,8 +56,10 @@ export type SplitTree =
   | { type: "leaf"; pane: PaneId }
   | {
       type: "split";
+      /** split 노드의 안정 ID — resizeSplit 의 대상 주소 (계획 D1). */
+      id: SplitId;
       direction: SplitDirection;
-      /** first 가 차지하는 비율 (0.0~1.0). */
+      /** first 가 차지하는 비율 (0.0~1.0 개구간). */
       ratio: number;
       first: SplitTree;
       second: SplitTree;
@@ -104,7 +107,10 @@ export type Command =
   | { type: "switchWorkspace"; workspace: WorkspaceId }
   | { type: "closeWorkspace"; workspace: WorkspaceId }
   | { type: "focusPane"; pane: PaneId }
-  | { type: "splitPane"; pane: PaneId; direction: SplitDirection }
+  /** tab 이 non-null 이면 새 pane 에 그 탭까지 원자 생성 (계획 D5). */
+  | { type: "splitPane"; pane: PaneId; direction: SplitDirection; tab: NewTab | null }
+  /** ratio 는 finite·개구간 (0, 1) — 아니면 invalidRatio 에러 (계획 D2). */
+  | { type: "resizeSplit"; split: SplitId; ratio: number }
   | { type: "closePane"; pane: PaneId }
   | { type: "createTab"; pane: PaneId; tab: NewTab }
   | { type: "activateTab"; tab: TabId }
@@ -113,7 +119,15 @@ export type Command =
 /** dispatch 성공 결과 (command.rs CommandOutput). */
 export type CommandOutput =
   | { type: "workspaceCreated"; workspace: WorkspaceId; pane: PaneId }
-  | { type: "paneCreated"; pane: PaneId }
+  /** splitPane 결과 — 생성된 안정 ID 전부. tab/session 은 splitPane.tab 이
+   *  non-null 이었을 때만 non-null (계획 D5). */
+  | {
+      type: "paneCreated";
+      pane: PaneId;
+      split: SplitId;
+      tab: TabId | null;
+      session: SessionId | null;
+    }
   | { type: "tabCreated"; tab: TabId; session: SessionId | null }
   | { type: "done" };
 
@@ -121,4 +135,5 @@ export type CommandOutput =
 export type CommandError =
   | { type: "unknownTarget"; target: string }
   | { type: "lastPane" }
-  | { type: "spawnFailed"; message: string };
+  | { type: "spawnFailed"; message: string }
+  | { type: "invalidRatio"; ratio: number };

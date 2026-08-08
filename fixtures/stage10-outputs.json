@@ -1,13 +1,14 @@
 {
   "outputs": [
     { "type": "workspaceCreated", "workspace": 1, "pane": 2 },
-    { "type": "paneCreated", "pane": 9 },
+    { "type": "paneCreated", "pane": 9, "split": 12, "tab": 13, "session": 11 },
     { "type": "tabCreated", "tab": 4, "session": 11 },
     { "type": "done" }
   ],
   "errors": [
     { "type": "unknownTarget", "target": "pane 99" },
     { "type": "lastPane" },
-    { "type": "spawnFailed", "message": "wsl.exe: program not found" }
+    { "type": "spawnFailed", "message": "wsl.exe: program not found" },
+    { "type": "invalidRatio", "ratio": 1.5 }
   ]
 }

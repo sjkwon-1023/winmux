@@ -19,8 +19,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AgentStatus, AppState, NotificationState, Pane, PaneId, SplitDirection, SplitTree, Tab, TabId,
-    TabKind, TerminalStatus, Workspace, WorkspaceId,
+    AgentStatus, AppState, NotificationState, Pane, PaneId, SplitDirection, SplitId, SplitTree,
+    Tab, TabId, TabKind, TerminalStatus, Workspace, WorkspaceId,
 };
 use crate::session::SessionId;
 
@@ -53,14 +53,26 @@ pub enum Command {
     FocusPane {
         pane: PaneId,
     },
-    /// `pane` 의 leaf 를 분할해 새 빈 pane 을 second(우/하)로 만들고 포커스를 새
-    /// pane 으로 옮긴다.
+    /// `pane` 의 leaf 를 분할해 새 pane 을 second(우/하)로 만들고 포커스를 새
+    /// pane 으로 옮긴다. `tab` 이 Some 이면 새 pane 에 그 탭까지 **원자적으로**
+    /// 생성한다 (계획 D5 — CreateTab 과 동일한 spawn-first 순서라 스폰 실패 시
+    /// 트리·panes 불변이고, 분할만 된 중간 상태가 스냅샷에 노출되지 않는다).
+    /// None 이면 기존처럼 빈 pane 을 만든다 (dev 훅·MCP 용).
     SplitPane {
         pane: PaneId,
         direction: SplitDirection,
+        tab: Option<NewTab>,
+    },
+    /// `split` 노드의 ratio 를 갱신한다. ratio 는 finite 하고 개구간 (0, 1) 안이
+    /// 어야 한다 — 아니면 [`CommandError::InvalidRatio`] (검증은 모델이 loud 하게,
+    /// 픽셀 클램프는 UI 가 분담 — 계획 D2). 스테일 split id 는 UnknownTarget.
+    ResizeSplit {
+        split: SplitId,
+        ratio: f64,
     },
     /// 소속 세션 kill + tree collapse. 워크스페이스의 마지막 pane 은 닫을 수 없다
-    /// ([`CommandError::LastPane`]).
+    /// ([`CommandError::LastPane`]). 12단계 UI 의 pane 정리는 CloseTab
+    /// auto-collapse 가 담당하고, 이 커맨드는 dev 훅·MCP 용으로 존치한다 (계획 D6).
     ClosePane {
         pane: PaneId,
     },
@@ -72,7 +84,12 @@ pub enum Command {
         tab: TabId,
     },
     /// terminal 탭이면 세션 kill. active_tab 이었다면 직전 탭으로 조정 (첫 탭이었
-    /// 으면 다음 탭, 마지막 탭이었으면 None — 빈 pane 허용).
+    /// 으면 다음 탭).
+    ///
+    /// **auto-collapse 규칙 (계획 D6)**: 마지막 탭이 닫혀 pane 이 비면, 그 pane
+    /// 이 워크스페이스의 마지막 pane 이 아닌 한 pane 자체를 collapse 한다 (tree
+    /// remove + panes remove + active_pane fixup — ClosePane 과 공유 헬퍼).
+    /// 워크스페이스의 마지막 pane 은 예외로 빈 pane(active_tab = None)으로 남는다.
     CloseTab {
         tab: TabId,
     },
@@ -105,8 +122,14 @@ pub enum CommandOutput {
         workspace: WorkspaceId,
         pane: PaneId,
     },
-    /// SplitPane 결과 — 새로 생긴 빈 pane.
-    PaneCreated { pane: PaneId },
+    /// SplitPane 결과 — 생성된 안정 ID 전부를 돌려준다 (계획 D5). `tab`/`session`
+    /// 은 `SplitPane.tab` 이 Some 이었을 때만 Some (session 은 그중 terminal 탭).
+    PaneCreated {
+        pane: PaneId,
+        split: SplitId,
+        tab: Option<TabId>,
+        session: Option<SessionId>,
+    },
     TabCreated {
         tab: TabId,
         /// terminal 탭이면 스폰된 PTY 세션 id. (뷰어 탭은 None — 21단계.)
@@ -130,6 +153,9 @@ pub enum CommandError {
     LastPane,
     /// 셸 스폰 실패 — 탭은 추가되지 않았다 (spawn 이 탭 추가보다 먼저).
     SpawnFailed { message: String },
+    /// ResizeSplit 의 ratio 가 유효 범위 밖 — finite 하고 개구간 (0, 1) 안이어야
+    /// 한다 (계획 D2 — 모델은 loud-fail, 픽셀 클램프는 UI 분담).
+    InvalidRatio { ratio: f64 },
 }
 
 impl fmt::Display for CommandError {
@@ -143,6 +169,12 @@ impl fmt::Display for CommandError {
             }
             CommandError::SpawnFailed { message } => {
                 write!(f, "shell spawn failed: {message}")
+            }
+            CommandError::InvalidRatio { ratio } => {
+                write!(
+                    f,
+                    "invalid split ratio {ratio}: must be finite and in (0, 1)"
+                )
             }
         }
     }
@@ -334,15 +366,56 @@ impl Dispatcher {
                 Ok(CommandOutput::Done)
             }
 
-            Command::SplitPane { pane, direction } => {
+            Command::SplitPane {
+                pane,
+                direction,
+                tab,
+            } => {
                 let wi = self.ws_index_of_pane(pane)?;
+                // 원자성: 탭 동반 분할은 spawn 을 **모든 상태 변이보다 먼저** 수행
+                // 한다 (CreateTab 과 동일한 spawn-first 순서) — 스폰 실패 시
+                // 트리·panes·next_id 가 전부 불변이라 분할만 된 중간 상태가 없다.
+                let spawned = match tab {
+                    Some(NewTab::Terminal { cwd }) => Some(self.spawn_terminal(wi, cwd)?),
+                    None => None,
+                };
                 let new_pane = PaneId(self.state.alloc_id());
+                let split_id = SplitId(self.state.alloc_id());
+                let tab_id = spawned.as_ref().map(|_| TabId(self.state.alloc_id()));
                 let ws = &mut self.state.workspaces[wi];
-                let split_ok = ws.layout.split(pane, direction, new_pane);
+                let split_ok = ws.layout.split(pane, direction, new_pane, split_id);
                 debug_assert!(split_ok, "불변식: panes 의 pane 은 layout leaf 로 존재");
-                ws.panes.insert(new_pane, empty_pane(new_pane));
+                let mut created = empty_pane(new_pane);
+                if let (Some(tab_id), Some((session, cwd))) = (tab_id, &spawned) {
+                    created
+                        .tabs
+                        .push(terminal_tab(tab_id, *session, cwd.clone()));
+                    created.active_tab = Some(tab_id);
+                }
+                ws.panes.insert(new_pane, created);
                 ws.active_pane = new_pane;
-                Ok(CommandOutput::PaneCreated { pane: new_pane })
+                Ok(CommandOutput::PaneCreated {
+                    pane: new_pane,
+                    split: split_id,
+                    tab: tab_id,
+                    session: spawned.map(|(session, _)| session),
+                })
+            }
+
+            Command::ResizeSplit { split, ratio } => {
+                if !(ratio.is_finite() && 0.0 < ratio && ratio < 1.0) {
+                    return Err(CommandError::InvalidRatio { ratio });
+                }
+                // split id 도 전 워크스페이스 범위 탐색 (안정 ID 전역 유일).
+                let found = self
+                    .state
+                    .workspaces
+                    .iter_mut()
+                    .any(|ws| ws.layout.set_ratio(split, ratio));
+                if !found {
+                    return Err(unknown("split", split.0));
+                }
+                Ok(CommandOutput::Done)
             }
 
             Command::ClosePane { pane } => {
@@ -350,17 +423,7 @@ impl Dispatcher {
                 if self.state.workspaces[wi].panes.len() <= 1 {
                     return Err(CommandError::LastPane);
                 }
-                let ws = &mut self.state.workspaces[wi];
-                let removed = ws
-                    .panes
-                    .remove(&pane)
-                    .expect("ws_index_of_pane 이 존재를 보장");
-                let collapse_ok = ws.layout.remove(pane);
-                debug_assert!(collapse_ok, "불변식: panes 의 pane 은 layout leaf 로 존재");
-                if ws.active_pane == pane {
-                    // 닫힌 pane 이 포커스였으면 collapse 후 leaf 순서상 첫 pane 으로.
-                    ws.active_pane = ws.layout.leaves()[0];
-                }
+                let removed = collapse_pane(&mut self.state.workspaces[wi], pane);
                 for tab in &removed.tabs {
                     self.kill_if_terminal(tab);
                 }
@@ -370,37 +433,14 @@ impl Dispatcher {
             Command::CreateTab { pane, tab } => {
                 let wi = self.ws_index_of_pane(pane)?;
                 let NewTab::Terminal { cwd } = tab;
-                let ws = &self.state.workspaces[wi];
-                // 탭 cwd 미지정 시 워크스페이스 root_path 가 기본 (계획 v2 4장).
-                let cwd = cwd.or_else(|| ws.root_path.clone());
-                let req = ShellSpawnReq {
-                    cwd: cwd.clone(),
-                    distro: ws.distro.clone(),
-                    ..ShellSpawnReq::default()
-                };
                 // 원자성: spawn 실패 시 상태(탭·next_id)가 변하지 않도록 spawn 먼저.
-                let session =
-                    self.host
-                        .spawn_shell(req)
-                        .map_err(|e| CommandError::SpawnFailed {
-                            message: e.to_string(),
-                        })?;
+                let (session, cwd) = self.spawn_terminal(wi, cwd)?;
                 let tab_id = TabId(self.state.alloc_id());
                 let pane_ref = self.state.workspaces[wi]
                     .panes
                     .get_mut(&pane)
                     .expect("ws_index_of_pane 이 존재를 보장");
-                pane_ref.tabs.push(Tab {
-                    id: tab_id,
-                    title: "Terminal".to_owned(),
-                    kind: TabKind::Terminal {
-                        pty_session: Some(session),
-                        status: TerminalStatus::Running,
-                        cwd,
-                    },
-                    notification: NotificationState::None,
-                    last_activity_ms: None,
-                });
+                pane_ref.tabs.push(terminal_tab(tab_id, session, cwd));
                 pane_ref.active_tab = Some(tab_id);
                 Ok(CommandOutput::TabCreated {
                     tab: tab_id,
@@ -420,24 +460,54 @@ impl Dispatcher {
 
             Command::CloseTab { tab } => {
                 let (wi, pane, ti) = self.locate_tab(tab)?;
-                let pane_ref = self.state.workspaces[wi]
-                    .panes
-                    .get_mut(&pane)
-                    .expect("locate_tab 이 존재를 보장");
+                let ws = &mut self.state.workspaces[wi];
+                let pane_ref = ws.panes.get_mut(&pane).expect("locate_tab 이 존재를 보장");
                 let removed = pane_ref.tabs.remove(ti);
                 if pane_ref.active_tab == Some(tab) {
                     // 직전 탭으로 조정. 첫 탭이었으면 (제거 후 index 0 에 온) 다음
-                    // 탭, 마지막 남은 탭이었으면 None — 빈 pane 허용 (10단계 임시).
+                    // 탭, 마지막 남은 탭이었으면 None.
                     pane_ref.active_tab = if pane_ref.tabs.is_empty() {
                         None
                     } else {
                         Some(pane_ref.tabs[ti.saturating_sub(1)].id)
                     };
                 }
+                // auto-collapse (계획 D6): 마지막 탭이 닫혀 pane 이 비면 pane 자체
+                // 를 collapse 한다 — 단 워크스페이스의 마지막 pane 은 예외로 빈
+                // pane 으로 남긴다 (variant rustdoc 의 규칙 명세 참조).
+                if pane_ref.tabs.is_empty() && ws.panes.len() > 1 {
+                    let collapsed = collapse_pane(ws, pane);
+                    debug_assert!(collapsed.tabs.is_empty(), "빈 pane 만 collapse 대상");
+                }
                 self.kill_if_terminal(&removed);
                 Ok(CommandOutput::Done)
             }
         }
+    }
+
+    /// 워크스페이스 기본값(cwd·distro)을 적용해 터미널 셸을 스폰한다 — CreateTab·
+    /// SplitPane(tab 포함)이 공유하는 spawn-first 원자성의 앞단: **모든 상태 변이
+    /// 전에** 호출해 실패 시 상태 불변을 보장한다. 탭 cwd 미지정 시 워크스페이스
+    /// root_path 가 기본 (계획 v2 4장). 반환: (세션 id, 탭에 기록할 실제 cwd).
+    fn spawn_terminal(
+        &self,
+        wi: usize,
+        cwd: Option<String>,
+    ) -> Result<(SessionId, Option<String>), CommandError> {
+        let ws = &self.state.workspaces[wi];
+        let cwd = cwd.or_else(|| ws.root_path.clone());
+        let req = ShellSpawnReq {
+            cwd: cwd.clone(),
+            distro: ws.distro.clone(),
+            ..ShellSpawnReq::default()
+        };
+        let session = self
+            .host
+            .spawn_shell(req)
+            .map_err(|e| CommandError::SpawnFailed {
+                message: e.to_string(),
+            })?;
+        Ok((session, cwd))
     }
 
     /// terminal 탭이면 소속 세션을 kill 한다. status 와 무관하게 kill 하며(이미
@@ -480,6 +550,41 @@ fn empty_pane(id: PaneId) -> Pane {
         tabs: Vec::new(),
         active_tab: None,
     }
+}
+
+/// 갓 스폰된 터미널 세션의 탭 값 — CreateTab·SplitPane(tab 포함)이 공유한다.
+fn terminal_tab(id: TabId, session: SessionId, cwd: Option<String>) -> Tab {
+    Tab {
+        id,
+        title: "Terminal".to_owned(),
+        kind: TabKind::Terminal {
+            pty_session: Some(session),
+            status: TerminalStatus::Running,
+            cwd,
+        },
+        notification: NotificationState::None,
+        last_activity_ms: None,
+    }
+}
+
+/// pane 을 워크스페이스에서 제거한다: panes remove + tree collapse(형제 승격) +
+/// active_pane fixup(닫힌 pane 이 포커스였으면 collapse 후 leaf 순서상 첫 pane
+/// 으로). ClosePane 과 CloseTab auto-collapse 가 공유한다 (계획 D6).
+///
+/// # 호출자 계약
+///
+/// - `pane` 은 `ws.panes` 에 존재해야 하고, 워크스페이스의 마지막 pane 이면 안
+///   된다 (루트 단일 leaf 는 collapse 불가 — ClosePane 은 `LastPane` 으로, CloseTab
+///   은 빈 pane 예외로 사전에 거른다).
+/// - 반환된 Pane 소속 탭들의 세션 kill 은 호출자 책임이다.
+fn collapse_pane(ws: &mut Workspace, pane: PaneId) -> Pane {
+    let removed = ws.panes.remove(&pane).expect("호출자가 pane 존재를 보장");
+    let collapse_ok = ws.layout.remove(pane);
+    debug_assert!(collapse_ok, "불변식: panes 의 pane 은 layout leaf 로 존재");
+    if ws.active_pane == pane {
+        ws.active_pane = ws.layout.leaves()[0];
+    }
+    removed
 }
 
 fn unknown(kind: &str, id: u64) -> CommandError {
@@ -572,6 +677,30 @@ mod tests {
         }
     }
 
+    /// 탭 없는 분할 헬퍼 — (새 pane, 새 split 노드) id 를 돌려준다.
+    fn split_empty(
+        d: &mut Dispatcher,
+        pane: PaneId,
+        direction: SplitDirection,
+    ) -> (PaneId, SplitId) {
+        match d
+            .dispatch(Command::SplitPane {
+                pane,
+                direction,
+                tab: None,
+            })
+            .unwrap()
+        {
+            CommandOutput::PaneCreated {
+                pane,
+                split,
+                tab: None,
+                session: None,
+            } => (pane, split),
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
     #[test]
     fn create_workspace_makes_empty_pane_and_activates() {
         let (mut d, _host) = dispatcher();
@@ -605,20 +734,13 @@ mod tests {
         let (mut d, host) = dispatcher();
         let (ws, pane1) = create_ws(&mut d, "ws");
 
-        // 분할 → 새 빈 pane 이 second 로 생기고 포커스 이동.
-        let out = d
-            .dispatch(Command::SplitPane {
-                pane: pane1,
-                direction: SplitDirection::Vertical,
-            })
-            .unwrap();
-        let CommandOutput::PaneCreated { pane: pane2 } = out else {
-            panic!("unexpected output: {out:?}");
-        };
+        // 분할(탭 없음) → 새 빈 pane 이 second 로 생기고 포커스 이동.
+        let (pane2, split_id) = split_empty(&mut d, pane1, SplitDirection::Vertical);
         {
             let w = d.state().workspace(ws).unwrap();
             assert_eq!(w.active_pane, pane2);
             assert_eq!(w.layout.leaves(), vec![pane1, pane2]);
+            assert_eq!(w.layout.split_ids(), vec![split_id]);
         }
 
         // 탭 3개: pane1 에 1개, pane2 에 2개.
@@ -702,6 +824,11 @@ mod tests {
             Command::SplitPane {
                 pane: PaneId(99),
                 direction: SplitDirection::Horizontal,
+                tab: None,
+            },
+            Command::ResizeSplit {
+                split: SplitId(99),
+                ratio: 0.5,
             },
             Command::ClosePane { pane: PaneId(99) },
             Command::CreateTab {
@@ -736,6 +863,240 @@ mod tests {
         assert!(matches!(err, CommandError::SpawnFailed { .. }));
         let after = serde_json::to_value(d.state()).unwrap();
         assert_eq!(before, after, "spawn 실패가 상태를 바꿈 (원자성 위반)");
+    }
+
+    #[test]
+    fn resize_split_updates_ratio() {
+        let (mut d, _host) = dispatcher();
+        let (ws, pane1) = create_ws(&mut d, "ws");
+        let (_pane2, split_id) = split_empty(&mut d, pane1, SplitDirection::Horizontal);
+        let rev = d.state().revision;
+
+        let out = d
+            .dispatch(Command::ResizeSplit {
+                split: split_id,
+                ratio: 0.25,
+            })
+            .unwrap();
+        assert_eq!(out, CommandOutput::Done);
+        assert_eq!(d.state().revision, rev + 1);
+        let SplitTree::Split { id, ratio, .. } = &d.state().workspace(ws).unwrap().layout else {
+            panic!("split 이어야 함");
+        };
+        assert_eq!(*id, split_id);
+        assert_eq!(*ratio, 0.25);
+    }
+
+    #[test]
+    fn resize_split_reaches_inactive_workspace() {
+        // split id 탐색은 전 워크스페이스 범위 — 비활성 워크스페이스의 split 도
+        // id 로 조준된다 (안정 ID 전역 유일).
+        let (mut d, _host) = dispatcher();
+        let (ws1, pane1) = create_ws(&mut d, "one");
+        let (_pane2, split_id) = split_empty(&mut d, pane1, SplitDirection::Vertical);
+        let (ws2, _) = create_ws(&mut d, "two");
+        assert_eq!(d.state().active_workspace, Some(ws2));
+
+        d.dispatch(Command::ResizeSplit {
+            split: split_id,
+            ratio: 0.7,
+        })
+        .unwrap();
+        let SplitTree::Split { ratio, .. } = &d.state().workspace(ws1).unwrap().layout else {
+            panic!("split 이어야 함");
+        };
+        assert_eq!(*ratio, 0.7);
+    }
+
+    #[test]
+    fn resize_split_stale_id_is_unknown_target() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane1) = create_ws(&mut d, "ws");
+        let (pane2, split_id) = split_empty(&mut d, pane1, SplitDirection::Horizontal);
+        // collapse 로 split 노드가 사라진 뒤 옛 id 로 resize — 스테일 주소.
+        d.dispatch(Command::ClosePane { pane: pane2 }).unwrap();
+        let rev = d.state().revision;
+
+        let err = d
+            .dispatch(Command::ResizeSplit {
+                split: split_id,
+                ratio: 0.5,
+            })
+            .unwrap_err();
+        assert!(matches!(err, CommandError::UnknownTarget { .. }), "{err:?}");
+        assert_eq!(d.state().revision, rev);
+    }
+
+    #[test]
+    fn resize_split_invalid_ratio_rejected_without_state_change() {
+        let (mut d, _host) = dispatcher();
+        let (ws, pane1) = create_ws(&mut d, "ws");
+        let (_pane2, split_id) = split_empty(&mut d, pane1, SplitDirection::Horizontal);
+        let rev = d.state().revision;
+
+        // 개구간 (0, 1) 밖·비유한 값 전부 InvalidRatio — 경계 0.0·1.0 포함.
+        for ratio in [f64::NAN, 0.0, 1.0, -0.25, 1.5, f64::INFINITY] {
+            let err = d
+                .dispatch(Command::ResizeSplit {
+                    split: split_id,
+                    ratio,
+                })
+                .unwrap_err();
+            assert!(
+                matches!(err, CommandError::InvalidRatio { .. }),
+                "ratio {ratio} → {err:?}"
+            );
+            assert_eq!(d.state().revision, rev, "ratio {ratio} 가 상태를 바꿈");
+        }
+        let SplitTree::Split { ratio, .. } = &d.state().workspace(ws).unwrap().layout else {
+            panic!("split 이어야 함");
+        };
+        assert_eq!(*ratio, 0.5, "실패한 resize 가 ratio 를 바꿈");
+    }
+
+    #[test]
+    fn split_pane_with_tab_creates_pane_and_tab_atomically() {
+        let (mut d, host) = dispatcher();
+        let out = d
+            .dispatch(Command::CreateWorkspace {
+                name: "ws".into(),
+                root_path: Some("/proj".into()),
+                distro: Some("Ubuntu".into()),
+            })
+            .unwrap();
+        let CommandOutput::WorkspaceCreated {
+            workspace: ws,
+            pane: pane1,
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+
+        let out = d
+            .dispatch(Command::SplitPane {
+                pane: pane1,
+                direction: SplitDirection::Vertical,
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap();
+        // 생성된 안정 ID 전부 반환 (계획 D5) — 발급 순서는 pane → split → tab.
+        let CommandOutput::PaneCreated {
+            pane: pane2,
+            split,
+            tab: Some(tab),
+            session: Some(session),
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+        assert!(pane2.0 < split.0 && split.0 < tab.0);
+
+        let w = d.state().workspace(ws).unwrap();
+        assert_eq!(w.active_pane, pane2);
+        assert_eq!(w.layout.leaves(), vec![pane1, pane2]);
+        assert_eq!(w.layout.split_ids(), vec![split]);
+        let p2 = &w.panes[&pane2];
+        assert_eq!(p2.tabs.len(), 1);
+        assert_eq!(p2.active_tab, Some(tab));
+        let TabKind::Terminal {
+            pty_session,
+            status,
+            cwd,
+        } = &p2.tabs[0].kind
+        else {
+            panic!("terminal 탭이 아님");
+        };
+        assert_eq!(*pty_session, Some(session));
+        assert_eq!(*status, TerminalStatus::Running);
+        // 워크스페이스 기본값(cwd·distro) 적용 — CreateTab 과 공유하는 스폰 경로.
+        assert_eq!(cwd.as_deref(), Some("/proj"));
+        assert_eq!(host.spawns()[0].cwd.as_deref(), Some("/proj"));
+        assert_eq!(host.spawns()[0].distro.as_deref(), Some("Ubuntu"));
+    }
+
+    #[test]
+    fn split_pane_with_tab_spawn_failure_leaves_state_untouched() {
+        let (mut d, host) = dispatcher();
+        let (_ws, pane1) = create_ws(&mut d, "ws");
+        host.set_fail_spawn(true);
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        let err = d
+            .dispatch(Command::SplitPane {
+                pane: pane1,
+                direction: SplitDirection::Horizontal,
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap_err();
+        assert!(matches!(err, CommandError::SpawnFailed { .. }));
+        // 트리·panes·next_id·revision 전부 불변 (spawn-first 원자성).
+        let after = serde_json::to_value(d.state()).unwrap();
+        assert_eq!(before, after, "spawn 실패가 상태를 바꿈 (원자성 위반)");
+    }
+
+    #[test]
+    fn close_last_tab_collapses_pane_and_fixes_focus() {
+        // multi-pane 워크스페이스에서 pane 의 마지막 탭 닫기 → 세션 kill +
+        // collapse + active_pane fixup (계획 D6).
+        let (mut d, host) = dispatcher();
+        let (ws, pane1) = create_ws(&mut d, "ws");
+        let out = d
+            .dispatch(Command::SplitPane {
+                pane: pane1,
+                direction: SplitDirection::Horizontal,
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap();
+        let CommandOutput::PaneCreated {
+            pane: pane2,
+            tab: Some(tab2),
+            session: Some(s2),
+            ..
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+        assert_eq!(d.state().workspace(ws).unwrap().active_pane, pane2);
+
+        d.dispatch(Command::CloseTab { tab: tab2 }).unwrap();
+        assert_eq!(host.kills(), vec![s2]);
+        let w = d.state().workspace(ws).unwrap();
+        assert_eq!(w.layout, SplitTree::Leaf { pane: pane1 });
+        assert!(!w.panes.contains_key(&pane2));
+        // 닫힌 pane 이 포커스였으므로 leaf 순서상 첫 pane 으로 fixup.
+        assert_eq!(w.active_pane, pane1);
+    }
+
+    #[test]
+    fn close_last_tab_of_inactive_pane_collapses_and_keeps_focus() {
+        let (mut d, host) = dispatcher();
+        let (ws, pane1) = create_ws(&mut d, "ws");
+        let out = d
+            .dispatch(Command::SplitPane {
+                pane: pane1,
+                direction: SplitDirection::Vertical,
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap();
+        let CommandOutput::PaneCreated {
+            pane: pane2,
+            tab: Some(tab2),
+            session: Some(s2),
+            ..
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+        // 포커스를 pane1 로 되돌린 뒤 비활성 pane2 의 마지막 탭을 닫는다.
+        d.dispatch(Command::FocusPane { pane: pane1 }).unwrap();
+
+        d.dispatch(Command::CloseTab { tab: tab2 }).unwrap();
+        assert_eq!(host.kills(), vec![s2]);
+        let w = d.state().workspace(ws).unwrap();
+        assert_eq!(w.layout, SplitTree::Leaf { pane: pane1 });
+        assert!(!w.panes.contains_key(&pane2));
+        // 포커스는 원래부터 pane1 — fixup 없이 그대로.
+        assert_eq!(w.active_pane, pane1);
     }
 
     #[test]
@@ -800,12 +1161,14 @@ mod tests {
         d.dispatch(Command::CloseTab { tab: tab1 }).unwrap();
         assert_eq!(active(&d), Some(tab2));
 
-        // 마지막 탭 닫기 → 빈 pane (None) 허용.
+        // 마지막 탭 닫기 → 워크스페이스의 마지막 pane 이므로 collapse 예외:
+        // 빈 pane (active_tab = None)으로 남는다 (계획 D6).
         d.dispatch(Command::CloseTab { tab: tab2 }).unwrap();
         assert_eq!(active(&d), None);
-        assert!(d.state().workspace(ws).unwrap().panes[&pane]
-            .tabs
-            .is_empty());
+        let w = d.state().workspace(ws).unwrap();
+        assert!(w.panes[&pane].tabs.is_empty());
+        assert_eq!(w.layout, SplitTree::Leaf { pane });
+        assert_eq!(w.active_pane, pane);
     }
 
     #[test]
@@ -829,15 +1192,7 @@ mod tests {
         let (mut d, _host) = dispatcher();
         let (ws1, _pane1) = create_ws(&mut d, "one");
         let (ws2, pane2) = create_ws(&mut d, "two");
-        let out = d
-            .dispatch(Command::SplitPane {
-                pane: pane2,
-                direction: SplitDirection::Horizontal,
-            })
-            .unwrap();
-        let CommandOutput::PaneCreated { pane: pane3 } = out else {
-            panic!("unexpected output: {out:?}");
-        };
+        let (pane3, _split) = split_empty(&mut d, pane2, SplitDirection::Horizontal);
 
         d.dispatch(Command::SwitchWorkspace { workspace: ws1 })
             .unwrap();

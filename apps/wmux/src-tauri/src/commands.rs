@@ -113,14 +113,20 @@ pub fn attach_terminal(
     Ok(Response::new(body))
 }
 
-/// 출력 채널 분리 — 뷰 dispose(탭 전환 등) 시 호출된다. 이후 출력은 Dropped
-/// (detach 모드)로 보상 롤백돼 백그라운드 세션이 paused 에 고착되지 않는다
-/// (`TerminalSink::detach` rustdoc). 미지 id 는 무해한 no-op (이미 닫힌 세션의
-/// 늦은 dispose 가 정상 순서로 도착할 수 있다).
+/// 출력 채널 분리 — 뷰 dispose·부트 리컨실 스윕 시 호출된다. 채널 분리 후 이후
+/// 출력은 Dropped(detach 모드)로 보상 롤백된다 (`TerminalSink::detach` rustdoc).
+/// 이어서 `reset_flow()` 로 flow 계정까지 리셋한다 (계획 D4 자동 치유) — 이미
+/// paused 인 세션은 리더가 read 를 안 해 Dropped 롤백 경로 자체가 실행되지
+/// 않으므로, detach 시점에 리셋해야 detach 된 세션이 어떤 경로로든 paused 에
+/// 고착되지 않는다. 미지 id 는 무해한 no-op (이미 닫힌 세션의 늦은 dispose 가
+/// 정상 순서로 도착할 수 있고, 스윕은 멱등해야 한다).
 #[tauri::command]
 pub fn detach_terminal(state: State<'_, AppState>, session: SessionId) {
     if let Some(sink) = state.sinks.get(session) {
         sink.detach();
+    }
+    if let Some(handle) = state.sessions.get(session) {
+        handle.reset_flow();
     }
 }
 

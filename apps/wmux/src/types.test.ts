@@ -83,6 +83,12 @@ function commandTag(cmd: Command): string {
       return cmd.type;
     case "splitPane":
       expect(["horizontal", "vertical"]).toContain(cmd.direction);
+      // tab 은 nullable — null(빈 pane) 또는 NewTab(원자 탭 동반 분할, D5).
+      expect(cmd.tab === null || cmd.tab.type === "terminal").toBe(true);
+      return cmd.type;
+    case "resizeSplit":
+      expect(typeof cmd.split).toBe("number");
+      expect(typeof cmd.ratio).toBe("number");
       return cmd.type;
     case "closePane":
       expect(typeof cmd.pane).toBe("number");
@@ -111,6 +117,10 @@ function outputTag(entry: CommandOutput): string {
       return entry.type;
     case "paneCreated":
       expect(typeof entry.pane).toBe("number");
+      expect(typeof entry.split).toBe("number");
+      // tab/session 은 nullable — splitPane.tab 이 null 이면 둘 다 null (D5).
+      expect(entry.tab === null || typeof entry.tab === "number").toBe(true);
+      expect(entry.session === null || typeof entry.session === "number").toBe(true);
       return entry.type;
     case "tabCreated":
       expect(typeof entry.tab).toBe("number");
@@ -134,6 +144,9 @@ function errorTag(entry: CommandError): string {
       return entry.type;
     case "spawnFailed":
       expect(typeof entry.message).toBe("string");
+      return entry.type;
+    case "invalidRatio":
+      expect(typeof entry.ratio).toBe("number");
       return entry.type;
     default:
       return assertNever(entry);
@@ -166,7 +179,7 @@ describe("stage10-snapshot.json", () => {
     expect(snapshotFixture.revision).toBe(6);
     expect(snapshotFixture.state.revision).toBe(6);
     expect(snapshotFixture.state.activeWorkspace).toBe(1);
-    expect(snapshotFixture.state.nextId).toBe(12);
+    expect(snapshotFixture.state.nextId).toBe(14);
     expect(snapshotFixture.state.workspaces).toHaveLength(2);
   });
 
@@ -177,6 +190,15 @@ describe("stage10-snapshot.json", () => {
     expect(collectLeaves(ws1.layout)).toEqual([2, 3, 9]);
     // 활성 pane 조회는 String() 경유 (main.ts resolveActive 와 같은 경로).
     expect(ws1.panes[String(ws1.activePane)].id).toBe(2);
+  });
+
+  it("carries stable split ids on split nodes (D1)", () => {
+    const ws1 = snapshotFixture.state.workspaces[0];
+    if (ws1.layout.type !== "split") throw new Error("root must be split");
+    expect(ws1.layout.id).toBe(12);
+    if (ws1.layout.second.type !== "split") throw new Error("second must be split");
+    expect(ws1.layout.second.id).toBe(13);
+    expect(ws1.layout.second.ratio).toBe(0.4);
   });
 
   it("narrows terminal tabs (running/exited) and nullable fields", () => {
@@ -242,6 +264,7 @@ describe("stage10-commands.json", () => {
       "closeWorkspace",
       "focusPane",
       "splitPane",
+      "resizeSplit",
       "closePane",
       "createTab",
       "activateTab",
@@ -258,9 +281,16 @@ describe("stage10-commands.json", () => {
     const split = commandsFixture[4];
     if (split.type !== "splitPane") throw new Error("fifth must be splitPane");
     expect(split.direction).toBe("vertical");
+    // 원자 탭 동반 분할 형태 (D5).
+    expect(split.tab).toEqual({ type: "terminal", cwd: null });
 
-    const createTab = commandsFixture[6];
-    if (createTab.type !== "createTab") throw new Error("seventh must be createTab");
+    const resize = commandsFixture[5];
+    if (resize.type !== "resizeSplit") throw new Error("sixth must be resizeSplit");
+    expect(resize.split).toBe(12);
+    expect(resize.ratio).toBe(0.35);
+
+    const createTab = commandsFixture[7];
+    if (createTab.type !== "createTab") throw new Error("eighth must be createTab");
     expect(createTab.tab).toEqual({ type: "terminal", cwd: null });
   });
 });
@@ -288,6 +318,7 @@ describe("stage10-outputs.json", () => {
       "unknownTarget",
       "lastPane",
       "spawnFailed",
+      "invalidRatio",
     ]);
   });
 });

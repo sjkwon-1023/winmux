@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use wmux_core::command::{Command, CommandError, CommandOutput};
-use wmux_core::model::{AppState, PaneId, TabId, WorkspaceId};
+use wmux_core::model::{AppState, PaneId, SplitId, TabId, WorkspaceId};
 
 fn read_fixture(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -72,14 +72,19 @@ fn outputs_fixture_matches_serialization() {
             workspace: WorkspaceId(1),
             pane: PaneId(2),
         },
-        CommandOutput::PaneCreated { pane: PaneId(9) },
+        CommandOutput::PaneCreated {
+            pane: PaneId(9),
+            split: SplitId(12),
+            tab: Some(TabId(13)),
+            session: Some(11),
+        },
         CommandOutput::TabCreated {
             tab: TabId(4),
             session: Some(11),
         },
         CommandOutput::Done,
     ];
-    // 전 CommandError variant 1개씩 (3종).
+    // 전 CommandError variant 1개씩 (4종).
     let errors = vec![
         CommandError::UnknownTarget {
             target: "pane 99".to_string(),
@@ -88,6 +93,7 @@ fn outputs_fixture_matches_serialization() {
         CommandError::SpawnFailed {
             message: "wsl.exe: program not found".to_string(),
         },
+        CommandError::InvalidRatio { ratio: 1.5 },
     ];
 
     let expected = serde_json::json!({ "outputs": outputs, "errors": errors });
@@ -100,8 +106,8 @@ fn commands_fixture_round_trips() {
     let original: serde_json::Value = serde_json::from_str(&text).unwrap();
     let parsed: Vec<Command> = serde_json::from_str(&text).unwrap();
 
-    // 전 Command variant 1개씩 (9종) — variant 추가 시 fixture 도 갱신할 것.
-    assert_eq!(parsed.len(), 9);
+    // 전 Command variant 1개씩 (10종) — variant 추가 시 fixture 도 갱신할 것.
+    assert_eq!(parsed.len(), 10);
 
     let reserialized = serde_json::to_value(&parsed).unwrap();
     assert_eq!(original, reserialized);
