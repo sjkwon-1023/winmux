@@ -1,5 +1,5 @@
-/* wmux 최소 다크 테마 — 10단계는 상태 라인 + 단일 터미널 뷰만.
-   분할·탭바 UI 는 11~12단계에서 얹는다. */
+/* wmux 최소 다크 테마 — 상태 라인 + 활성 워크스페이스 split tree (11단계).
+   탭바 스타일은 12단계에서 얹는다. */
 
 :root {
   color-scheme: dark;
@@ -7,6 +7,7 @@
   --bg-panel: #252526;
   --fg: #d4d4d4;
   --border: #3c3c3c;
+  --accent: #007acc;
 }
 
 * {
@@ -30,7 +31,7 @@ body {
   overflow: hidden;
 }
 
-/* 상단 상태 라인 — 워크스페이스 이름·탭 수·revision 표시 */
+/* 상단 상태 라인 — 워크스페이스 이름·pane 수·revision (+ one-shot 에러) */
 #status-line {
   flex: 0 0 auto;
   padding: 6px 12px;
@@ -41,9 +42,10 @@ body {
   white-space: pre-wrap;
 }
 
-/* 뷰 영역 — 활성 탭 1개 전면 (터미널 뷰 또는 placeholder 텍스트) */
+/* 뷰 영역 — split tree 루트를 담는 flex 컨테이너 (또는 placeholder 텍스트) */
 #view {
   flex: 1 1 auto;
+  display: flex;
   min-height: 0;
   padding: 4px;
   overflow: hidden;
@@ -51,7 +53,109 @@ body {
   font-family: monospace;
 }
 
-/* xterm 호스트가 뷰 영역을 꽉 채우게 */
+/* ── split tree (11단계) ─────────────────────────────────────────────
+   direction 은 pane 이 나열되는 축이다 — split-layout.ts 의 방향 규약 참조.
+   자식 flex 값(inline)은 workspace-view 가 소유한다. */
+
+.split {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.split-horizontal {
+  flex-direction: row; /* 좌|우 */
+}
+
+.split-vertical {
+  flex-direction: column; /* 상/하 */
+}
+
+/* splitter 핸들 — 4px, hover/드래그 시 강조 */
+.splitter {
+  flex: 0 0 4px;
+  background: var(--border);
+  touch-action: none; /* 포인터 드래그 중 스크롤 제스처 개입 방지 */
+}
+
+.splitter:hover,
+.splitter:active {
+  background: var(--accent);
+}
+
+.split-horizontal > .splitter {
+  cursor: col-resize;
+}
+
+.split-vertical > .splitter {
+  cursor: row-resize;
+}
+
+/* ── pane ──────────────────────────────────────────────────────────── */
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+  /* 테두리는 항상 1px — 활성 토글이 레이아웃을 흔들지 않게 색만 바꾼다 */
+  border: 1px solid var(--border);
+}
+
+.pane.active {
+  border-color: var(--accent);
+}
+
+.pane-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.pane-header button {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pane-header button:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.pane-header button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pane-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 2px;
+  font-size: 13px;
+  font-family: monospace;
+}
+
+/* xterm 호스트가 pane 콘텐츠를 꽉 채우게 */
 .term-host {
   width: 100%;
   height: 100%;

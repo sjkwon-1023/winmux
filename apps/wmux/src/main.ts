@@ -1,19 +1,24 @@
-// wmux 앱 엔트리 — store 구독 → 활성 workspace/pane/탭 1개를 전면 렌더 (10단계).
-// 분할 렌더·탭바 UI 는 11~12단계 — 지금은 상단 상태 라인(워크스페이스 이름·탭 수·
-// revision) + 단일 터미널 뷰. 커맨드 트리거는 dev 훅 window.__wmux (계획 3-C —
-// 실 UI 전까지의 명시적 조작 표면. 예: __wmux.dispatch({type:"createTab", ...})).
+// wmux 앱 엔트리 — store 구독 → 상단 상태 라인 + 활성 워크스페이스 split tree
+// 렌더 (11단계). 분할 렌더·splitter·클릭 포커스는 workspace-view/pane-view/
+// splitter 가 담당하고, 여기는 부트스트랩과 dispatchUI 래퍼(CommandError 상태
+// 라인 표면화)만 남는다. dev 훅 window.__wmux 는 유지한다 — 콘솔에서 raw
+// dispatch/getState 를 직접 부르는 조작 표면 (탭바 등 미구현 조작 경로용).
 
 import { dispatch, getState } from "./backend";
+import { formatCommandError } from "./command-error";
 import { Store } from "./store";
-import { TerminalView } from "./terminal-view";
-import type { Pane, SessionId, StateSnapshot, Tab, TabKind, Workspace } from "./types";
+import { WorkspaceView, activeWorkspace } from "./workspace-view";
+import type { Command, CommandOutput, StateSnapshot } from "./types";
 
 declare global {
   interface Window {
-    /** dev 조작 표면 — 실 UI(11~13단계) 전까지 dispatch/getState 를 콘솔에서 호출한다. */
+    /** dev 조작 표면 — 실 UI 미구현 경로(탭 전환·닫기 등)를 콘솔에서 호출한다. */
     __wmux: { dispatch: typeof dispatch; getState: typeof getState };
   }
 }
+
+/** one-shot 에러 표시 유지 시간 — 이 뒤엔 타이머로 소거한다 (폴링 금지). */
+const ERROR_TTL_MS = 5000;
 
 function requireElement(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -21,49 +26,22 @@ function requireElement(id: string): HTMLElement {
   return el;
 }
 
-/** 활성 workspace → 활성 pane → 활성 탭 해석. 각 단계 부재 시 null. */
-function resolveActive(snapshot: StateSnapshot): {
-  ws: Workspace | null;
-  pane: Pane | null;
-  tab: Tab | null;
-} {
-  const ws =
-    snapshot.state.workspaces.find((w) => w.id === snapshot.state.activeWorkspace) ?? null;
-  // panes 맵 키는 문자열 숫자 (JSON object 키 제약 — types.ts 참조).
-  const pane = ws === null ? null : (ws.panes[String(ws.activePane)] ?? null);
-  const tab = pane?.tabs.find((t) => t.id === pane.activeTab) ?? null;
-  return { ws, pane, tab };
-}
-
-/** 터미널 뷰를 붙일 세션 — terminal 탭이고 pty_session 이 있을 때만. */
-function sessionOf(tab: Tab | null): SessionId | null {
-  if (tab === null || tab.kind.type !== "terminal") return null;
-  return tab.kind.ptySession;
-}
-
-/** 뷰 영역에 표시할 placeholder 텍스트 (터미널 뷰가 없는 경우). */
-function placeholderText(tab: Tab | null): string {
-  if (tab === null) return "(no active tab — __wmux.dispatch 로 createTab 하세요)";
-  const kind: TabKind = tab.kind;
-  switch (kind.type) {
-    case "terminal":
-      // sessionOf 가 null 을 준 경우 — pty_session 없는 terminal 탭.
-      return "(terminal tab without pty session)";
-    case "folderBrowser":
-      return `folderBrowser: ${kind.path} (뷰어는 21단계)`;
-    case "textViewer":
-      return `textViewer: ${kind.path} (뷰어는 21단계)`;
-    case "markdownViewer":
-      return `markdownViewer: ${kind.path} (뷰어는 21단계)`;
-  }
+/** 상태 라인 기본 텍스트 — 활성 워크스페이스 이름·pane 수·revision. */
+function statusText(snapshot: StateSnapshot | null): string {
+  if (snapshot === null) return "booting…";
+  const ws = activeWorkspace(snapshot);
+  if (ws === null) return `no workspace · rev ${snapshot.revision}`;
+  const paneCount = Object.keys(ws.panes).length;
+  return `workspace: ${ws.name} · panes: ${paneCount} · rev ${snapshot.revision}`;
 }
 
 class App {
   private readonly statusEl = requireElement("status-line");
   private readonly viewEl = requireElement("view");
   private readonly store = new Store();
-  private view: TerminalView | null = null;
-  private viewSession: SessionId | null = null;
+  private readonly wsView = new WorkspaceView(this.viewEl, (cmd) => this.dispatchUI(cmd));
+  private errorText: string | null = null;
+  private errorTimer: ReturnType<typeof setTimeout> | null = null;
 
   async init(): Promise<void> {
     // dev 훅은 부트스트랩 실패와 무관하게 먼저 노출한다 — 실패 시 콘솔에서
@@ -73,50 +51,52 @@ class App {
     await this.store.init();
   }
 
+  /** UI 발 dispatch 공통 경로 — 실패 payload 를 formatCommandError 로 요약해
+   *  상태 라인에 one-shot 표시한다 (다음 성공 dispatch 또는 ERROR_TTL_MS
+   *  타이머로 소거 — 주기 폴링 없음). 성공 시 CommandOutput, 실패 시 null —
+   *  에러는 이미 화면에 노출됐으므로 호출측(splitter 복원 등)은 null 분기만
+   *  하면 된다. */
+  private async dispatchUI(cmd: Command): Promise<CommandOutput | null> {
+    try {
+      const out = await dispatch(cmd);
+      this.clearError();
+      return out;
+    } catch (err) {
+      console.error("dispatch failed", cmd, err);
+      this.showError(formatCommandError(err));
+      return null;
+    }
+  }
+
+  private showError(text: string): void {
+    this.errorText = text;
+    if (this.errorTimer !== null) clearTimeout(this.errorTimer);
+    this.errorTimer = setTimeout(() => {
+      this.errorTimer = null;
+      this.clearError();
+    }, ERROR_TTL_MS);
+    this.renderStatusLine();
+  }
+
+  private clearError(): void {
+    if (this.errorTimer !== null) {
+      clearTimeout(this.errorTimer);
+      this.errorTimer = null;
+    }
+    if (this.errorText === null) return; // 표시 중이 아니면 재렌더 불필요
+    this.errorText = null;
+    this.renderStatusLine();
+  }
+
   private render(snapshot: StateSnapshot): void {
-    const { ws, tab } = resolveActive(snapshot);
-    this.renderStatusLine(snapshot, ws);
-    this.renderView(sessionOf(tab), tab);
+    this.renderStatusLine();
+    this.wsView.render(snapshot);
   }
 
-  private renderStatusLine(snapshot: StateSnapshot, ws: Workspace | null): void {
-    if (ws === null) {
-      this.statusEl.textContent = `no workspace · rev ${snapshot.revision}`;
-      return;
-    }
-    const tabCount = Object.values(ws.panes).reduce((n, p) => n + p.tabs.length, 0);
-    this.statusEl.textContent = `workspace: ${ws.name} · tabs: ${tabCount} · rev ${snapshot.revision}`;
-  }
-
-  private renderView(session: SessionId | null, tab: Tab | null): void {
-    if (session === this.viewSession) {
-      // 같은 세션이면 뷰 유지 — revision 마다 재attach 하면 replay 왕복·화면
-      // 리셋이 반복된다. 뷰가 없는 상태면 placeholder 텍스트만 갱신한다.
-      if (this.view === null) this.viewEl.textContent = placeholderText(tab);
-      return;
-    }
-
-    this.view?.dispose();
-    this.view = null;
-    this.viewSession = session;
-    this.viewEl.replaceChildren(); // placeholder 텍스트·뷰 잔재 제거
-
-    if (session === null) {
-      this.viewEl.textContent = placeholderText(tab);
-      return;
-    }
-
-    const view = new TerminalView(this.viewEl, session);
-    this.view = view;
-    view.attach().catch((err) => {
-      // attach 실패는 가리지 않는다 — 뷰를 정리하고 에러를 화면에 그대로 노출.
-      console.error("attach_terminal failed", err);
-      if (this.view !== view) return; // 이미 다른 뷰로 전환됨
-      view.dispose();
-      this.view = null;
-      this.viewSession = null;
-      this.viewEl.textContent = `attach failed (session ${session}): ${String(err)}`;
-    });
+  private renderStatusLine(): void {
+    const base = statusText(this.store.snapshot);
+    this.statusEl.textContent =
+      this.errorText === null ? base : `${base} · ERROR: ${this.errorText}`;
   }
 }
 
