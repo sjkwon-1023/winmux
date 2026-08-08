@@ -7,7 +7,7 @@
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use wmux_core::osc::OscEvent;
-use wmux_core::session::SessionSink;
+use wmux_core::session::{Delivery, SessionId, SessionSink};
 
 /// `osc-event` 이벤트 payload — 프론트엔드 계약과 일치:
 /// `{ id, kind: "777"|"9"|"7"|"0", title, body }`.
@@ -62,26 +62,37 @@ pub struct TerminalExitPayload {
 
 /// 세션 1개 분의 sink. 리더 스레드에서 호출되므로 Send + 'static.
 pub struct ChannelSink {
-    id: u32,
+    id: SessionId,
     channel: Channel<InvokeResponseBody>,
     app: AppHandle,
 }
 
 impl ChannelSink {
-    pub fn new(id: u32, channel: Channel<InvokeResponseBody>, app: AppHandle) -> Self {
+    pub fn new(id: SessionId, channel: Channel<InvokeResponseBody>, app: AppHandle) -> Self {
         Self { id, channel, app }
     }
 }
 
 impl SessionSink for ChannelSink {
-    fn on_output(&self, bytes: &[u8]) {
-        // sink 시그니처상 에러를 되돌릴 수 없으므로, 실패(webview 종료 등)는
-        // 삼키지 않고 stderr에 남긴다.
-        if let Err(err) = self.channel.send(InvokeResponseBody::Raw(bytes.to_vec())) {
-            eprintln!(
-                "[wmux-spike] raw output channel send failed (id={}): {err}",
-                self.id
-            );
+    fn on_output(&self, _offset: u64, bytes: &[u8]) -> Delivery {
+        // offset 은 무시한다 — spike 프론트는 프레이밍 없이 raw 바이트를 그대로
+        // 받는 기존 계약을 유지한다 (`[u64 LE offset]` 프레이밍은 새 앱 전용).
+        match self.channel.send(InvokeResponseBody::Raw(bytes.to_vec())) {
+            Ok(()) => Delivery::Delivered,
+            Err(err) => {
+                // 채널 send 실패(webview 소멸 등)는 Dropped 로 되돌린다 — 리더가
+                // flow 계정을 보상 롤백하므로 세션은 detach 모드로 backpressure
+                // 없이 자유 진행하며 replay buffer 에만 출력을 기록한다.
+                // [측정 재현성 각주] 종전 spike 는 send 실패에도 계정을 유지해
+                // webview 소멸 후 "paused 휴면"으로 갔다 — 이제는 "읽고 버림"으로
+                // 거동이 달라지므로 spike-plan §6 측정 재현 시 이 차이를 감안할 것
+                // (mvp-stage10-plan 0-8). 실패 자체는 삼키지 않고 stderr 에 남긴다.
+                eprintln!(
+                    "[wmux-spike] raw output channel send failed (id={}): {err}",
+                    self.id
+                );
+                Delivery::Dropped
+            }
         }
     }
 

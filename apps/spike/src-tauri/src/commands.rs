@@ -1,16 +1,17 @@
 //! Tauri 커맨드 — 프론트엔드 ↔ wmux-core 글루 (spike-plan 4.5).
 //!
-//! 잠금 규율: 레지스트리 뮤텍스 아래에서는 `Arc<PtySession>` 핸들 복사만 한다.
-//! 블로킹 가능성이 있는 호출(PTY write·resize·spawn)은 락을 놓은 뒤, 그리고
-//! 메인(이벤트 루프) 스레드가 아닌 `spawn_blocking` 스레드에서 수행한다 —
-//! paused 상태에서 자식이 stdin을 읽지 않아 write가 블록되면, 메인 스레드가
-//! 잡혀 있는 한 `ack_output`도 처리되지 못해 영구 교착이 되기 때문이다.
+//! 잠금 규율: 코어 `SessionManager` 의 내부 lock 아래에서는 id 발급과
+//! `Arc<PtySession>` 핸들 복사만 일어난다. 블로킹 가능성이 있는 호출(PTY
+//! write·resize·spawn)은 핸들을 얻은 뒤 lock 밖에서, 그리고 메인(이벤트 루프)
+//! 스레드가 아닌 `spawn_blocking` 스레드에서 수행한다 — paused 상태에서 자식이
+//! stdin 을 읽지 않아 write 가 블록되면, 메인 스레드가 잡혀 있는 한
+//! `ack_output` 도 처리되지 못해 영구 교착이 되기 때문이다.
 
 use std::sync::Arc;
 
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::{AppHandle, State};
-use wmux_core::session::{PtySession, SessionOptions, SpawnSpec};
+use wmux_core::session::{PtySession, SessionId, SessionOptions, SpawnSpec};
 
 use crate::sink::ChannelSink;
 use crate::state::AppState;
@@ -20,12 +21,12 @@ const REPLAY_CAP: usize = 1024 * 1024;
 const HIGH_WATER: usize = 2 * 1024 * 1024;
 const LOW_WATER: usize = 512 * 1024;
 
-/// `get_stats` 직렬화형. wmux-core의 `SessionStats`는 serde 의존이 없으므로
-/// 글루에서 DTO로 옮겨 내보낸다. `id`는 코어 내부 값 대신 레지스트리 라우팅 id를
-/// 강제해 이벤트·커맨드의 id와 항상 일치시킨다.
+/// `get_stats` 직렬화형. wmux-core 의 `SessionStats` 는 serde 의존이 없으므로
+/// 글루에서 DTO 로 옮겨 내보낸다. `id` 는 `SessionManager::stats` 가 쌍으로
+/// 돌려주는 레지스트리 id — 이벤트·커맨드의 id 와 같은 공간이다.
 #[derive(serde::Serialize)]
 pub struct SessionStatsDto {
-    pub id: u32,
+    pub id: SessionId,
     pub bytes_out: u64,
     pub pending: usize,
     pub paused: bool,
@@ -73,11 +74,11 @@ fn default_spawn_spec(cols: u16, rows: u16) -> SpawnSpec {
     }
 }
 
-/// id로 세션 핸들을 얻는다. 레지스트리 락은 이 함수 안에서만 잡힌다 —
-/// 반환된 핸들에 대한 호출은 전부 락 밖에서 이뤄진다.
-fn session(state: &AppState, id: u32) -> Result<Arc<PtySession>, String> {
+/// id 로 세션 핸들을 얻는다. 매니저 내부 lock 은 이 조회 안에서만 잡힌다 —
+/// 반환된 핸들에 대한 호출은 전부 lock 밖에서 이뤄진다.
+fn session(state: &AppState, id: SessionId) -> Result<Arc<PtySession>, String> {
     state
-        .registry()
+        .manager
         .get(id)
         .ok_or_else(|| format!("unknown terminal id: {id}"))
 }
@@ -89,28 +90,34 @@ pub async fn create_terminal(
     cols: u16,
     rows: u16,
     on_output: Channel<InvokeResponseBody>,
-) -> Result<u32, String> {
-    // sink가 osc/exit 이벤트에 id를 실어야 하므로 spawn 전에 id를 발급한다.
-    // spawn(프로세스 생성 — 수십 ms 이상)은 blocking 스레드에서 수행한다.
-    let id = state.registry().allocate_id();
-    let sink = ChannelSink::new(id, on_output, app);
+) -> Result<SessionId, String> {
+    // id 발급·sink 생성·스폰·등록은 전부 코어 `SessionManager::create` 가
+    // 수행한다 — sink 가 osc/exit 이벤트에 실을 id 는 factory 인자로 받는다
+    // (id 선발급 계약). spawn(프로세스 생성 — 수십 ms 이상)이 포함되므로
+    // blocking 스레드에서 돌린다.
+    let manager = Arc::clone(&state.manager);
     let opts = SessionOptions {
         replay_cap: REPLAY_CAP,
         high_water: HIGH_WATER,
         low_water: LOW_WATER,
     };
     let spec = default_spawn_spec(cols, rows);
-    let session =
-        tauri::async_runtime::spawn_blocking(move || PtySession::spawn(spec, Box::new(sink), opts))
-            .await
-            .map_err(|err| format!("spawn task join failed: {err}"))?
-            .map_err(|err| format!("failed to spawn terminal: {err:#}"))?;
-    state.registry().insert(id, session);
-    Ok(id)
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.create(spec, opts, |id| {
+            Box::new(ChannelSink::new(id, on_output, app))
+        })
+    })
+    .await
+    .map_err(|err| format!("spawn task join failed: {err}"))?
+    .map_err(|err| format!("failed to spawn terminal: {err:#}"))
 }
 
 #[tauri::command]
-pub async fn write_stdin(state: State<'_, AppState>, id: u32, data: String) -> Result<(), String> {
+pub async fn write_stdin(
+    state: State<'_, AppState>,
+    id: SessionId,
+    data: String,
+) -> Result<(), String> {
     let session = session(&state, id)?;
     tauri::async_runtime::spawn_blocking(move || session.write(data.as_bytes()))
         .await
@@ -119,7 +126,11 @@ pub async fn write_stdin(state: State<'_, AppState>, id: u32, data: String) -> R
 }
 
 #[tauri::command]
-pub async fn send_raw(state: State<'_, AppState>, id: u32, bytes: Vec<u8>) -> Result<(), String> {
+pub async fn send_raw(
+    state: State<'_, AppState>,
+    id: SessionId,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
     let session = session(&state, id)?;
     tauri::async_runtime::spawn_blocking(move || session.write(&bytes))
         .await
@@ -130,7 +141,7 @@ pub async fn send_raw(state: State<'_, AppState>, id: u32, bytes: Vec<u8>) -> Re
 #[tauri::command]
 pub async fn resize(
     state: State<'_, AppState>,
-    id: u32,
+    id: SessionId,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
@@ -143,7 +154,7 @@ pub async fn resize(
 }
 
 #[tauri::command]
-pub fn ack_output(state: State<'_, AppState>, id: u32, n: usize) -> Result<(), String> {
+pub fn ack_output(state: State<'_, AppState>, id: SessionId, n: usize) -> Result<(), String> {
     // ack는 뮤텍스 갱신 + condvar notify뿐이라 블로킹하지 않는다 — sync로 즉시 처리해
     // paused 세션이 최대한 빨리 재개되게 한다.
     let session = session(&state, id)?;
@@ -154,40 +165,39 @@ pub fn ack_output(state: State<'_, AppState>, id: u32, n: usize) -> Result<(), S
 /// replay 스냅샷도 터미널 출력이므로 JSON 배열이 아니라 raw body로 되돌린다 —
 /// 프론트엔드 `invoke`는 ArrayBuffer를 받는다.
 #[tauri::command]
-pub fn replay(state: State<'_, AppState>, id: u32) -> Result<Response, String> {
+pub fn replay(state: State<'_, AppState>, id: SessionId) -> Result<Response, String> {
     let session = session(&state, id)?;
     Ok(Response::new(session.replay()))
 }
 
 #[tauri::command]
-pub fn close_terminal(state: State<'_, AppState>, id: u32) -> Result<(), String> {
-    let session = state
-        .registry()
-        .remove(id)
-        .ok_or_else(|| format!("unknown terminal id: {id}"))?;
-    // kill은 레지스트리 락 밖에서 — 자식 kill이 먼저 나가므로, 블록 중이던
-    // write가 있어도 자식 종료(EPIPE)로 풀린다. 이후 정리는 코어 책임.
-    session.kill();
-    Ok(())
+pub fn close_terminal(state: State<'_, AppState>, id: SessionId) -> Result<(), String> {
+    // `SessionManager::remove` 는 레지스트리 lock 을 놓은 뒤 kill 한다 (코어
+    // 계약) — 자식 kill 신호가 먼저 나가므로, 블록 중이던 write 가 있어도 자식
+    // 종료(EPIPE)로 풀린다. kill 은 신호 전송 + fd 회수뿐이라 sync 로 충분하다.
+    if state.manager.remove(id) {
+        Ok(())
+    } else {
+        Err(format!("unknown terminal id: {id}"))
+    }
 }
 
 #[tauri::command]
 pub fn get_stats(state: State<'_, AppState>) -> Vec<SessionStatsDto> {
-    // 핸들 스냅샷만 락 아래에서 뜨고, 세션별 stats 잠금은 락 밖에서 잡는다.
-    let handles = state.registry().handles();
-    handles
+    // 코어 `stats()` 가 레지스트리 lock 을 놓은 채 세션별 stats 를 뜨고
+    // id 오름차순으로 정렬해 (id, stats) 쌍을 돌려준다.
+    state
+        .manager
+        .stats()
         .into_iter()
-        .map(|(id, session)| {
-            let stats = session.stats();
-            SessionStatsDto {
-                id,
-                bytes_out: stats.bytes_out,
-                pending: stats.pending,
-                paused: stats.paused,
-                osc_count: stats.osc_count,
-                last_osc: stats.last_osc,
-                alive: stats.alive,
-            }
+        .map(|(id, stats)| SessionStatsDto {
+            id,
+            bytes_out: stats.bytes_out,
+            pending: stats.pending,
+            paused: stats.paused,
+            osc_count: stats.osc_count,
+            last_osc: stats.last_osc,
+            alive: stats.alive,
         })
         .collect()
 }

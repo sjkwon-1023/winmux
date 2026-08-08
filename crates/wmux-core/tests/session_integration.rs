@@ -1,13 +1,17 @@
 //! PtySession unix 통합 테스트 — 실제 `sh` 를 PTY 로 띄워 계약을 검증한다.
-//! 계약: `docs/plans/spike-plan.md` 4.4장. Windows 에서는 컴파일되지 않는다.
+//! 계약은 `wmux_core::session` 모듈 rustdoc 이 정의한다. Windows 에서는
+//! 컴파일되지 않는다.
 #![cfg(unix)]
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use wmux_core::osc::OscEvent;
-use wmux_core::session::{PtySession, SessionManager, SessionOptions, SessionSink, SpawnSpec};
+use wmux_core::session::{
+    Delivery, PtySession, SessionId, SessionManager, SessionOptions, SessionSink, SpawnSpec,
+};
 
 /// 개별 대기 상한 — hang 방지 가드. WSL 부하를 감안해 넉넉히 잡는다.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -15,7 +19,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// sink 콜백을 채널로 옮겨 테스트 본문에서 순서대로 검사한다.
 #[derive(Debug)]
 enum Event {
-    Output(Vec<u8>),
+    Output { offset: u64, bytes: Vec<u8> },
     Osc(OscEvent),
     Exit(Option<u32>),
 }
@@ -25,9 +29,13 @@ struct ChannelSink {
 }
 
 impl SessionSink for ChannelSink {
-    fn on_output(&self, bytes: &[u8]) {
+    fn on_output(&self, offset: u64, bytes: &[u8]) -> Delivery {
         // 테스트가 먼저 끝나 수신자가 drop 된 뒤의 send 실패는 무해하다.
-        let _ = self.tx.send(Event::Output(bytes.to_vec()));
+        let _ = self.tx.send(Event::Output {
+            offset,
+            bytes: bytes.to_vec(),
+        });
+        Delivery::Delivered
     }
     fn on_osc(&self, event: &OscEvent) {
         let _ = self.tx.send(Event::Osc(event.clone()));
@@ -35,6 +43,17 @@ impl SessionSink for ChannelSink {
     fn on_exit(&self, code: Option<u32>) {
         let _ = self.tx.send(Event::Exit(code));
     }
+}
+
+/// 항상 `Dropped` 를 반환하는 sink — 수신자 없는 detach 모드 시뮬레이션.
+struct DropSink;
+
+impl SessionSink for DropSink {
+    fn on_output(&self, _offset: u64, _bytes: &[u8]) -> Delivery {
+        Delivery::Dropped
+    }
+    fn on_osc(&self, _event: &OscEvent) {}
+    fn on_exit(&self, _code: Option<u32>) {}
 }
 
 fn sh_spec() -> SpawnSpec {
@@ -77,7 +96,7 @@ fn spawn_sh_and_receive_echo_output() {
     let mut acc: Vec<u8> = Vec::new();
     while !contains(&acc, b"hello") {
         match rx.recv_timeout(remaining(deadline, "echo output")) {
-            Ok(Event::Output(bytes)) => acc.extend_from_slice(&bytes),
+            Ok(Event::Output { bytes, .. }) => acc.extend_from_slice(&bytes),
             Ok(_) => {}
             Err(err) => panic!(
                 "no output containing 'hello' ({err}); received {} bytes: {:?}",
@@ -182,7 +201,7 @@ fn flood_without_ack_pauses_then_full_ack_resumes() {
     let deadline = Instant::now() + TIMEOUT;
     loop {
         match rx.recv_timeout(remaining(deadline, "output after resume")) {
-            Ok(Event::Output(_)) => break,
+            Ok(Event::Output { .. }) => break,
             Ok(_) => {}
             Err(err) => panic!("no output arrived after full ack ({err})"),
         }
@@ -212,25 +231,23 @@ fn exit_invokes_on_exit_with_code() {
     );
 }
 
-// SessionManager — id 발급, create/get/remove/stats.
+// 5) SessionManager — id 발급, create/get/remove/stats.
 #[test]
 fn manager_create_get_remove_stats() {
     let manager = SessionManager::new();
     let (tx, _rx) = mpsc::channel();
 
+    let tx1 = tx.clone();
     let id1 = manager
-        .create(
-            sh_spec(),
-            Box::new(ChannelSink { tx: tx.clone() }),
-            SessionOptions::default(),
-        )
+        .create(sh_spec(), SessionOptions::default(), move |_| {
+            Box::new(ChannelSink { tx: tx1 })
+        })
         .expect("create session 1");
+    let tx2 = tx.clone();
     let id2 = manager
-        .create(
-            sh_spec(),
-            Box::new(ChannelSink { tx: tx.clone() }),
-            SessionOptions::default(),
-        )
+        .create(sh_spec(), SessionOptions::default(), move |_| {
+            Box::new(ChannelSink { tx: tx2 })
+        })
         .expect("create session 2");
     assert_ne!(id1, id2);
     assert!(manager.get(id1).is_some());
@@ -238,9 +255,12 @@ fn manager_create_get_remove_stats() {
 
     let stats = manager.stats();
     assert_eq!(stats.len(), 2);
-    let ids: Vec<u32> = stats.iter().map(|s| s.id).collect();
+    let ids: Vec<SessionId> = stats.iter().map(|&(id, _)| id).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted, "stats must be sorted by id ascending");
     assert!(ids.contains(&id1) && ids.contains(&id2));
-    assert!(stats.iter().all(|s| s.alive));
+    assert!(stats.iter().all(|(_, s)| s.alive));
 
     assert!(manager.remove(id1));
     assert!(manager.get(id1).is_none());
@@ -248,4 +268,185 @@ fn manager_create_get_remove_stats() {
     assert_eq!(manager.stats().len(), 1);
     assert!(manager.remove(id2));
     assert!(manager.stats().is_empty());
+}
+
+// 신규 (a) manager.create 의 sink factory 가 받는 id == create 가 반환하는 id.
+//    동기 경로만 검증하므로 대기(타임아웃 가드 대상)가 없다.
+#[test]
+fn manager_create_passes_issued_id_to_sink_factory() {
+    let manager = SessionManager::new();
+    let captured: Arc<Mutex<Option<SessionId>>> = Arc::new(Mutex::new(None));
+    let captured_in_factory = Arc::clone(&captured);
+    let id = manager
+        .create(sh_spec(), SessionOptions::default(), move |issued| {
+            *captured_in_factory.lock().unwrap() = Some(issued);
+            // 출력은 버린다 — 이 테스트는 id 전달만 본다.
+            Box::new(DropSink)
+        })
+        .expect("create session");
+    assert_eq!(
+        *captured.lock().unwrap(),
+        Some(id),
+        "sink factory must receive the same id create returns"
+    );
+    assert!(manager.remove(id));
+}
+
+// 신규 (b) flood → paused → reattach() → paused 해제 + end_offset·offset 연속성.
+#[test]
+fn reattach_resumes_paused_session_with_continuous_offsets() {
+    // HIGH 를 넉넉히 잡아 reattach 직후 재-pause 까지의 여유(재-pause 에는 256KB
+    // 재유입 필요)를 확보한다. seq 200000 출력(약 1.4MB)이면 pause 는 확실히 온다.
+    const HIGH: usize = 256 * 1024;
+    const LOW: usize = 64 * 1024;
+    let opts = SessionOptions {
+        replay_cap: 64 * 1024,
+        high_water: HIGH,
+        low_water: LOW,
+    };
+    let (session, rx) = spawn_sh(opts);
+    session.write(b"seq 200000\n").expect("write seq command");
+
+    // ack 없이 paused 전환을 기다린다.
+    let deadline = Instant::now() + TIMEOUT;
+    while !session.stats().paused {
+        let _ = remaining(deadline, "paused transition");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // paused 동안 리더는 read 를 멈추므로 bytes_out 은 고정이다. pause 직전까지
+    // 계정된 chunk 의 in-flight 송신을 전부 수신해 reattach 경계를 결정적으로
+    // 만든다 (offset 연속성 덕에 마지막 chunk 끝 == bytes_out 이 수렴 조건).
+    let frozen = session.stats().bytes_out;
+    let mut chunks: Vec<(u64, usize)> = Vec::new();
+    // 수신 바이트도 누적한다 — replay 스냅샷이 이 스트림의 tail 과 바이트 단위로
+    // 일치하는지(내용 검증)까지 보기 위해서다.
+    let mut stream: Vec<u8> = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    while chunks.last().map(|&(offset, len)| offset + len as u64) != Some(frozen) {
+        match rx.recv_timeout(remaining(deadline, "in-flight chunks before reattach")) {
+            Ok(Event::Output { offset, bytes }) => {
+                chunks.push((offset, bytes.len()));
+                stream.extend_from_slice(&bytes);
+            }
+            Ok(_) => {}
+            Err(err) => panic!("in-flight chunks did not drain up to bytes_out {frozen} ({err})"),
+        }
+    }
+    let pre_reattach_count = chunks.len();
+
+    let (end_offset, replay) = session.reattach();
+    assert_eq!(
+        end_offset, frozen,
+        "end_offset must equal bytes_out at reattach"
+    );
+    assert!(
+        !replay.is_empty(),
+        "replay snapshot must not be empty after flood"
+    );
+    // 내용 검증: replay 는 전달된 스트림의 정확한 tail — 구간
+    // [end_offset - replay.len(), end_offset) 과 바이트 단위로 일치해야 한다.
+    // (offset dedup 계약의 나머지 절반 — 위치만이 아니라 내용의 정합.)
+    assert_eq!(
+        stream.len() as u64,
+        frozen,
+        "accumulated stream must cover exactly [0, end_offset)"
+    );
+    let tail_start = stream.len() - replay.len();
+    assert_eq!(
+        replay.as_slice(),
+        &stream[tail_start..],
+        "replay snapshot must be the byte-exact tail of the delivered stream"
+    );
+    // reattach 가 lock 안에서 paused 를 내렸다. 리더가 이 관측 전에 재-pause
+    // 하려면 HIGH(256KB) 를 무ack 로 다시 채워야 하므로 즉시 관측은 안정적이다.
+    assert!(!session.stats().paused, "reattach must clear paused");
+
+    // 재개 증명: 새 chunk 가 도착해야 한다. 재-pause 를 막기 위해 받는 즉시
+    // 전량 ack 한다 (reattach 호출자 계약과 동일한 "받은 만큼 ack" 규칙).
+    let deadline = Instant::now() + TIMEOUT;
+    while chunks.len() < pre_reattach_count + 3 {
+        match rx.recv_timeout(remaining(deadline, "post-reattach output")) {
+            Ok(Event::Output { offset, bytes }) => {
+                session.ack(bytes.len());
+                chunks.push((offset, bytes.len()));
+            }
+            Ok(_) => {}
+            Err(err) => panic!("no output arrived after reattach ({err})"),
+        }
+    }
+
+    // 첫 post-reattach chunk 는 스냅샷 이후 구간이어야 한다 (dedup 경계 계약).
+    let (first_offset, _) = chunks[pre_reattach_count];
+    assert!(
+        first_offset >= end_offset,
+        "first post-reattach chunk offset {first_offset} precedes snapshot end {end_offset}"
+    );
+    // 전 구간 offset 연속성: 각 chunk 의 offset == 직전 offset + 직전 len.
+    // (reattach 경계를 포함한 전체 스트림이 끊김 없이 이어져야 한다.)
+    for pair in chunks.windows(2) {
+        let (prev_offset, prev_len) = pair[0];
+        let (next_offset, _) = pair[1];
+        assert_eq!(
+            next_offset,
+            prev_offset + prev_len as u64,
+            "offset stream must be continuous"
+        );
+    }
+    session.kill();
+}
+
+// 신규 (c) 항상 Dropped 를 반환하는 sink — pending 무누적(pause 없음)·bytes_out
+//    증가·replay 기록을 검증한다 (보상 롤백 경로).
+#[test]
+fn dropped_sink_keeps_session_free_running() {
+    const HIGH: usize = 64 * 1024;
+    let opts = SessionOptions {
+        replay_cap: 64 * 1024,
+        high_water: HIGH,
+        low_water: 16 * 1024,
+    };
+    let session =
+        PtySession::spawn(sh_spec(), Box::new(DropSink), opts).expect("failed to spawn sh in pty");
+    session.write(b"seq 200000\n").expect("write seq command");
+
+    // 보상 롤백이 없다면 pending 이 HIGH 에 도달해 pause 로 굳는다 — bytes_out 이
+    // HIGH 를 훌쩍 넘겨 계속 증가하는 것이 자유 진행(pause 없음)의 증거다.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let stats = session.stats();
+        assert!(!stats.paused, "session paused despite Dropped rollback");
+        // 순간 샘플은 롤백 직전 in-flight chunk 1개 분량(≤ read 버퍼)일 수 있으나
+        // 누적은 없어야 한다 — HIGH 미만이면 누수가 아니다.
+        assert!(
+            stats.pending < HIGH,
+            "pending {} accumulated despite Dropped rollback",
+            stats.pending
+        );
+        if stats.bytes_out >= (4 * HIGH) as u64 {
+            break;
+        }
+        let _ = remaining(deadline, "bytes_out growth with Dropped sink");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // 출력이 조용해진 뒤에는 in-flight chunk 가 없으므로 pending 은 정확히 0.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let before = session.stats().bytes_out;
+        thread::sleep(Duration::from_millis(200));
+        let after = session.stats();
+        if after.bytes_out == before {
+            assert_eq!(after.pending, 0, "pending must settle to 0 after quiesce");
+            assert!(!after.paused, "session must not be paused after quiesce");
+            break;
+        }
+        let _ = remaining(deadline, "output quiesce with Dropped sink");
+    }
+
+    assert!(
+        !session.replay().is_empty(),
+        "replay must record output even when the sink drops it"
+    );
+    session.kill();
 }

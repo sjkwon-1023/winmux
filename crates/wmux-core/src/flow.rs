@@ -3,7 +3,19 @@
 //! 프론트엔드로 보냈지만 아직 소비(ack)되지 않은 바이트 수(pending)를 추적해
 //! PTY 읽기를 멈출지(Pause)/재개할지(Resume) 결정한다. 판단만 하는 순수 상태
 //! 머신이며 실제 읽기 중단은 세션 리더 스레드가 수행한다.
-//! 계약: `docs/plans/spike-plan.md` 4.3장.
+//!
+//! # 계약
+//!
+//! - `on_sent(n)`: pending += n. paused 가 아닌 상태에서 pending ≥ high_water 에
+//!   도달하는 순간 정확히 한 번 `Pause` 를 지시한다. 이미 paused 면 (리더가 멈추기
+//!   전의 잔여 전송이 있어도) `None`.
+//! - `on_acked(n)`: pending -= n (saturating — 초과 ack 이 와도 0 밑으로 내려가지
+//!   않는다). paused 상태에서 pending ≤ low_water 에 도달하는 순간 정확히 한 번
+//!   `Resume`.
+//! - `reset()`: reattach 시 계정 재시작 (pending = 0, paused = false). 상세는 해당
+//!   rustdoc 참조.
+//! - 경계: high == low 는 유효, low > high 는 Resume 이 불가능한 설정 오류라 생성
+//!   시 즉시 panic.
 
 /// `on_sent`/`on_acked` 가 호출자에게 지시하는 동작.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +72,21 @@ impl FlowControl {
         } else {
             FlowAction::None
         }
+    }
+
+    /// flow 계정을 초기 상태로 되돌린다 (pending = 0, paused = false).
+    ///
+    /// reattach(프론트 재접속) 시 호출된다 — 이전 채널로 보냈던 미ack 바이트는
+    /// 새 프론트가 replay 스냅샷으로 다시 받으므로, 계정을 0 에서 새로 시작해야
+    /// 스냅샷 이후의 전송·ack 만 대칭으로 계상된다.
+    ///
+    /// 리셋 직후 구채널의 잔여 ack 이 뒤늦게 도착해도 무해하다: `on_acked` 의
+    /// saturating_sub 가 pending 을 0 밑으로 내리지 않으므로 계정이 언더플로로
+    /// 붕괴하는 일이 없고, 최악의 경우에도 새 에폭의 pending 을 일회성으로 조금
+    /// 일찍 줄여 Resume 이 앞당겨질 뿐 영구적인 누수·정지는 생기지 않는다.
+    pub fn reset(&mut self) {
+        self.pending = 0;
+        self.paused = false;
     }
 
     pub fn pending(&self) -> usize {
@@ -174,6 +201,28 @@ mod tests {
     fn low_above_high_is_rejected() {
         // 설정 오류는 조용히 넘어가지 않고 즉시 실패시킨다.
         let _ = FlowControl::new(100, 200);
+    }
+
+    #[test]
+    fn reset_clears_pending_and_paused() {
+        let mut fc = FlowControl::new(100, 20);
+        assert_eq!(fc.on_sent(150), FlowAction::Pause);
+        fc.reset();
+        assert_eq!(fc.pending(), 0);
+        assert!(!fc.is_paused());
+        // 리셋 후에도 상태 머신은 처음처럼 다시 순환한다.
+        assert_eq!(fc.on_sent(100), FlowAction::Pause);
+    }
+
+    #[test]
+    fn stale_ack_after_reset_is_harmless() {
+        let mut fc = FlowControl::new(100, 20);
+        fc.on_sent(150);
+        fc.reset();
+        // 구채널 잔여 ack — saturating 으로 0 에 머문다 (paused 아님 → None).
+        assert_eq!(fc.on_acked(150), FlowAction::None);
+        assert_eq!(fc.pending(), 0);
+        assert!(!fc.is_paused());
     }
 
     #[test]

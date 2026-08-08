@@ -4,6 +4,8 @@
 > 항목은 [`docs/adr/0001-adopt-tauri-webview2-xterm-stack.md`](../adr/0001-adopt-tauri-webview2-xterm-stack.md)
 > 참조. 이 문서의 4장(모듈 계약)은 코드 주석들이 참조하는 계약 문서로 유지되며, MVP 리팩터링이
 > 계약을 대체하는 시점에 문서 전체를 삭제한다.
+> **4.3(flow)·4.4(session)은 10단계 청크 A에서 대체됨** — 현행 계약은 해당 모듈의 rustdoc
+> (`crates/wmux-core/src/{flow,session}.rs`)이 정본이다 (offset/Delivery sink·reattach·id 선발급).
 
 `터미널-계획-v2.md`(이하 "계획 v2") 17장 개발 순서의 **1~9단계(기술 검증 Spike)** 를 코드로 만드는
 세션 실행 계획이다. 계획 v2가 제품 계획이고, 이 문서는 그중 Spike 단계를 "무엇을 어떤 계약으로
