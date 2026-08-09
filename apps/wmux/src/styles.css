@@ -10,6 +10,7 @@
   --border: #3c3c3c;
   --accent: #007acc;
   --error: #f48771;
+  --send: #c586c0; /* send-mode 대상 하이라이트 (17단계) — accent·error 와 구분 */
 }
 
 * {
@@ -432,6 +433,20 @@ body {
 
 .term-host .xterm {
   height: 100%;
+}
+
+/* ── send-mode 대상 선택 (17단계) ──────────────────────────────────────
+   workspace-view 가 #view 에 .send-mode 를 토글한다. pane 전체가 "클릭 = 대상
+   확정"임을 커서(crosshair)와 hover 테두리로 최소 표시한다. 셀렉터에 #view id
+   가 들어가 xterm.css 의 cursor(text 등)보다 특이도가 높다 — !important 불요. */
+
+#view.send-mode .pane,
+#view.send-mode .pane * {
+  cursor: crosshair;
+}
+
+#view.send-mode .pane:hover {
+  border-color: var(--send);
 }
 
 /* 진단용 pane id 라벨 (체크포인트 1 버그 3) — 헤더 소속 pane 을 화면에서 판별 */

@@ -25,6 +25,9 @@
 // - Ctrl+V, Ctrl+Shift+V, Shift+Insert: 붙여넣기 (클립보드 → term.paste 단일 경로)
 // - Ctrl+C·Ctrl+Shift+C·Ctrl+Insert (선택 있을 때만): 복사. 선택 없는 Ctrl+C 는
 //   그대로 SIGINT.
+// - Esc 는 여기서 가로채지 않는다 — 단 **send-mode(전달 대상 선택) 활성 중에만**
+//   workspace-view 의 window keydown capture 가 취소용으로 선점한다 (17단계,
+//   계획 v2 3장 가로채기 목록의 의도적 확장). 평시 Esc 는 그대로 PTY 로 간다.
 //
 // 세션 수명은 dispatcher(CloseTab/ClosePane/CloseWorkspace) 소유다 — dispose 는
 // 뷰만 해제하고 세션을 죽이지 않는다.
@@ -117,6 +120,41 @@ export class TerminalView {
       return;
     }
     this.term.focus();
+  }
+
+  /** 현재 선택 텍스트 — 없으면 빈 문자열 (17단계 전달 소스 캡처).
+   *  무선택 에러 판정은 호출측(pane-view) 몫이다. */
+  getSelection(): string {
+    return this.term.getSelection();
+  }
+
+  /** 패널 간 텍스트 전달 수신 경로 (17단계 D1 — 계획 v2 8장 sendText).
+   *  반드시 xterm 의 term.paste 를 경유한다: bracketed paste 모드 추적을 xterm
+   *  이 담당하므로 `ESC[200~` 를 raw 로 PTY 에 쓰지 않는다 (수신 앱이 paste
+   *  mode 를 안 켰으면 시퀀스가 입력으로 그대로 들어가는 사고 방지). 결과
+   *  바이트는 기존 onData → write_stdin 으로 흐른다.
+   *
+   *  onData 는 replayDone 게이트를 지나므로, 게이트가 아직 닫혀 있으면(재-attach
+   *  replay 재생 중) 이 전달은 실제로 유실된다. 전달 대상은 표시 중(attach 완료)
+   *  뷰뿐이라 실질적으로는 극초기 경합 창에서만 가능하지만, 조용한 유실은 금지 —
+   *  발생하면 로그로 드러낸다. */
+  paste(text: string): void {
+    if (!this.replayDone) {
+      console.warn(
+        "[wmux] send-mode paste before replay done — text dropped by onData gate",
+        { session: this.session, length: text.length },
+      );
+    }
+    this.term.paste(text);
+  }
+
+  /** 전달 후 실행의 submit 절반 (계획 v2 8장 sendTextAndSubmit) — CR 1회를
+   *  PTY stdin 에 직접 쓴다. paste 와 분리된 별도 호출이라 "전달"만으로는
+   *  절대 실행되지 않는다 (실수 실행 방지). */
+  submit(): void {
+    writeStdin(this.session, "\r").catch((err) =>
+      console.error("write_stdin failed", err),
+    );
   }
 
   /** attach 수행 — 생성 직후 정확히 1회 호출한다. 실패는 그대로 reject 로

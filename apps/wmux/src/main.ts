@@ -102,10 +102,19 @@ class App {
     this.viewEl,
     (cmd) => this.dispatchUI(cmd),
     this.tracer,
+    // send-mode 상태 라인 위임 (17단계) — 지속 프롬프트는 promptText 슬롯,
+    // 캡처·전달 실패는 기존 one-shot 에러 경로를 재사용한다.
+    {
+      setPrompt: (text) => this.setPrompt(text),
+      flashError: (text) => this.showError(text),
+    },
   );
   private readonly sidebar = new Sidebar(requireElement("sidebar"), (cmd) => this.dispatchUI(cmd));
   private errorText: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
+  /** send-mode 지속 프롬프트 (17단계) — one-shot 에러와 별개 슬롯: 모드 활성
+   *  동안 유지되고 해제 시 null 로 기본 상태 라인이 복원된다 (타이머 없음). */
+  private promptText: string | null = null;
 
   async init(): Promise<void> {
     // dev 훅은 부트스트랩 실패와 무관하게 먼저 노출한다 — 실패 시 콘솔에서
@@ -207,6 +216,14 @@ class App {
     this.renderStatusLine();
   }
 
+  /** send-mode 프롬프트 갱신 — null 이면 해제(기본 표시 복원). 무변경 재렌더는
+   *  건너뛴다 (arm 덮어쓰기 등에서 같은 문자열이 반복 유입될 수 있다). */
+  private setPrompt(text: string | null): void {
+    if (this.promptText === text) return;
+    this.promptText = text;
+    this.renderStatusLine();
+  }
+
   private clearError(): void {
     if (this.errorTimer !== null) {
       clearTimeout(this.errorTimer);
@@ -229,10 +246,12 @@ class App {
     this.tracer.settle();
   }
 
+  /** 상태 라인 조립 — 기본 텍스트 · [send-mode 프롬프트] · [one-shot 에러]. */
   private renderStatusLine(): void {
-    const base = statusText(this.store.snapshot);
-    this.statusEl.textContent =
-      this.errorText === null ? base : `${base} · ERROR: ${this.errorText}`;
+    const parts = [statusText(this.store.snapshot)];
+    if (this.promptText !== null) parts.push(this.promptText);
+    if (this.errorText !== null) parts.push(`ERROR: ${this.errorText}`);
+    this.statusEl.textContent = parts.join(" · ");
   }
 }
 

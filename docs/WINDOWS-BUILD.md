@@ -41,7 +41,7 @@ Build Tools — not the full Visual Studio IDE.
    selected:
    - **x64**: `MSVC v143 - VS 2022 C++ x64/x86 build tools` (this dev machine's target)
    - **ARM64**: `MSVC v143 - VS 2022 C++ ARM64 build tools` (only needed if you'll build for
-     ARM64 — see section 10)
+     ARM64 — see section 11)
 4. Also confirm a **Windows 10/11 SDK** component is selected (the installer usually pulls one
    in automatically with the C++ workload).
 
@@ -385,7 +385,43 @@ button, 계획 v2 section 12).
 10. **Kill survives** — force-kill the app from Task Manager, restart → state is restored
     except at most the last ≤500ms of structural mutations (save debounce window).
 
-## 10. ARM64 cross-build notes
+## 10. Stage 17+ / Checkpoint 2 manual verification
+
+This section collects the batched manual Windows verification for the stages after
+checkpoint 1, to be run at **checkpoint 2** (after stage 21). Items are appended per
+stage as each lands.
+
+### Stage 17 — pane-to-pane text send (계획 v2 section 8)
+
+The pane header gains two send icons: `⤷` (send selection) and `⤷⏎` (send & run).
+Clicking one captures the current selection of that pane's shown terminal and enters
+target-selection mode (status line prompt, crosshair cursor); the next primary-button
+mousedown on a pane delivers.
+
+1. **Send selection** — select text in one terminal, click that pane's `⤷` icon: the
+   status line shows `send: click a pane to send to (Esc cancels)`; click another pane →
+   the text appears on the target's input line **without executing** (no Enter is sent),
+   and the prompt clears.
+2. **Send & run is a separate gesture** — repeat with `⤷⏎`: the text is pasted *and*
+   followed by exactly one CR in the target (a shell command runs once). The two icons
+   stay visually and behaviorally distinct (mis-run guard).
+3. **Bracketed paste safety (vim target)** — open `vim` in the target pane, enter insert
+   mode, and send a multi-line selection with `⤷` (send only): the text lands as a paste —
+   no autoindent staircase, no literal `ESC[200~`/`ESC[201~` fragments, and **nothing is
+   executed** (send-only must never run anything in the target, TUI or shell). With a
+   shell target *not* in bracketed paste mode, the same multi-line send must not execute
+   the intermediate lines either — the paste goes through xterm's paste path, which tracks
+   the target's paste mode instead of writing raw escape sequences to the PTY.
+4. **No selection surfaces an error** — with no selection in the source terminal (or with
+   an empty pane / non-terminal placeholder shown), clicking either icon shows a one-shot
+   status-line error (`no selection to send` / `cannot send: no terminal shown in this
+   pane`) and does **not** enter target-selection mode.
+5. **Esc and self-click cancel** — arm send mode, press Esc → the prompt clears, nothing
+   is sent, and the next pane click focuses normally (the Esc must not leak into the
+   terminal). Arm again and click the **source** pane itself → cancelled the same way
+   (self-send is meaningless).
+
+## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
 (터미널-계획-v2.md section 13) is ARM64. Cross-compiling *from* this x64 Windows machine *for*

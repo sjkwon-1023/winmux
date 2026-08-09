@@ -22,10 +22,18 @@
 //
 // split 컨테이너 자식 구조 불변식: [first, splitter.handle, second] — syncRatios
 // 의 children 0/2 접근과 buildNode 의 append 순서가 이 불변식을 공유한다.
+//
+// send-mode (17단계): 패널 간 텍스트 전달의 대상 선택 모드를 여기서 소유한다 —
+// pane·뷰 레지스트리 접근을 모두 가진 곳이라 소스 arm(pane-view 아이콘 경유)
+// → 대상 resolve(pane mousedown 경유) → 대상 pane 표시 뷰로 paste/submit 실행
+// 까지 응집된다. 상태 머신은 send-mode.ts (순수), 상태 라인 프롬프트·에러는
+// main 의 SendStatus 계약으로 위임한다. Esc 취소는 모드 활성 중에만 window
+// keydown capture 를 걸었다 뗀다 (상시 리스너 금지 — 평시 Esc 는 PTY 소유).
 
 import { detachTerminal } from "./backend";
 import { PaneView } from "./pane-view";
-import type { ViewRegistry } from "./pane-view";
+import type { SendController, ViewRegistry } from "./pane-view";
+import { SendMode, sendModePrompt } from "./send-mode";
 import { Splitter } from "./splitter";
 import type { DragGuard } from "./splitter";
 import { flexPair, structureKey } from "./split-layout";
@@ -55,6 +63,14 @@ export type FocusRequest =
   /** 렌더 시점의 활성 워크스페이스 activePane — CloseTab/ClosePane 처럼 "닫힌 뒤
    *  어디가 남는지"를 스냅샷이 알려줘야 하는 보상에 쓴다. */
   | { kind: "activePane" };
+
+/** 상태 라인 접근 계약 (17단계) — 구현·소유자는 main.App 이다. 지속 프롬프트
+ *  (setPrompt)는 one-shot 에러(flashError)와 별개 슬롯이다: send-mode 활성 동안
+ *  유지되고, 해제 시 null 로 기본 표시가 복원된다. */
+export interface SendStatus {
+  setPrompt(text: string | null): void;
+  flashError(text: string): void;
+}
 
 /** 활성 워크스페이스 해석 — 없으면 null (main.ts 상태 라인과 공유). */
 export function activeWorkspace(snapshot: StateSnapshot): Workspace | null {
@@ -113,13 +129,99 @@ export class WorkspaceView {
     if (ws !== null) this.syncRatios(ws.layout);
   };
 
+  /** 패널 간 텍스트 전달 상태 머신 (17단계 — 순수, send-mode.ts). */
+  private readonly sendMode = new SendMode();
+  /** send-mode Esc capture 설치 여부 — 모드 활성 중에만 리스너를 유지한다. */
+  private sendEscInstalled = false;
+
+  /** PaneView 에 내려주는 send-mode 접근 계약 — arm/resolve 후의 UI 동기화
+   *  (프롬프트·Esc·커서 클래스)는 전부 여기(소유자)로 모인다. */
+  private readonly sendCtl: SendController = {
+    isActive: () => this.sendMode.active,
+    arm: (source, text, submit) => {
+      this.sendMode.arm(source, text, submit);
+      this.syncSendUi();
+    },
+    resolve: (target) => this.resolveSend(target),
+    flashError: (message) => this.sendStatus.flashError(message),
+  };
+
+  /** send-mode Esc 취소 (17단계 D2) — 모드 활성 중에만 window capture 로 설치
+   *  된다 (syncSendUi). xterm 포커스보다 먼저 잡아 PTY 로 새지 않게 한다. */
+  private readonly onSendEsc = (ev: KeyboardEvent): void => {
+    if (ev.key !== "Escape") return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.sendMode.cancel();
+    this.syncSendUi();
+  };
+
   constructor(
     private readonly rootEl: HTMLElement,
     private readonly dispatch: DispatchFn,
     /** 전환 지연 tracer (14단계) — ensureView 의 새 attach 를 계측 대상으로
      *  등록한다. trace 미진행 시 markAttachStart 가 즉시 false 라 오버헤드 없음. */
     private readonly tracer: SwitchTracer,
+    /** 상태 라인 위임 (17단계) — send-mode 프롬프트·에러 표면화. */
+    private readonly sendStatus: SendStatus,
   ) {}
+
+  /** send-mode 상태 → UI 동기화: rootEl 클래스(커서·하이라이트), 상태 라인
+   *  프롬프트(활성 동안 유지·해제 시 복원), Esc capture 설치/해제. */
+  private syncSendUi(): void {
+    const active = this.sendMode.active;
+    this.rootEl.classList.toggle("send-mode", active);
+    this.sendStatus.setPrompt(sendModePrompt(this.sendMode.state));
+    if (active !== this.sendEscInstalled) {
+      if (active) {
+        window.addEventListener("keydown", this.onSendEsc, { capture: true });
+      } else {
+        window.removeEventListener("keydown", this.onSendEsc, { capture: true });
+      }
+      this.sendEscInstalled = active;
+    }
+  }
+
+  /** 대상 확정 → 전달 실행 (17단계 D1·D3). deliver=false(자기 자신 등)는 취소.
+   *  대상 pane 의 표시 뷰가 터미널이 아니면(빈 pane·뷰어 탭) 상태 라인 에러 —
+   *  shownTab 이 있으면 레지스트리에 attach 된 TerminalView 가 반드시 있다
+   *  (planViewSync 의 visible 판정이 terminal+session 탭만 내려준다). */
+  private resolveSend(target: PaneId): void {
+    const result = this.sendMode.resolve(target);
+    this.syncSendUi();
+    // 대상 확정 mousedown 의 후속 click 1회를 삼킨다 — 같은 제스처의 click 이
+    // 대상 pane 의 탭 활성화·전달 아이콘 등 다른 핸들러로 흘러들지 않게.
+    this.swallowGestureClick();
+    if (!result.deliver) return;
+    const shown = this.paneViews.get(target)?.shownTab ?? null;
+    const view = shown === null ? undefined : this.views.get(shown);
+    if (view === undefined) {
+      this.sendStatus.flashError("cannot send: target pane has no terminal");
+      return;
+    }
+    view.paste(result.text);
+    if (result.submit) view.submit();
+  }
+
+  /** 진행 중 제스처(mousedown 은 이미 pane capture 에서 소비)의 click 1회를
+   *  window capture 에서 삼킨다. click 이 끝내 오지 않는 경우(창 밖 mouseup)를
+   *  대비해 다음 mousedown(새 제스처)에서도 해제한다 — 리스너 잔류 금지. */
+  private swallowGestureClick(): void {
+    const cleanup = (): void => {
+      window.removeEventListener("click", onClick, { capture: true });
+      window.removeEventListener("mousedown", onNextGesture, { capture: true });
+    };
+    const onClick = (ev: MouseEvent): void => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      cleanup();
+    };
+    const onNextGesture = (): void => cleanup();
+    // 현재 이벤트는 이미 window capture 단계를 지났으므로 지금 걸어도 현재
+    // mousedown 에는 발화하지 않는다 — 다음 이벤트부터 유효하다.
+    window.addEventListener("click", onClick, { capture: true });
+    window.addEventListener("mousedown", onNextGesture, { capture: true });
+  }
 
   /** 스냅샷 반영 진입점 — store 구독에서 revision 순으로 호출된다. */
   render(snapshot: StateSnapshot): void {
@@ -290,7 +392,7 @@ export class WorkspaceView {
     if (tree.type === "leaf") {
       let view = this.paneViews.get(tree.pane);
       if (view === undefined) {
-        view = new PaneView(tree.pane, this.dispatch, this.registry);
+        view = new PaneView(tree.pane, this.dispatch, this.registry, this.sendCtl);
         this.paneViews.set(tree.pane, view);
       }
       return view.root; // 기존 뷰는 append 시 자동 reparent 된다

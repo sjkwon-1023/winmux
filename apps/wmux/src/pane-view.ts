@@ -15,6 +15,11 @@
 // pane 이면 FocusPane 을 dispatch 한다. preventDefault 는 하지 않는다 — xterm 의
 // 포커스·선택 처리를 강탈하면 안 되기 때문이다. DOM 포커스는 그대로 흘러가고
 // 모델의 active_pane 만 따라온다.
+//
+// send-mode(17단계): 같은 mousedown capture 가 전달 대상 선택 모드 활성 중에는
+// FocusPane 대신 대상 확정(resolve) 경로로 분기한다 — 이때만 예외적으로
+// preventDefault + stopPropagation 한다 (제스처가 순수한 대상 지정이므로 xterm
+// 포커스·선택 개입을 막는다). 소스 캡처는 헤더의 ⤷/⤷⏎ 아이콘이 담당한다.
 
 import { tabStripModel } from "./tab-strip-model";
 import type { TabButtonModel } from "./tab-strip-model";
@@ -48,6 +53,20 @@ export interface ViewRegistry {
   ): TerminalView;
 }
 
+/** send-mode 접근 계약 (17단계) — 소유자는 workspace-view 다. pane-view 는
+ *  소스 캡처(arm)·대상 확정(resolve)·활성 판정(isActive)·캡처 실패 표면화
+ *  (flashError)만 부른다. 상태 머신 자체는 send-mode.ts (순수). */
+export interface SendController {
+  /** 대상 선택 모드 활성 여부 — mousedown 분기 판정. */
+  isActive(): boolean;
+  /** 소스 캡처 성공 후 모드 진입 — 프롬프트·Esc 배선은 소유자가 처리한다. */
+  arm(source: PaneId, text: string, submit: boolean): void;
+  /** 대상 확정 (자기 자신 = 취소 판정 포함) — 전달 실행도 소유자 몫이다. */
+  resolve(target: PaneId): void;
+  /** 캡처 실패(무선택·터미널 없음) one-shot 에러 — 조용한 no-op 금지. */
+  flashError(message: string): void;
+}
+
 /** 콘텐츠 placeholder 텍스트 (터미널 뷰가 없는 경우 — 영어 UI 텍스트). */
 function placeholderText(tab: Tab | null): string {
   if (tab === null) return "no tabs — press + to open a new terminal tab";
@@ -78,6 +97,7 @@ export class PaneView {
     readonly paneId: PaneId,
     private readonly dispatch: DispatchFn,
     private readonly views: ViewRegistry,
+    private readonly send: SendController,
   ) {
     this.root = document.createElement("div");
     this.root.className = "pane";
@@ -102,6 +122,15 @@ export class PaneView {
         // 탭 클릭도 이 경로가 FocusPane 을 담당한다 (onTabClick 주석 참조).
         // 주 버튼만 — 우/중클릭은 컨텍스트 메뉴·붙여넣기 등 다른 의미를 갖는다.
         if (ev.button !== 0) return;
+        // send-mode 대상 확정 (17단계 D2) — FocusPane 대신 resolve 경로. 이
+        // 제스처는 순수한 대상 지정이므로 예외적으로 기본 동작·전파를 끊는다
+        // (파일 상단 주석). 자기 자신 클릭 = 취소 판정은 send-mode 상태 머신 몫.
+        if (this.send.isActive()) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.send.resolve(this.paneId);
+          return;
+        }
         if (!this.isActive) void this.dispatch({ type: "focusPane", pane: this.paneId });
       },
       { capture: true },
@@ -141,6 +170,12 @@ export class PaneView {
         tab: { type: "terminal", cwd: null },
       })),
       browser,
+      // 패널 간 텍스트 전달 (17단계 D2) — "전달"과 "전달 후 실행"을 아이콘부터
+      // 분리한다 (실수 실행 방지, 계획 v2 8장).
+      this.actionButton("⤷", "Send selection to another pane", () => this.armSend(false)),
+      this.actionButton("⤷⏎", "Send selection & run in another pane", () =>
+        this.armSend(true),
+      ),
       // 분할은 원자 SplitPane — 새 pane 에 terminal 탭까지 한 번에 생성한다
       // (계획 D5: 컴포지션 금지, 중간 스냅샷 1프레임 렌더 방지).
       this.iconButton("◫", "Split left/right", () => ({
@@ -157,6 +192,34 @@ export class PaneView {
       })),
     );
     return header;
+  }
+
+  /** 콜백 실행 버튼 (17단계) — iconButton 은 Command dispatch 전용이라 별도:
+   *  send-mode arm 은 dispatch 가 아니라 로컬 상태 전이다. */
+  private actionButton(label: string, title: string, onClick: () => void): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label;
+    btn.title = title;
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  /** 전달 아이콘 클릭 (17단계 D2) — 이 pane 의 표시 중 터미널에서 선택 텍스트를
+   *  캡처해 대상 선택 모드로 arm 한다. 캡처 불가(빈 pane·뷰어 탭·무선택)는 상태
+   *  라인 one-shot 에러로 표면화한다 — 조용한 no-op 금지. */
+  private armSend(submit: boolean): void {
+    const view = this.shown === null ? undefined : this.views.get(this.shown);
+    if (view === undefined) {
+      this.send.flashError("cannot send: no terminal shown in this pane");
+      return;
+    }
+    const text = view.getSelection();
+    if (text.length === 0) {
+      this.send.flashError("no selection to send");
+      return;
+    }
+    this.send.arm(this.paneId, text, submit);
   }
 
   private iconButton(
