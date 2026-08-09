@@ -42,6 +42,17 @@ validation, fs_* invokes with default-distro resolution, viewer unmount lifecycl
 Plan files `docs/plans/mvp-stage{17,18,20,21}-plan.md` stay until checkpoint 2 passes,
 then distill into ADRs per ADR-0001's docs governance.
 
+Checkpoint 2 ran 2026-08-09: **passed** except three field defects, all fixed and
+pushed the same day (hook tty fallback, minimize-aware markdown polling,
+.gitattributes LF) together with the keyboard-first UX batch (global Ctrl+Shift
+shortcuts + tooltips from `keys.ts shortcutLabel`, folder/text viewer keyboard
+navigation, per-tab HISTFILE, window-restore centering) — the batched
+**re-verification checklist is WINDOWS-BUILD §10 last subsection** (user will run it
+together with later verification). RAM at checkpoint 2: ~129MB (inside the 100–150MB
+adoption band; ≤100MB stays a v2 optimization backlog item). Stage 22 (CI) is live:
+first run green, gates on every push, x64+ARM64 artifacts via workflow_dispatch.
+Stage 23 (ARM64 device checklist, WINDOWS-BUILD §11) awaits hardware.
+
 ## Layout
 
 - `crates/wmux-core` — pure Rust core (PTY session, flow control, OSC scanner, replay
