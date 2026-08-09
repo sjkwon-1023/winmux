@@ -12,8 +12,14 @@ MVP stages 10–12 are **done and Windows-verified** (2026-08-09): stage 10 (dat
 command dispatcher + stable IDs — ADR-0002) and stages 11–12 (split/tab UI — ADR-0003:
 SplitId addressing, atomic SplitPane{tab}, splitter drag, keep-alive tab views, CloseTab
 auto-collapse, self-healing detach, Ctrl+Shift+R reload). The Windows checklists in
-`docs/WINDOWS-BUILD.md` sections 6–7 stay as regression references. Next: stage 13
-(workspace sidebar), then 14 (teardown latency + reset triggers).
+`docs/WINDOWS-BUILD.md` sections 6–7 stay as regression references.
+
+Roadmap (user decision 2026-08-09): proceed straight through stage 21, with **stage 19
+(git branch display) deferred to v2** — the model fields (`git_branch`/`git_dirty`) stay
+reserved and the sidebar hides them while null. Manual Windows testing is batched into
+two checkpoints: after stage 16 (sidebar + teardown latency + persistence + auto reset)
+and after stage 21 (text passing + notifications + keyboard + viewer tabs + full
+regression). Stages 22–23 (ARM64 CI / device testing) come after checkpoint 2.
 
 ## Layout
 
