@@ -8,20 +8,26 @@
 // 분리된 고정 DOM 이라 재조립 대상이 아니다 — 입력 중 스냅샷이 와도 폼 상태가
 // 날아가지 않는다.
 //
+// 주의(스킵 가드의 성립 조건 — 리뷰 지적): 이 가드는 "무관 스냅샷이 카드 필드를
+// 바꾸지 않는다"에 의존한다. 지금은 agentStatus 가 idle 고정·message/branch 가
+// null 이라 성립하지만, 18~19단계에서 이 필드들이 동적이 되면 무관 revision 이
+// 키를 바꿔 가드가 뚫린다 — 그때는 전체 replaceChildren 을 카드별 키잉
+// reconcile 로 바꿔야 한다.
+//
 // 폼 입력은 표준 DOM <input> 이다 — 키 가로채기를 하지 않는다. 폼에 포커스가
 // 있는 동안 키 입력은 xterm 포커스 밖이라 터미널로 새지 않고, 전역 캡처는
 // Ctrl+Shift+R(리로드)뿐이라 충돌하지 않는다.
 //
 // 상호작용 (계획 D4):
 // - 카드 클릭 = SwitchWorkspace (이미 활성이면 no-op 스킵 — 무변경 revision 잡음 방지).
-// - × = CloseWorkspace. 터미널 탭이 1개라도 있으면 confirm() 을 거친다 — 그
-//   세션 전부를 죽이는 파괴적 동작이다. 판정은 렌더 캐시가 아니라 클릭 시점의
-//   최신 스냅샷으로 한다 (카드 DOM 이 스킵으로 오래됐을 수 있다).
+// - × = CloseWorkspace. 실행 중인 터미널 세션이 1개라도 있으면 confirm() 을
+//   거친다 — 그 세션들을 죽이는 파괴적 동작이다. 판정은 렌더 캐시가 아니라 클릭
+//   시점의 최신 스냅샷으로 한다 (카드 DOM 이 스킵으로 오래됐을 수 있다).
 // - 제출 = CreateWorkspace { tab: terminal } 원자 생성 (계획 13-D1) — 빈
 //   워크스페이스 프레임 없이 터미널까지 한 번에 뜬다. 성공 시 폼을 닫고,
 //   실패는 dispatchUI 가 상태 라인에 표면화하므로 폼을 유지해 재시도하게 한다.
 
-import { hasTerminalTabs, sidebarModel } from "./sidebar-model";
+import { hasRunningTerminals, sidebarModel } from "./sidebar-model";
 import type { WorkspaceCardModel } from "./sidebar-model";
 import type { Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
 
@@ -165,7 +171,7 @@ export class Sidebar {
     const ws =
       this.lastSnapshot?.state.workspaces.find((w) => w.id === workspace) ?? null;
     if (ws === null) return; // 이미 닫힌 카드의 늦은 클릭 — 보낼 것이 없다
-    if (hasTerminalTabs(ws)) {
+    if (hasRunningTerminals(ws)) {
       const ok = confirm(
         `Close workspace "${ws.name}"? All terminal sessions in it will be killed.`,
       );

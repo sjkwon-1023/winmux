@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { abbreviatePath, hasTerminalTabs, sidebarModel } from "./sidebar-model";
+import { abbreviatePath, hasRunningTerminals, sidebarModel } from "./sidebar-model";
 import type { AgentStatus, Pane, Tab, Workspace } from "./types";
 
 function terminalTab(id: number): Tab {
@@ -168,16 +168,19 @@ describe("abbreviatePath", () => {
   });
 });
 
-describe("hasTerminalTabs", () => {
-  it("is true when any pane has a terminal tab", () => {
+describe("hasRunningTerminals", () => {
+  it("is true when any pane has a running terminal tab", () => {
     const w = ws(1, {
       panes: { "1": pane(1, [viewerTab(10)]), "2": pane(2, [terminalTab(11)]) },
     });
-    expect(hasTerminalTabs(w)).toBe(true);
+    expect(hasRunningTerminals(w)).toBe(true);
   });
 
-  it("is false for viewer-only or empty panes", () => {
-    expect(hasTerminalTabs(ws(1, { panes: { "1": pane(1, [viewerTab(10)]) } }))).toBe(false);
-    expect(hasTerminalTabs(ws(2, { panes: { "1": pane(1, []) } }))).toBe(false);
+  it("is false for viewer-only, empty, or exited-only panes", () => {
+    expect(hasRunningTerminals(ws(1, { panes: { "1": pane(1, [viewerTab(10)]) } }))).toBe(false);
+    expect(hasRunningTerminals(ws(2, { panes: { "1": pane(1, []) } }))).toBe(false);
+    const exited = terminalTab(12);
+    if (exited.kind.type === "terminal") exited.kind.status = { type: "exited", code: 0 };
+    expect(hasRunningTerminals(ws(3, { panes: { "1": pane(1, [exited]) } }))).toBe(false);
   });
 });

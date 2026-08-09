@@ -178,7 +178,12 @@ export class WorkspaceView {
     // rendersLeft 3: 명령 결과 스냅샷보다 앞선 무관 이벤트 렌더가 1~2개 끼어도
     // 보상이 살아남고, 정말 stale 한 요청(대상 탭이 닫힘)은 몇 렌더 안에 폐기된다.
     this.pendingFocus = { req, rendersLeft: 3 };
-    this.tryResolveFocus(false);
+    // activePane 류는 즉시 해소하지 않는다 (리뷰 finding) — invoke 응답이 명령의
+    // 스냅샷보다 먼저 처리되는 순서에서는 lastSnapshot 이 아직 명령 이전 상태라,
+    // 전환 전 워크스페이스의 activePane 을 focus 하고 보상을 소진해 버린다.
+    // 대상이 명시된 tab/pane 류만 즉시 시도한다 (그 대상은 stale 스냅샷에서도
+    // 동일 객체다).
+    if (req.kind !== "activePane") this.tryResolveFocus(false);
   }
 
   /** pendingFocus 해소 시도. atRender 면 미해소마다 rendersLeft 를 줄이고 0 이
@@ -341,7 +346,9 @@ export class WorkspaceView {
     this.splitters = [];
     this.splitContainers.clear();
     this.activeDrags.clear();
-    this.pendingFocus = null;
+    // pendingFocus 는 유지한다 (리뷰 finding) — 명령 응답과 그 스냅샷 사이에
+    // ws-null 렌더가 끼는 경로(마지막 워크스페이스 닫기 직후 재생성 등)에서
+    // 보상이 살아남아야 한다. stale 요청은 rendersLeft 가 정리한다.
     this.lastKey = null;
     this.rootEl.replaceChildren();
   }

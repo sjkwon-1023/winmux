@@ -60,11 +60,15 @@ function firstLine(message: string | null): string | null {
   return line.length === 0 ? null : line;
 }
 
-/** 닫기 confirm 판정 (계획 D4) — 터미널 탭이 1개라도 있는가.
- *  CloseWorkspace 는 그 세션 전부를 죽이는 파괴적 동작이라 confirm 을 거친다. */
-export function hasTerminalTabs(ws: Workspace): boolean {
+/** 닫기 confirm 판정 (계획 D4) — **실행 중인** 터미널 세션이 1개라도 있는가.
+ *  CloseWorkspace 는 그 세션들을 죽이는 파괴적 동작이라 confirm 을 거친다.
+ *  exited 만 남은 워크스페이스는 죽일 세션이 없으므로 confirm 없이 닫는다
+ *  (리뷰 finding — "sessions will be killed" 경고가 거짓이 되는 것 방지). */
+export function hasRunningTerminals(ws: Workspace): boolean {
   return Object.values(ws.panes).some((pane) =>
-    pane.tabs.some((tab) => tab.kind.type === "terminal"),
+    pane.tabs.some(
+      (tab) => tab.kind.type === "terminal" && tab.kind.status.type === "running",
+    ),
   );
 }
 

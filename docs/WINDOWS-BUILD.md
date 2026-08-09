@@ -299,10 +299,12 @@ interactions are mouse-driven in the sidebar; the dev hook is only needed where 
    the active pane **without an extra click** (focus compensation). Pane/Tab ids
    unchanged (`get_state`).
 5. **Close kills sessions** — click a card's ×: a confirm dialog appears when the
-   workspace has terminal tabs; after confirming, the card disappears and no orphaned
-   WSL/shell processes remain (Task Manager, or `ps` inside WSL). Closing the *last*
-   workspace leaves the empty state ("no workspace" on the right), and the sidebar
-   form still creates a fresh workspace from there.
+   workspace has **running** terminal sessions (exited-only workspaces close without
+   one); **cancelling the dialog must change nothing** (workspace and sessions stay).
+   After confirming, the card disappears and no orphaned WSL/shell processes remain
+   (Task Manager, or `ps` inside WSL). Closing the *last* workspace leaves the empty
+   state ("no workspace" on the right), and the sidebar form still creates a fresh
+   workspace from there.
 6. **Reload keeps the workspace list** — with 2+ workspaces, reload (Ctrl+Shift+R):
    the card list, active workspace, and all ids are unchanged (state lives in Rust,
    the WebView is just a view).
