@@ -595,14 +595,7 @@ impl Dispatcher {
                     .ok_or_else(|| unknown("workspace", workspace.0))?;
                 // "가시화 = 읽음": 전환하면 각 pane 의 active_tab 이 곧바로 화면에
                 // 드러나므로 그 탭들의 unread 를 내린다 (비활성 탭은 그대로).
-                for pane in ws.panes.values_mut() {
-                    let Some(active) = pane.active_tab else {
-                        continue;
-                    };
-                    if let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == active) {
-                        tab.notification = NotificationState::None;
-                    }
-                }
+                clear_visible_unread(ws);
                 self.state.active_workspace = Some(workspace);
                 Ok(CommandOutput::Done)
             }
@@ -622,8 +615,13 @@ impl Dispatcher {
                 }
                 if self.state.active_workspace == Some(workspace) {
                     // 닫은 워크스페이스가 active 였으면 남은 것 중 첫 번째로,
-                    // 없으면 None (마지막 워크스페이스 닫기 허용).
+                    // 없으면 None (마지막 워크스페이스 닫기 허용). fallback 으로
+                    // 드러나는 워크스페이스에는 SwitchWorkspace 와 같은
+                    // "가시화 = 읽음" 규칙을 적용한다 (18단계 리뷰 finding).
                     self.state.active_workspace = self.state.workspaces.first().map(|ws| ws.id);
+                    if let Some(shown) = self.state.workspaces.first_mut() {
+                        clear_visible_unread(shown);
+                    }
                 }
                 Ok(CommandOutput::Done)
             }
@@ -744,6 +742,15 @@ impl Dispatcher {
                     } else {
                         Some(pane_ref.tabs[ti.saturating_sub(1)].id)
                     };
+                    // 승격도 가시화다 (18단계 리뷰 finding): 이 워크스페이스가
+                    // 보이는 중이면 화면에 드러난 승격 탭의 unread 를 내린다.
+                    if self.state.active_workspace == Some(ws.id) {
+                        if let Some(promoted) = pane_ref.active_tab {
+                            if let Some(t) = pane_ref.tabs.iter_mut().find(|t| t.id == promoted) {
+                                t.notification = NotificationState::None;
+                            }
+                        }
+                    }
                 }
                 // auto-collapse (계획 D6): 마지막 탭이 닫혀 pane 이 비면 pane 자체
                 // 를 collapse 한다 — 단 워크스페이스의 마지막 pane 은 예외로 빈
@@ -910,6 +917,20 @@ fn reset_agent_source(ws: &mut Workspace, tab: TabId) -> bool {
     ws.agent_status_source = None;
     ws.agent_status = AgentStatus::Idle;
     true
+}
+
+/// "가시화 = 읽음" 의 워크스페이스 단위 적용 — 이 워크스페이스가 화면에 드러나는
+/// 순간(SwitchWorkspace·CloseWorkspace fallback) 각 pane 의 active_tab unread 를
+/// 내린다 (비활성 탭은 그대로). 탭 단위 짝은 ActivateTab·CloseTab 승격이다.
+fn clear_visible_unread(ws: &mut Workspace) {
+    for pane in ws.panes.values_mut() {
+        let Some(active) = pane.active_tab else {
+            continue;
+        };
+        if let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == active) {
+            tab.notification = NotificationState::None;
+        }
+    }
 }
 
 fn unknown(kind: &str, id: u64) -> CommandError {
@@ -1956,6 +1977,58 @@ mod tests {
         // 각 pane 의 active_tab 만 해제 — 뒤에 숨은 탭 a 는 그대로.
         assert_eq!(tab_view(&d, tab_b).notification, NotificationState::None);
         assert_eq!(tab_view(&d, tab_c).notification, NotificationState::None);
+        assert_eq!(tab_view(&d, tab_a).notification, NotificationState::Unread);
+    }
+
+    #[test]
+    fn close_tab_clears_unread_of_promoted_tab_when_visible() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (tab_a, sa) = create_terminal_tab(&mut d, pane);
+        let (tab_b, _sb) = create_terminal_tab(&mut d, pane);
+        // tab_b 가 active 라 tab_a 는 숨어 있다 — unread 가 선다.
+        d.apply_osc(batch(&[(sa, status_notify("wmux:idle", "a"))]), 1_000);
+        assert_eq!(tab_view(&d, tab_a).notification, NotificationState::Unread);
+
+        // active 탭을 닫으면 tab_a 가 승격돼 곧바로 화면에 드러난다 — 가시화 = 읽음.
+        d.dispatch(Command::CloseTab { tab: tab_b }).unwrap();
+        assert_eq!(tab_view(&d, tab_a).notification, NotificationState::None);
+    }
+
+    #[test]
+    fn close_tab_keeps_unread_of_promoted_tab_in_background_workspace() {
+        let (mut d, _host) = dispatcher();
+        let (_ws1, pane) = create_ws(&mut d, "one");
+        let (tab_a, sa) = create_terminal_tab(&mut d, pane);
+        let (tab_b, _sb) = create_terminal_tab(&mut d, pane);
+        create_ws(&mut d, "two"); // ws1 전체가 비가시로.
+        d.apply_osc(batch(&[(sa, status_notify("wmux:idle", "a"))]), 1_000);
+
+        // 백그라운드 워크스페이스 안의 승격은 가시화가 아니다 — unread 유지.
+        d.dispatch(Command::CloseTab { tab: tab_b }).unwrap();
+        assert_eq!(tab_view(&d, tab_a).notification, NotificationState::Unread);
+    }
+
+    #[test]
+    fn close_workspace_fallback_clears_unread_of_newly_visible_tabs() {
+        let (mut d, _host) = dispatcher();
+        let (_ws1, pane) = create_ws(&mut d, "one");
+        let (tab_a, sa) = create_terminal_tab(&mut d, pane);
+        let (tab_b, sb) = create_terminal_tab(&mut d, pane);
+        let (ws2, _pane2) = create_ws(&mut d, "two"); // ws1 비가시 상태에서 알림.
+        d.apply_osc(
+            batch(&[
+                (sa, status_notify("wmux:idle", "a")),
+                (sb, status_notify("wmux:idle", "b")),
+            ]),
+            1_000,
+        );
+
+        // active 워크스페이스를 닫으면 ws1 이 fallback 으로 드러난다 —
+        // SwitchWorkspace 와 같은 규칙: active_tab(b)만 해제, 숨은 a 는 유지.
+        d.dispatch(Command::CloseWorkspace { workspace: ws2 })
+            .unwrap();
+        assert_eq!(tab_view(&d, tab_b).notification, NotificationState::None);
         assert_eq!(tab_view(&d, tab_a).notification, NotificationState::Unread);
     }
 

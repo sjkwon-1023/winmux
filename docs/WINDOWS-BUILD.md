@@ -448,8 +448,8 @@ regression once the model fields are dynamic.
 
 1. **Synthetic OSC routing (`osc-test.sh`)** — with a background tab (not the pane's
    shown terminal, in a non-active workspace), run
-   [`scripts/wsl/osc-test.sh`](../scripts/wsl/osc-test.sh)'s OSC 777 cases (7–8) and OSC 9
-   cases (5–6) against it: the tab gets an unread dot, the pane header's `●` badge lights,
+   [`scripts/wsl/osc-test.sh`](../scripts/wsl/osc-test.sh)'s OSC 777 cases (7–9; 9 is the
+   chunk-split case) and OSC 9 cases (5–6) against it: the tab gets an unread dot, the pane header's `●` badge lights,
    and the workspace's sidebar card shows the aggregate unread dot (OSC 9 / a
    token-mismatched 777 are status-neutral — `agentStatus` on the card must **not**
    change). Repeat while that tab is the pane's **shown** terminal: no dot appears at all
@@ -461,7 +461,7 @@ regression once the model fields are dynamic.
    turn shows `idle` (dot set, preview persists — an empty body never clears the previous
    message). Activating the tab clears its dot immediately.
 3. **needsInput priority across tabs** — with one tab's session at `needsInput`, trigger
-   `wmux:running` on a **different** tab (e.g. via `osc-test.sh` or another hook run): the
+   `wmux:running` on a **different** tab (`osc-test.sh` case 10, or another hook run): the
    workspace's sidebar status stays `needsInput` — only the same tab that raised it
    (`agentStatusSource`) can demote it, which happens naturally once its own
    `UserPromptSubmit` fires `running`.

@@ -9,8 +9,12 @@
 # 사용법:
 #   scripts/wsl/osc-test.sh
 #
-# wmux 앱을 실행한 상태에서 이 스크립트가 붙어 있는 바로 그 터미널(WSL bash)에서
-# 실행하고, 앱의 OSC 이벤트 로그에 케이스 1~9가 모두 예상대로 찍히는지 대조한다.
+# 앱을 실행한 상태에서 이 스크립트가 붙어 있는 바로 그 터미널(WSL bash)에서
+# 실행한다. spike 앱은 OSC 이벤트 로그에 케이스 1~9가 찍히는지 대조하고, wmux
+# 앱(18단계 이후 — osc-event 로그 없음)은 모델 라우팅 표면으로 확인한다: 케이스
+# 5~9는 다른 탭에서 보면 탭 dot·pane ● 배지·사이드바 집계 dot(제목이 wmux: 토큰이
+# 아니라 상태 중립), 케이스 10~12는 사이드바 상태 아이콘·미리보기, 케이스 1~4는
+# 탭 제목·cwd(재시작 후 respawn 경로) 갱신이다.
 # 이 문서/스크립트가 방출하는 OSC 시퀀스의 실제 형식(예: OSC 777)은
 # `\033]777;notify;제목;본문\007` 이다.
 
@@ -77,6 +81,24 @@ printf '%s]777;notify;wmux-osc-test-case-9;split-' "$ESC" > "$TTY"
 sleep 0.2
 printf 'payload%s' "$BEL" > "$TTY"
 
+# --- wmux: 상태 토큰 (18단계 hook 규약 — claude-hook-example.md) ---
+# 제목이 wmux:<status> 면 상태 알림이다: 사이드바 상태 아이콘이 바뀌고, unread 는
+# needsInput·idle 만 세운다 (running 은 진행 신호 — dot 없음). 다른 워크스페이스로
+# 전환한 뒤 실행하면 사이드바에서 순서대로 running → needsInput → idle 로 바뀌는
+# 것을 볼 수 있다 (각 케이스 사이 2초).
+
+case_header 10 "wmux:running 상태 토큰 (body 없음)"
+emit "]777;notify;wmux:running;" "$BEL"
+sleep 2
+
+case_header 11 "wmux:needsInput 상태 토큰 (미리보기 body)"
+emit "]777;notify;wmux:needsInput;osc-test needs your input" "$BEL"
+sleep 2
+
+case_header 12 "wmux:idle 상태 토큰"
+emit "]777;notify;wmux:idle;done" "$BEL"
+
 echo
-echo "완료. wmux 앱의 OSC 이벤트 로그에서 케이스 1~9가 모두 보이는지 확인하라."
+echo "완료. spike 앱은 OSC 이벤트 로그에서 케이스 1~9를, wmux 앱은 탭 dot·pane 배지·"
+echo "사이드바(상태 아이콘·미리보기·집계 dot)에서 케이스 5~12의 라우팅을 확인하라."
 echo "케이스 9(분할)가 감지되지 않으면 OscScanner의 청크 경계 처리를 재점검한다."
