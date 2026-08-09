@@ -97,6 +97,8 @@ Windows runners bill at 2x).
 
 - Code comments are Korean prose; identifiers, commit messages, and tracked reference
   docs are English (this file, README, ADRs). Korean domain/plan docs keep their names.
+- User-facing strings (UI text, script output, warnings, error messages) are English; code
+  comments and test names may be Korean.
 - The terminal output hot path stays raw binary end to end (`ipc::Channel` +
   `InvokeResponseBody::Raw`; xterm gets `Uint8Array`). No JSON on that path — JSON is
   fine for low-frequency events (`state-changed`, `terminal-exit`, stats). OSC no longer

@@ -1,105 +1,113 @@
-# winmux OSC 규약 — Claude Code hook / 셸 프롬프트
+# winmux OSC contract — Claude Code hook / shell prompt
 
-계획 v2 9장 "에이전트 상태 및 알림"의 경로를 실제로 구현하는 **규약 문서**다. winmux 가
-해석하는 OSC 시퀀스의 의미가 여기 정의돼 있고(18단계 확정), Claude Code hook 과 셸
-프롬프트 쪽 절반을 예시로 보인다.
+This is the **contract document** that implements the path described in 계획 v2 section 9
+("에이전트 상태 및 알림"). It defines the meaning of the OSC sequences winmux interprets
+(fixed in stage 18) and shows, as examples, the Claude Code hook and shell prompt halves.
 
 ```
 Claude Code hook (UserPromptSubmit / Notification / Stop)
-  → 해석한 TTY(/dev/tty 또는 조상 프로세스의 pts)에 OSC 777 출력
-  → Rust PTY 리더(winmux-core::osc::OscScanner)가 감지
-  → 100ms flush 창으로 배치(글루 OscRouter)
-  → 탭 unread dot / pane 배지 / 워크스페이스 사이드바 상태 갱신
+  → writes OSC 777 to the resolved TTY (/dev/tty, or an ancestor process's pts)
+  → the Rust PTY reader (winmux-core::osc::OscScanner) detects it
+  → batched over a 100ms flush window (glue OscRouter)
+  → updates the tab unread dot / pane badge / workspace sidebar status
 ```
 
-v1은 IPC 서버·Named Pipe·Windows helper CLI를 쓰지 않고 PTY 출력 자체(OSC 시퀀스)를
-전달 경로로 쓴다.
+v1 uses the PTY output itself (OSC sequences) as the delivery path, with no IPC server,
+named pipe, or Windows helper CLI.
 
-## OSC 의미 규약
+## OSC meaning contract
 
-winmux 가 해석하는 시퀀스는 네 종류다.
+winmux interprets four kinds of sequences.
 
-| 시퀀스 | 의미 | 상태(`agentStatus`) | unread dot |
+| Sequence | Meaning | Status (`agentStatus`) | Unread dot |
 |---|---|---|---|
-| `OSC 777;notify;winmux:running;<body>` | 에이전트 작업 시작 | `running` | 없음 |
-| `OSC 777;notify;winmux:needsInput;<body>` | 사용자 입력 대기 | `needsInput` | 있음 |
-| `OSC 777;notify;winmux:idle;<body>` | 작업 종료 | `idle` | 있음 |
-| 그 밖의 `OSC 777` / 모든 `OSC 9` | 상태 중립 알림 | **불변** | 있음 |
-| `OSC 0`(및 별칭 `OSC 2`) | 탭 제목 | 불변 | 없음 |
-| `OSC 7` `file://host/path` | 탭 cwd (재시작 시 재스폰 위치) | 불변 | 없음 |
+| `OSC 777;notify;winmux:running;<body>` | Agent work started | `running` | no |
+| `OSC 777;notify;winmux:needsInput;<body>` | Waiting for user input | `needsInput` | yes |
+| `OSC 777;notify;winmux:idle;<body>` | Work finished | `idle` | yes |
+| Any other `OSC 777` / every `OSC 9` | Status-neutral notification | **unchanged** | yes |
+| `OSC 0` (and the alias `OSC 2`) | Tab title | unchanged | no |
+| `OSC 7` `file://host/path` | Tab cwd (respawn location on restart) | unchanged | no |
 
-세부 규칙:
+Detailed rules:
 
-- **상태 토큰은 title 필드 전체가 정확히 일치**해야 한다 (`winmux:running` /
-  `winmux:needsInput` / `winmux:idle`). 하나라도 어긋나면 상태 중립 알림으로 떨어진다 —
-  다른 도구가 쏘는 777, ConEmu 진행률 같은 OSC 9 가 에이전트 상태를 주장하지
-  못하게 하는 경계다.
-- `body` 가 비어 있지 않으면 사이드바 미리보기(`lastAgentMessage`)로 남는다. **빈
-  body 는 앞서 온 메시지를 지우지 않는다** — `running` 을 body 없이 쏴도 직전
-  needsInput 문구가 유지된다. 메시지는 500자에서 잘린다.
-- `running` 은 진행 신호라 dot 을 만들지 않는다. `needsInput`·`idle` 과 상태 중립
-  알림만 unread 를 세운다.
-- **화면에 보이는 탭은 unread 를 세우지 않는다** (활성 워크스페이스 + 그 pane 의 활성
-  탭). 내용이 이미 눈앞에 있기 때문이다.
-- 입력 대기가 우선이다: 어떤 탭이 `needsInput` 인 동안 **다른 탭**의 `running`/`idle`
-  은 워크스페이스 상태를 덮지 못한다. 같은 탭이 보낸 상태만 강등할 수 있다 (사용자가
-  응답하면 그 탭의 `UserPromptSubmit` → `running` 이 자연 강등한다).
-- 세미콜론(`;`)은 필드 구분자다. title/body 안에 그대로 들어가면 파서가 필드를
-  오분할하므로 방출 측에서 치환한다.
-- 재시작하면 알림·상태는 전부 초기화된다 (죽은 세션의 needsInput 이 재시작을 넘지
-  않는다 — 계획 v2 11장).
+- **A status token must match the entire title field exactly** (`winmux:running` /
+  `winmux:needsInput` / `winmux:idle`). Any deviation falls through to a status-neutral
+  notification — this is the boundary that keeps 777s emitted by other tools, or an
+  OSC 9 such as ConEmu's progress report, from claiming agent status.
+- If `body` is non-empty it is kept as the sidebar preview (`lastAgentMessage`). **An empty
+  body does not clear a previously received message** — firing `running` with no body
+  leaves the preceding needsInput text in place. Messages are truncated at 500 characters.
+- `running` is a progress signal, so it does not raise a dot. Only `needsInput`, `idle`,
+  and status-neutral notifications set unread.
+- **A tab that is on screen does not set unread** (active workspace + that pane's active
+  tab), because its content is already in front of the user.
+- Waiting for input wins: while some tab is at `needsInput`, `running`/`idle` from a
+  **different** tab cannot override the workspace status. Only the tab that raised it can
+  demote it (once the user responds, that tab's `UserPromptSubmit` → `running` demotes it
+  naturally).
+- The semicolon (`;`) is the field separator. If one appears inside title/body the parser
+  mis-splits the fields, so the emitting side substitutes it.
+- A restart resets all notifications and statuses (a dead session's needsInput does not
+  survive a restart — 계획 v2 section 11).
 
-## tty 해석 규율 — 직접 `/dev/tty` → 조상 pts fallback
+## tty resolution discipline — direct `/dev/tty` → ancestor pts fallback
 
-Claude Code hook의 **stdout은 Claude Code 자신이 소비한다** (hook 실행 결과로 처리되어
-UI/로그에 쓰이거나 버려지며, 그대로 터미널 화면에 바이트가 흘러가지 않는다). hook 스크립트가
-그냥 `echo`나 `printf`로 OSC 시퀀스를 표준출력에 쓰면 그 바이트는 실제 PTY 스트림에
-도달하지 못하고, Rust PTY 리더는 아무것도 감지하지 못한다.
+**Claude Code itself consumes a hook's stdout** (it is processed as the hook's result and
+used for UI/logs or discarded; the bytes do not flow through to the terminal screen). If a
+hook script simply writes the OSC sequence to standard output with `echo` or `printf`,
+those bytes never reach the real PTY stream and the Rust PTY reader detects nothing.
 
-따라서 hook 스크립트는 OSC 시퀀스를 **표준출력이 아니라 터미널 장치에 직접** 써야 한다.
-문제는 그 장치를 어떻게 찾느냐인데, `> /dev/tty` 한 방으로는 부족하다.
+A hook script must therefore write the OSC sequence **directly to the terminal device, not
+to standard output**. The problem is finding that device: a single `> /dev/tty` is not
+enough.
 
-**실측(Claude Code 2.1.226, 체크포인트 2):** hook 프로세스에는 **controlling TTY 가 없어**
-`> /dev/tty` 가 `No such device or address`(ENXIO)로 실패한다. 반면 **Claude Code 본체
-프로세스는 winmux 가 띄운 `/dev/pts/N` 에 그대로 붙어 있다** — 장치는 살아 있는데 hook 쪽에만
-거기로 가는 손잡이가 없는 상태다. 그래서 아래 예시의 `winmux_emit` 은 tty 를 두 단계로 해석한다.
+**Measured (Claude Code 2.1.226, checkpoint 2):** the hook process **has no controlling
+TTY**, so `> /dev/tty` fails with `No such device or address` (ENXIO). Meanwhile **the main
+Claude Code process is still attached to the `/dev/pts/N` that winmux opened** — the device
+is alive, only the hook side lacks a handle to it. That is why `winmux_emit` in the example
+below resolves the tty in two steps.
 
-1. **직접 `/dev/tty`** — controlling TTY 가 있으면(손으로 돌려 보는 경우, hook 을 다른
-   경로로 띄우는 경우, 이 전제가 바뀐 미래 버전) 이게 정답이고 한 번에 끝난다.
-2. **조상 pts fallback** — 1이 실패하면 자기 자신부터 `/proc/<pid>/stat` 의 PPID 를 따라
-   최대 8칸까지 거슬러 올라가며, 각 프로세스 fd 0/1/2 의 `readlink` 가 `/dev/pts/*` 를
-   가리키면 거기에 쓴다. **가장 가까운 조상이 이긴다** — 터미널이 중첩돼 있어도 바깥
-   터미널이 아니라 자기 pane 의 pts 를 집는다.
+1. **Direct `/dev/tty`** — if a controlling TTY exists (running it by hand, launching the
+   hook through another path, a future version where this premise changes), this is the
+   right answer and it is done in one shot.
+2. **Ancestor pts fallback** — if step 1 fails, walk up from the process itself through the
+   PPID in `/proc/<pid>/stat`, up to 8 hops, and if the `readlink` of fd 0/1/2 of any of
+   those processes points at `/dev/pts/*`, write there. **The nearest ancestor wins** — even
+   with nested terminals it picks its own pane's pts rather than the outer terminal's.
 
-둘 다 실패하면(조상 체인에 pts 가 없는 경우 — 예: hook 이 init 으로 reparent 된 뒤 도는
-경우) **조용히 포기하고 `exit 0` 한다.** 알림 하나를 놓치는 것보다 알림 전달 실패가 Claude
-세션을 깨는 쪽이 나쁘다. 깊이 상한 8과 `/dev/pts/*` 화이트리스트는 이 탐색이 오래 끌거나
-엉뚱한 대상(로그 파일·파이프)에 OSC 바이트를 흘리지 않게 막는 경계다.
+If both fail (no pts in the ancestor chain — e.g. the hook runs after being reparented to
+init), it **gives up silently and exits 0.** A failed notification delivery breaking the
+Claude session is worse than missing one notification. The depth limit of 8 and the
+`/dev/pts/*` whitelist are the boundaries that keep this search from dragging on or leaking
+OSC bytes into the wrong target (a log file, a pipe).
 
-(아래 셸 프롬프트 스니펫은 이 문제와 무관하다 — 셸은 자기 tty 를 가지고 있고 그 stdout이
-곧 PTY라 리다이렉트도 fallback도 필요 없다.)
+(The shell prompt snippet below is unaffected by this problem — a shell has its own tty and
+its stdout *is* the PTY, so neither a redirect nor a fallback is needed.)
 
-## hook 스크립트 예시
+## Example hook script
 
-`~/.claude/hooks/winmux-notify.sh` (실행 권한 부여 필요: `chmod +x`):
+`~/.claude/hooks/winmux-notify.sh` (must be made executable: `chmod +x`):
 
 ```bash
 #!/usr/bin/env bash
-# Claude Code hook에서 호출되어 winmux 상태 토큰을 OSC 777로 실제 터미널 장치에 방출한다.
-# 인자: $1 = 상태 토큰(winmux:running | winmux:needsInput | winmux:idle)
-#       $2 = 본문(선택). Notification 이벤트는 stdin JSON의 .message를 우선한다.
+# Called from a Claude Code hook to emit a winmux status token as OSC 777 to the real
+# terminal device.
+# Arguments: $1 = status token (winmux:running | winmux:needsInput | winmux:idle)
+#            $2 = body (optional). The Notification event prefers .message from the stdin JSON.
 set -euo pipefail
 
 STATUS="${1:?usage: winmux-notify.sh <winmux:running|winmux:needsInput|winmux:idle> [body]}"
 BODY="${2:-}"
 
-# OSC 바이트를 실제 터미널 장치에 쓴다. 위 "tty 해석 규율"의 2단계를 그대로 구현한다.
-#   1) /dev/tty — controlling TTY 가 있으면 이게 정답이다.
-#   2) /proc 조상 체인 — Claude Code 2.1.226 의 hook 프로세스에는 controlling TTY 가
-#      없어 1)이 ENXIO("No such device or address")로 실패한다. 이때는 자신부터 부모로
-#      거슬러 올라가며 각 프로세스 fd 0/1/2 가 가리키는 /dev/pts/* 를 찾아 거기에 쓴다.
-#      Claude Code 본체가 winmux 의 pts 에 붙어 있으므로 몇 칸 위에서 잡힌다.
-# 어느 쪽도 안 되면 조용히 포기한다 — 알림 실패가 Claude 세션을 깨면 안 된다.
+# Write the OSC bytes to the real terminal device. This implements the two steps of the
+# "tty resolution discipline" above.
+#   1) /dev/tty — if a controlling TTY exists, this is the right answer.
+#   2) /proc ancestor chain — the hook process of Claude Code 2.1.226 has no controlling
+#      TTY, so 1) fails with ENXIO ("No such device or address"). In that case, walk up
+#      from itself through its parents and write to the /dev/pts/* that fd 0/1/2 of each
+#      process points at. The main Claude Code process is attached to winmux's pts, so it
+#      is found a few hops up.
+# If neither works, give up silently — a failed notification must not break the Claude session.
 winmux_emit() {
   local payload="$1"
 
@@ -116,8 +124,9 @@ winmux_emit() {
         return 0
       fi
     done
-    # /proc/<pid>/stat 은 "<pid> (<comm>) <state> <ppid> ..." 형식이다. comm 에 공백·
-    # 괄호가 들어갈 수 있어 마지막 ')' 뒤부터 잘라 state 다음의 ppid 를 읽는다.
+    # /proc/<pid>/stat has the form "<pid> (<comm>) <state> <ppid> ...". comm can contain
+    # spaces and parentheses, so cut from after the last ')' and read the ppid that
+    # follows state.
     stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
     [[ -n "$stat" ]] || break
     stat="${stat##*) }"
@@ -131,9 +140,9 @@ winmux_emit() {
   return 1
 }
 
-# Claude Code는 hook 실행 시 이벤트 정보를 stdin으로 JSON을 전달한다.
-# Notification 이벤트는 .message 필드에 사람이 읽을 알림 문구가 들어 있다.
-# jq가 없으면 인자로 받은 기본 본문으로 내려간다(hook 자체는 계속 동작한다).
+# Claude Code passes the event information as JSON on stdin when it runs a hook.
+# For the Notification event, the .message field holds the human-readable notification text.
+# Without jq, fall back to the default body received as an argument (the hook keeps working).
 if [[ ! -t 0 ]]; then
   INPUT_JSON="$(cat)"
   if command -v jq > /dev/null 2>&1; then
@@ -144,19 +153,20 @@ if [[ ! -t 0 ]]; then
   fi
 fi
 
-# 세미콜론(;)이 body 안에 그대로 들어가면 파서가 필드를 오분할하므로 치환한다.
+# A semicolon (;) left inside the body makes the parser mis-split the fields, so substitute it.
 BODY="${BODY//;/,}"
 
-# OSC 777 형식: ESC ] 777 ; notify ; title ; body BEL
+# OSC 777 format: ESC ] 777 ; notify ; title ; body BEL
 winmux_emit "$(printf '\033]777;notify;%s;%s\007' "$STATUS" "$BODY")" || true
 
-# 방출에 실패해도 hook 은 성공으로 끝낸다(알림을 놓칠지언정 세션은 깨지 않는다).
+# Even if the emission fails, the hook exits successfully (miss a notification rather than
+# break the session).
 exit 0
 ```
 
-## settings.json 예시
+## Example settings.json
 
-세 이벤트를 상태 토큰 3종에 매핑한다:
+Maps the three events to the three status tokens:
 
 ```json
 {
@@ -198,17 +208,18 @@ exit 0
 }
 ```
 
-- `UserPromptSubmit`: 사용자가 프롬프트를 보낸 직후 — "작업 시작"(`running`). 본문을
-  주지 않으므로 직전 미리보기 문구가 그대로 남는다.
-- `Notification`: 권한 확인 등 사용자 입력이 필요할 때 — stdin JSON의 `.message`에
-  실제 문구(예: "Claude needs your permission to use Bash")가 들어온다.
-- `Stop`: Claude Code가 응답을 끝내고 대기 상태로 돌아갈 때 — "작업 완료"(`idle`).
+- `UserPromptSubmit`: right after the user submits a prompt — "work started" (`running`).
+  It passes no body, so the preceding preview text stays as it is.
+- `Notification`: when user input is needed, e.g. a permission confirmation — the stdin
+  JSON's `.message` carries the actual text (e.g. "Claude needs your permission to use Bash").
+- `Stop`: when Claude Code finishes its response and returns to waiting — "work done"
+  (`idle`).
 
-### (선택) Stop 에 마지막 응답 문구 싣기
+### (Optional) Carrying the last response text on Stop
 
-`Stop` 의 stdin JSON에는 `.transcript_path`(JSONL)가 들어 있어, 마지막 assistant
-메시지를 뽑아 미리보기로 쓸 수 있다. jq 의존이 커지므로 기본 예시에는 넣지 않았다 —
-필요하면 위 스크립트의 `BODY` 결정부에 이어 붙인다:
+`Stop`'s stdin JSON contains `.transcript_path` (JSONL), so the last assistant message can
+be extracted and used as the preview. It is not in the base example because it deepens the
+jq dependency — if you want it, append it to the `BODY` resolution part of the script above:
 
 ```bash
 TRANSCRIPT="$(printf '%s' "$INPUT_JSON" | jq -r '.transcript_path // empty')"
@@ -222,52 +233,60 @@ if [[ -n "$TRANSCRIPT" && -r "$TRANSCRIPT" ]]; then
 fi
 ```
 
-## 셸 프롬프트에서 제목·cwd 방출 (OSC 0 / OSC 7)
+## Emitting title and cwd from the shell prompt (OSC 0 / OSC 7)
 
-탭 제목과 cwd 는 hook 이 아니라 셸이 프롬프트마다 방출한다. WSL 쪽 `~/.bashrc` 에:
+The tab title and cwd are emitted by the shell on every prompt, not by a hook. In the WSL
+side's `~/.bashrc`:
 
 ```bash
-# 프롬프트마다 현재 디렉터리(OSC 7)와 탭 제목(OSC 0)을 방출한다.
-# 셸의 stdout이 곧 PTY라 /dev/tty 리다이렉트가 필요 없다.
+# On every prompt, emit the current directory (OSC 7) and the tab title (OSC 0).
+# The shell's stdout is the PTY itself, so no /dev/tty redirect is needed.
 __winmux_osc() {
-  # OSC 7: file://<host>/<path> — winmux는 host를 무시하고 경로만 쓴다(ST 종결).
+  # OSC 7: file://<host>/<path> — winmux ignores host and uses only the path (ST terminator).
   printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-wsl}" "$PWD"
-  # OSC 0: 탭 제목 — 여기서는 디렉터리 이름(BEL 종결).
+  # OSC 0: tab title — here, the directory name (BEL terminator).
   printf '\033]0;%s\007' "${PWD##*/}"
 }
 PROMPT_COMMAND="__winmux_osc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 ```
 
-- winmux 는 OSC 7 경로를 percent-decode 한다. 경로에 `%` 가 들어 있으면 규약대로
-  `%25` 로 인코딩해야 정확하다 (`%` 뒤가 16진수 2자리가 아니면 리터럴로 남긴다).
-- 이 cwd 는 **재시작 후 재스폰 위치**로 쓰인다 — 마지막으로 있던 디렉터리에서 셸이
-  다시 열린다.
-- 제목을 에이전트 이름 등으로 바꾸고 싶으면 OSC 0 문자열만 갈아 끼우면 된다. ConPTY
-  가 OSC 0 을 OSC 2 로 재인코딩해 흘려도 winmux 는 같은 의미로 받는다.
+- winmux percent-decodes the OSC 7 path. If the path contains `%`, it must be encoded as
+  `%25` per the convention to be accurate (if what follows `%` is not two hex digits, it is
+  left as a literal).
+- This cwd is used as the **respawn location after a restart** — the shell reopens in the
+  directory it was last in.
+- To change the title to something else, such as an agent name, just swap the OSC 0 string.
+  Even if ConPTY re-encodes OSC 0 as OSC 2 in transit, winmux receives it with the same
+  meaning.
 
-## 검증
+## Verification
 
-1. `scripts/wsl/osc-test.sh` 로 "/dev/tty로 쓴 OSC 가 winmux 앱까지 도달하는가"를 먼저
-   확인한다 (OSC 777 은 7·8·9번 케이스). 이 스크립트는 셸에서 직접 돌아 tty 를 가지므로
-   1단계 경로만 탄다 — 전달 경로 자체가 살아 있는지 보는 용도다.
-2. 그다음 Claude Code를 winmux 터미널 안에서 실행해 hook 3종이 실제로 탭 dot·pane
-   배지·사이드바 상태/미리보기를 갱신하는지 확인한다
-   (`docs/WINDOWS-BUILD.md` 10장 체크포인트 2).
-3. hook 이 조용하면 fallback 이 어디서 끊겼는지부터 본다. winmux 터미널 안에서
-   `setsid -w bash -c 'printf "" > /dev/tty' ; echo $?` 로 tty 없는 맥락을 재현하고,
-   `for p in $(pgrep -f 'claude'); do readlink /proc/$p/fd/1; done` 로 Claude 본체가
-   `/dev/pts/*` 에 붙어 있는지 확인한다. 조상 체인이 8칸 안에 있는지도 같이 본다.
+1. Use `scripts/wsl/osc-test.sh` first to confirm "does an OSC written to /dev/tty reach the
+   winmux app" (OSC 777 is cases 7, 8, and 9). This script runs directly from the shell and
+   therefore has a tty, so it only takes step 1 — its purpose is to see whether the delivery
+   path itself is alive.
+2. Then run Claude Code inside a winmux terminal and confirm that the three hooks actually
+   update the tab dot, pane badge, and sidebar status/preview
+   (`docs/WINDOWS-BUILD.md` section 10, checkpoint 2).
+3. If the hook is silent, start by looking at where the fallback broke. Inside a winmux
+   terminal, reproduce a tty-less context with
+   `setsid -w bash -c 'printf "" > /dev/tty' ; echo $?`, and check whether the main Claude
+   process is attached to `/dev/pts/*` with
+   `for p in $(pgrep -f 'claude'); do readlink /proc/$p/fd/1; done`. Check as well that the
+   ancestor chain is within 8 hops.
 
-## 참고
+## Notes
 
-- BEL(`\007`)만 완료 신호로 의존하지 않는다(계획 v2 9장) — winmux의 `OscScanner`는 BEL과
-  ST(`ESC \`) 둘 다 종결자로 인식한다.
-- "hook 에 controlling TTY 가 없다"는 것은 Claude Code **2.1.226 에서 실측한 사실**이지
-  보장된 계약이 아니다. 예시 스크립트가 1단계를 남겨 둔 이유가 이것이다 — 나중 버전이
-  hook 에 tty 를 물려 주면 fallback 을 타지 않고 그대로 동작한다. 반대로 Claude Code 가
-  pts 가 아닌 곳(파이프 전용 데몬 등)에서 돌게 되면 2단계도 대상을 못 찾으므로, 그때는
-  파일/소켓 감시 대안으로 넘어가야 한다.
-- ConPTY가 OSC 777을 잘라먹는 것으로 확인되면(spike-plan.md 6장 체크리스트 1번), 이
-  hook 경로는 파일/소켓 감시 대안으로 교체해야 한다(계획 v2 2장 "단일 실패점" 참고).
-  이 문서의 예시는 OSC passthrough가 살아있다는 전제 위에 있다. OSC 0/7 의 실전
-  passthrough 는 아직 미검증이라, 실패해도 알림 경로(777/9)와는 독립이다.
+- BEL (`\007`) is not relied on as the only completion signal (계획 v2 section 9) — winmux's
+  `OscScanner` recognizes both BEL and ST (`ESC \`) as terminators.
+- "The hook has no controlling TTY" is a **fact measured on Claude Code 2.1.226**, not a
+  guaranteed contract. That is exactly why the example script keeps step 1 — if a later
+  version hands the hook a tty, it works as is without taking the fallback. Conversely, if
+  Claude Code comes to run somewhere that is not a pts (a pipe-only daemon, say), step 2
+  will not find a target either, and at that point we have to move to the file/socket
+  watching alternative.
+- If ConPTY turns out to swallow OSC 777 (spike-plan.md section 6, checklist item 1), this
+  hook path has to be replaced with the file/socket watching alternative (see 계획 v2
+  section 2, "단일 실패점"). The examples in this document rest on the premise that OSC
+  passthrough is alive. Real-world passthrough of OSC 0/7 is still unverified, and its
+  failure would be independent of the notification path (777/9).

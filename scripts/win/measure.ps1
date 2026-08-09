@@ -1,40 +1,43 @@
 <#
 .SYNOPSIS
-    winmux spike 앱의 private working set(WebView2 프로세스 트리 포함)을 주기적으로 측정한다.
+    Periodically measures the private working set of the winmux spike app,
+    including the WebView2 process tree.
 
 .DESCRIPTION
-    계획 v2 3장 "리소스 측정" / spike-plan.md 6장 체크리스트 6번의 실행 도구다.
-    대상 프로세스(exe 이름)를 루트로 삼아, 부모 PID 체인을 따라가며 그 자손 프로세스
-    (WebView2 렌더러/GPU 프로세스 등)를 전부 찾아낸 뒤, 각 프로세스의
-    Private Working Set(Win32_PerfFormattedData_PerfProc_Process.WorkingSetPrivate)을
-    합산해 샘플마다 기록한다.
+    The measurement tool for 계획 v2 section 3 "리소스 측정" / spike-plan.md
+    section 6 checklist item 6. Starting from the target process (exe name)
+    as the root, it walks parent-PID chains to find every descendant process
+    (WebView2 renderer/GPU processes etc.), then sums each process's
+    Private Working Set (Win32_PerfFormattedData_PerfProc_Process.WorkingSetPrivate)
+    per sample.
 
 .PARAMETER ProcessName
-    측정 대상 프로세스 이름(확장자 제외). 기본값 winmux-spike
-    (apps/spike/src-tauri/tauri.conf.json의 productName과 일치).
+    Target process name (without extension). Default: winmux-spike
+    (matches productName in apps/spike/src-tauri/tauri.conf.json).
 
 .PARAMETER IntervalSec
-    샘플링 간격(초). 기본값 5.
+    Sampling interval in seconds. Default: 5.
 
 .PARAMETER Samples
-    총 샘플 횟수. 기본값 12 (IntervalSec 5초 기준 총 약 60초).
+    Total sample count. Default: 12 (about 60 seconds at IntervalSec 5).
 
 .PARAMETER OutCsv
-    결과를 저장할 CSV 파일 경로. 지정하면 프로세스별 내역 + 샘플별 TOTAL 행을 기록한다.
-    지정하지 않으면 콘솔 표만 출력한다.
+    CSV file path for the results. When given, records per-process rows plus a
+    TOTAL row per sample; when omitted, prints the console table only.
 
 .EXAMPLE
     .\measure.ps1
-    기본값(winmux-spike, 5초 간격, 12샘플)으로 콘솔에만 출력.
+    Console-only output with the defaults (winmux-spike, 5s interval, 12 samples).
 
 .EXAMPLE
     .\measure.ps1 -ProcessName winmux-spike -IntervalSec 5 -Samples 12 -OutCsv .\ram-4pane.csv
-    spike-plan.md 6장 시나리오(터미널 4개 등)를 CSV로 기록.
+    Records the spike-plan.md section 6 scenario (4 terminals etc.) to CSV.
 
 .NOTES
-    관리자 권한이 필요 없다 — Get-CimInstance로 Win32_Process(부모 PID 조회)와
-    Win32_PerfFormattedData_PerfProc_Process(WorkingSetPrivate 조회)를 읽는 것,
-    Get-Process로 현재 사용자 소유 프로세스 이름을 읽는 것 모두 일반 사용자 권한으로 가능하다.
+    No administrator rights needed — reading Win32_Process (parent PIDs) and
+    Win32_PerfFormattedData_PerfProc_Process (WorkingSetPrivate) via
+    Get-CimInstance, and current-user process names via Get-Process, all work
+    with normal user privileges.
 #>
 
 [CmdletBinding()]
@@ -97,7 +100,7 @@ function Get-SampleRows {
 
     $ids = @(Get-ProcessTreeIds -RootName $RootName)
     if ($ids.Count -eq 0) {
-        Write-Warning "프로세스 '$RootName'을 찾지 못했다 (아직 실행 전이거나 이름이 다를 수 있음)."
+        Write-Warning "Process '$RootName' not found (not started yet, or the name differs)."
         return @()
     }
 
@@ -119,8 +122,8 @@ function Get-SampleRows {
     return @($rows)
 }
 
-Write-Host "대상: $ProcessName (자손 프로세스 트리 포함, WebView2 포함)"
-Write-Host "간격: ${IntervalSec}s / 샘플: $Samples"
+Write-Host "Target: $ProcessName (descendant process tree included, WebView2 included)"
+Write-Host "Interval: ${IntervalSec}s / Samples: $Samples"
 Write-Host ""
 
 $allRows = [System.Collections.Generic.List[object]]::new()
@@ -139,10 +142,10 @@ for ($i = 1; $i -le $Samples; $i++) {
 
     $totalMB = [math]::Round(($rows | Measure-Object -Property PrivateWorkingSetMB -Sum).Sum, 2)
 
-    Write-Host ("[{0}] 샘플 {1}/{2}" -f $ts.ToString("HH:mm:ss"), $i, $Samples)
+    Write-Host ("[{0}] sample {1}/{2}" -f $ts.ToString("HH:mm:ss"), $i, $Samples)
     $rows | Sort-Object -Property PrivateWorkingSetMB -Descending |
         Format-Table -Property ProcessId, ProcessName, PrivateWorkingSetMB -AutoSize | Out-Host
-    Write-Host ("  합계: {0} MB ({1}개 프로세스)" -f $totalMB, $rows.Count)
+    Write-Host ("  Total: {0} MB ({1} processes)" -f $totalMB, $rows.Count)
     Write-Host ""
 
     foreach ($r in $rows) { $allRows.Add($r) }
@@ -160,5 +163,5 @@ for ($i = 1; $i -le $Samples; $i++) {
 
 if ($OutCsv) {
     $allRows | Export-Csv -Path $OutCsv -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV 저장: $OutCsv"
+    Write-Host "CSV saved: $OutCsv"
 }

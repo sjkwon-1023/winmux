@@ -27,7 +27,7 @@ TTY=/dev/tty
 
 case_header() {
   echo
-  echo "케이스 $1: $2"
+  echo "case $1: $2"
 }
 
 emit() {
@@ -38,10 +38,10 @@ emit() {
 
 # --- OSC 0: 아이콘 이름 + 창 제목 ---
 
-case_header 1 "OSC 0 title, BEL 종결"
+case_header 1 "OSC 0 title, BEL terminator"
 emit "]0;winmux-osc-test-case-1" "$BEL"
 
-case_header 2 "OSC 0 title, ST 종결"
+case_header 2 "OSC 0 title, ST terminator"
 emit "]0;winmux-osc-test-case-2" "$ST"
 
 # --- OSC 7: cwd (file:// URI) ---
@@ -49,34 +49,34 @@ emit "]0;winmux-osc-test-case-2" "$ST"
 HOST="$(hostname)"
 CWD="$(pwd)"
 
-case_header 3 "OSC 7 cwd, BEL 종결"
+case_header 3 "OSC 7 cwd, BEL terminator"
 emit "]7;file://${HOST}${CWD}" "$BEL"
 
-case_header 4 "OSC 7 cwd, ST 종결"
+case_header 4 "OSC 7 cwd, ST terminator"
 emit "]7;file://${HOST}${CWD}" "$ST"
 
 # --- OSC 9: 알림 (iTerm2 계열, message만) ---
 
-case_header 5 "OSC 9 notify, BEL 종결"
+case_header 5 "OSC 9 notify, BEL terminator"
 emit "]9;winmux-osc-test-case-5" "$BEL"
 
-case_header 6 "OSC 9 notify, ST 종결"
+case_header 6 "OSC 9 notify, ST terminator"
 emit "]9;winmux-osc-test-case-6" "$ST"
 
 # --- OSC 777: 알림 (urxvt 계열, notify;title;body) ---
 # 형식: \033]777;notify;제목;본문\007  (BEL) 또는 \033]777;notify;제목;본문\033\  (ST)
 
-case_header 7 "OSC 777 notify, BEL 종결"
+case_header 7 "OSC 777 notify, BEL terminator"
 emit "]777;notify;winmux-osc-test-case-7;OSC 777 BEL body" "$BEL"
 
-case_header 8 "OSC 777 notify, ST 종결"
+case_header 8 "OSC 777 notify, ST terminator"
 emit "]777;notify;winmux-osc-test-case-8;OSC 777 ST body" "$ST"
 
 # --- 분할 테스트: 한 시퀀스를 두 번의 write로 쪼개 청크 경계 처리 확인 ---
 # PTY 리더가 feed()를 여러 번 호출받아도(청크 경계에 걸려도) 시퀀스를 이어 붙여
 # 인식하는지 확인한다. 두 write 사이에 0.2초를 둔다.
 
-case_header 9 "OSC 777, 두 번의 write로 분할 (0.2s 간격)"
+case_header 9 "OSC 777, split across two writes (0.2s apart)"
 printf '%s]777;notify;winmux-osc-test-case-9;split-' "$ESC" > "$TTY"
 sleep 0.2
 printf 'payload%s' "$BEL" > "$TTY"
@@ -87,18 +87,19 @@ printf 'payload%s' "$BEL" > "$TTY"
 # 전환한 뒤 실행하면 사이드바에서 순서대로 running → needsInput → idle 로 바뀌는
 # 것을 볼 수 있다 (각 케이스 사이 2초).
 
-case_header 10 "winmux:running 상태 토큰 (body 없음)"
+case_header 10 "winmux:running status token (no body)"
 emit "]777;notify;winmux:running;" "$BEL"
 sleep 2
 
-case_header 11 "winmux:needsInput 상태 토큰 (미리보기 body)"
+case_header 11 "winmux:needsInput status token (preview body)"
 emit "]777;notify;winmux:needsInput;osc-test needs your input" "$BEL"
 sleep 2
 
-case_header 12 "winmux:idle 상태 토큰"
+case_header 12 "winmux:idle status token"
 emit "]777;notify;winmux:idle;done" "$BEL"
 
 echo
-echo "완료. spike 앱은 OSC 이벤트 로그에서 케이스 1~9를, winmux 앱은 탭 dot·pane 배지·"
-echo "사이드바(상태 아이콘·미리보기·집계 dot)에서 케이스 5~12의 라우팅을 확인하라."
-echo "케이스 9(분할)가 감지되지 않으면 OscScanner의 청크 경계 처리를 재점검한다."
+echo "Done. In the spike app, verify cases 1-9 in the OSC event log; in the winmux app,"
+echo "verify the routing of cases 5-12 in the tab dot, pane badge, and sidebar (status icon,"
+echo "preview, aggregate dot). If case 9 (split) is not detected, re-check OscScanner's"
+echo "chunk-boundary handling."

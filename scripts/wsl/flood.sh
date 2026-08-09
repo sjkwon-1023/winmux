@@ -27,20 +27,20 @@ if [[ "${2:-}" == "--random-lines" ]]; then
   RANDOM_LINES=1
 fi
 
-echo "yes를 ${FLOOD_SECONDS}초 동안 출력한다 (Ctrl+C로 중단 가능)..."
+echo "Emitting \`yes\` output for ${FLOOD_SECONDS}s (Ctrl+C to stop)..."
 # timeout으로 종료된 yes는 0이 아닌 종료 코드를 반환하므로 `|| true`로 흡수한다
 # (그대로 두면 set -e 때문에 스크립트 전체가 죽는다).
 timeout "${FLOOD_SECONDS}" yes || true
 
 if [[ "$RANDOM_LINES" -eq 1 ]]; then
-  echo "base64(/dev/urandom) 대량 라인 출력 시작..."
+  echo "Starting the base64(/dev/urandom) bulk line output..."
   # head가 300000줄을 다 받으면 먼저 종료해 파이프를 닫고, base64는 그 순간
   # SIGPIPE(exit 141)로 죽는다 — 의도된 정상 동작이다. 그런데 pipefail 하에서는
   # 파이프라인 전체의 종료 코드가 "오른쪽부터 훑어 처음 만나는 0이 아닌 상태"로
   # 정해지므로, head가 0으로 끝나도 base64의 141이 파이프라인 종료 코드로 채택되어
   # set -e가 스크립트를 여기서 중단시켜 버린다. `|| true`로 그 141을 흡수한다.
   base64 /dev/urandom | head -n 300000 || true
-  echo "랜덤 라인 출력 완료."
+  echo "Random line output done."
 fi
 
-echo "flood 완료."
+echo "flood done."

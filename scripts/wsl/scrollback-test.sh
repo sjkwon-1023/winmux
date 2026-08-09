@@ -12,6 +12,6 @@
 
 set -euo pipefail
 
-echo "12000줄 출력 시작 (scrollback 5000 초과 확인용)..."
+echo "Emitting 12000 lines (to exceed the 5000-line scrollback cap)..."
 seq 1 12000
-echo "12000줄 출력 완료. 맨 위로 스크롤해 1~7000번대 줄이 잘렸는지 확인하라."
+echo "Done emitting 12000 lines. Scroll to the top and verify that lines 1-7000 were evicted."
