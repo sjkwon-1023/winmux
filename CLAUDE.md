@@ -1,7 +1,12 @@
 # CLAUDE.md
 
 winmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and coding agents
-(Claude Code / Codex). Product plan: `터미널-계획-v2.md` (Korean). Decisions: `docs/adr/`.
+(Claude Code / Codex). Decisions: `docs/adr/`.
+
+The product plan `터미널-계획-v2.md` (Korean) is **no longer in the tree** — it was removed
+when the repo went public. Roughly 130 "계획 v2 <n>장 / section <n>" citations across the
+source comments, ADRs, and plan docs still point at it; read it out of git history when one
+of them matters (`git show HEAD~1:터미널-계획-v2.md`, or any commit before its removal).
 
 ## Current state
 

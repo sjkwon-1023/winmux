@@ -171,8 +171,7 @@ docs/                 Build guide and architecture decision records.
 Terminal output stays raw binary end to end — no JSON on the hot path — and flow control pauses
 the PTY *read* so backpressure reaches the OS pipe rather than piling up in memory.
 
-Design decisions are recorded in [`docs/adr/`](./docs/adr/). The original product plan, in
-Korean, is [`터미널-계획-v2.md`](./터미널-계획-v2.md).
+Design decisions are recorded in [`docs/adr/`](./docs/adr/).
 
 ## License
 
