@@ -13,7 +13,7 @@
 //! `\n` 뒤부터 반환해 행 경계 시작을 보장한다 (휴리스틱 근거는 해당 rustdoc).
 //! 트림이 못 미치는 무개행 출력(TUI 전체 화면 프레임)의 재그리기는 attach 시
 //! SIGWINCH nudge(프론트 terminal-view) 수위가 담당한다. 계약:
-//! `docs/plans/spike-plan.md` 4.2장 + `docs/plans/mvp-stage14-16-plan.md` 1장.
+//! `docs/plans/spike-plan.md` 4.2장 + ADR-0004 결정 2.
 
 use std::collections::VecDeque;
 

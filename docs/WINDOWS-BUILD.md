@@ -314,9 +314,10 @@ interactions are mouse-driven in the sidebar; the dev hook is only needed where 
 This is **checkpoint 1** (roadmap decision in `CLAUDE.md`): the batched manual Windows
 verification for stages 13–16 — workspace sidebar (section 8 doubles as its checklist),
 replay trim + switch latency tracer (stage 14), persistence (stage 15), and the automatic
-UI reset safety net (stage 16, 계획 v2 section 12). Design decisions are in
-[`docs/plans/mvp-stage14-16-plan.md`](plans/mvp-stage14-16-plan.md) until they are
-distilled into an ADR.
+UI reset safety net (stage 16, 계획 v2 section 12). It **passed on Windows 2026-08-09**
+(decisions and ConPTY field findings distilled into
+[`docs/adr/0004`](adr/0004-lifecycle-persistence-reset.md)) and remains here as a
+regression checklist.
 
 ### Auto-reset environment variables
 

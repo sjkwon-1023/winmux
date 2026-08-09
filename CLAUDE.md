@@ -14,16 +14,14 @@ SplitId addressing, atomic SplitPane{tab}, splitter drag, keep-alive tab views, 
 auto-collapse, self-healing detach, Ctrl+Shift+R reload). The Windows checklists in
 `docs/WINDOWS-BUILD.md` sections 6–7 stay as regression references.
 
-Stages 13–16 are **implemented, awaiting checkpoint 1** (manual Windows verification —
-`docs/WINDOWS-BUILD.md` section 9): stage 13 (workspace sidebar), stage 14 (replay trim
-+ switch latency tracer `window.__wmux.lastSwitch`), stage 15 (persistence —
-`state.json` load/adopt/respawn boot, debounced atomic saves, corrupt backup), stage 16
-(automatic UI reset — pure policy in `wmux-core::reset`, glue supervisor
-`reset_supervisor.rs` with idle/hidden/mem-watchdog triggers, `WMUX_RESET_*` env knobs,
-frontend activity ping, dev-only `window.__wmux.resetUi`). Design rationale lives in
-`docs/plans/mvp-stage14-16-plan.md` until checkpoint 1 passes and it is distilled into
-an ADR (including the deliberate deviation: reset is a glue command, not a core-bus
-command).
+Stages 13–16 are **done and Windows-verified** (checkpoint 1 passed 2026-08-09 after
+two field-fix rounds — ADR-0004): workspace sidebar, replay trim + switch tracer,
+persistence (manage-first restore boot, atomic debounced saves), automatic reset
+(gesture-only activity, hidden = unfocused OR invisible, glue `reset_ui`). The hard-won
+ConPTY findings live in ADR-0004: no EOF on child exit (waiter thread) and cursor
+probes in replays (first-attach flag in the attach protocol). Sections 8–9 of
+`docs/WINDOWS-BUILD.md` stay as regression references. UX backlog: per-pane split
+button affordance; 1MiB-replay switch flicker.
 
 Roadmap (user decision 2026-08-09): proceed straight through stage 21, with **stage 19
 (git branch display) deferred to v2** — the model fields (`git_branch`/`git_dirty`) stay
