@@ -4,12 +4,19 @@
 // 상태 라인 프롬프트 문자열만 담당한다. 클릭·Esc 배선과 실제 전달(대상 뷰의
 // paste/submit — bracketed paste 경유, 계획 D1)은 workspace-view/pane-view 가 한다.
 
-import type { PaneId } from "./types";
+import type { PaneId, WorkspaceId } from "./types";
 
-/** 상태 — idle(평시) | armed(대상 선택 중: 캡처된 텍스트·submit 여부·소스 pane). */
+/** 상태 — idle(평시) | armed(대상 선택 중: 캡처된 텍스트·submit 여부·소스 pane·
+ *  arm 시점의 활성 워크스페이스 — 이탈 시 자동 취소 판정용, 리뷰 finding). */
 export type SendModeState =
   | { type: "idle" }
-  | { type: "armed"; text: string; submit: boolean; source: PaneId };
+  | {
+      type: "armed";
+      text: string;
+      submit: boolean;
+      source: PaneId;
+      workspace: WorkspaceId | null;
+    };
 
 /** resolve 결과 — deliver=false 는 전달 없음(자기 자신 클릭·idle 호출)이다.
  *  그 경우 text/submit 은 의미 없는 빈 값으로 고정한다 (호출측 분기 단순화). */
@@ -31,11 +38,16 @@ export class SendMode {
     return this.current.type === "armed";
   }
 
-  /** 대상 선택 모드 진입 — 이미 armed 여도 덮어쓴다 (아이콘 재클릭 = 재캡처).
-   *  선택 텍스트 캡처·무선택 에러 판정은 호출측(pane-view) 책임이다 — 여기는
-   *  캡처가 성공한 뒤에만 불린다. */
-  arm(source: PaneId, text: string, submit: boolean): void {
-    this.current = { type: "armed", text, submit, source };
+  /** 대상 선택 모드 진입. 선택 텍스트 캡처·무선택 에러 판정은 호출측(pane-view)
+   *  책임이다 — 여기는 캡처가 성공한 뒤에만 불린다.
+   *
+   *  API 수준에서는 armed 중 재-arm 이 덮어쓰기지만, **UI 에서는 도달 불가**다
+   *  (리뷰 지적): armed 중에는 모든 pane mousedown 이 capture 에서 resolve 로
+   *  빠지므로 다른 pane 의 ⤷ 클릭은 재-arm 이 아니라 그 pane 으로의 전달 확정이
+   *  된다. `workspace` 는 arm 시점의 활성 워크스페이스 — render 가 이탈 시 자동
+   *  취소하는 데 쓴다. */
+  arm(source: PaneId, text: string, submit: boolean, workspace: WorkspaceId | null): void {
+    this.current = { type: "armed", text, submit, source, workspace };
   }
 
   /** 취소 — Esc·호출측 판단 어느 경로든 idle 로 돌아간다 (idle 에서는 no-op). */

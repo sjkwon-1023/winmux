@@ -139,7 +139,12 @@ export class WorkspaceView {
   private readonly sendCtl: SendController = {
     isActive: () => this.sendMode.active,
     arm: (source, text, submit) => {
-      this.sendMode.arm(source, text, submit);
+      this.sendMode.arm(
+        source,
+        text,
+        submit,
+        this.lastSnapshot?.state.activeWorkspace ?? null,
+      );
       this.syncSendUi();
     },
     resolve: (target) => this.resolveSend(target),
@@ -195,12 +200,44 @@ export class WorkspaceView {
     if (!result.deliver) return;
     const shown = this.paneViews.get(target)?.shownTab ?? null;
     const view = shown === null ? undefined : this.views.get(shown);
-    if (view === undefined) {
+    if (shown === null || view === undefined) {
       this.sendStatus.flashError("cannot send: target pane has no terminal");
+      return;
+    }
+    // exited 대상은 write 가 백엔드에서 실패해 조용히 증발한다 (리뷰 finding) —
+    // 스냅샷의 탭 status 로 사전 판정해 표면화한다.
+    if (!this.isRunningTerminalTab(target, shown)) {
+      this.sendStatus.flashError("cannot send: target terminal has exited");
+      return;
+    }
+    // replay 게이트가 닫혀 있으면 paste 는 유실되고 submit CR 만 통과하는 비대칭이
+    // 생긴다 (리뷰 finding) — 둘 다 스킵하고 에러로 드러낸다.
+    if (!view.canAcceptSend()) {
+      this.sendStatus.flashError("cannot send: target terminal is still attaching");
+      return;
+    }
+    // 여러 줄 + 비-bracketed 대상이면 중간 라인들이 그대로 실행된다 (리뷰
+    // finding — paste 경로가 막는 건 stray ESC[200~ 이지 라인 실행이 아니다).
+    // 대상 xterm 이 모드를 추적하므로 여기서 검출해 거부한다.
+    if (/[\r\n]/.test(result.text) && !view.bracketedPaste()) {
+      this.sendStatus.flashError(
+        "cannot send multi-line: target is not in bracketed paste mode (lines would run)",
+      );
       return;
     }
     view.paste(result.text);
     if (result.submit) view.submit();
+  }
+
+  /** 대상 pane 의 표시 탭이 실행 중 터미널인지 — 최신 채택 스냅샷 기준. */
+  private isRunningTerminalTab(pane: PaneId, tab: TabId): boolean {
+    const snapshot = this.lastSnapshot;
+    if (snapshot === null) return false;
+    const ws = activeWorkspace(snapshot);
+    const found = ws?.panes[String(pane)]?.tabs.find((t) => t.id === tab);
+    return found !== undefined
+      ? found.kind.type === "terminal" && found.kind.status.type === "running"
+      : false;
   }
 
   /** 진행 중 제스처(mousedown 은 이미 pane capture 에서 소비)의 click 1회를
@@ -210,6 +247,7 @@ export class WorkspaceView {
     const cleanup = (): void => {
       window.removeEventListener("click", onClick, { capture: true });
       window.removeEventListener("mousedown", onNextGesture, { capture: true });
+      window.removeEventListener("keydown", onNextGesture, { capture: true });
     };
     const onClick = (ev: MouseEvent): void => {
       ev.preventDefault();
@@ -218,9 +256,12 @@ export class WorkspaceView {
     };
     const onNextGesture = (): void => cleanup();
     // 현재 이벤트는 이미 window capture 단계를 지났으므로 지금 걸어도 현재
-    // mousedown 에는 발화하지 않는다 — 다음 이벤트부터 유효하다.
+    // mousedown 에는 발화하지 않는다 — 다음 이벤트부터 유효하다. keydown 도
+    // 클린업 신호다 (리뷰 finding): mouseup 이 창 밖에서 일어나 click 이 안 온
+    // 채로 키보드 유발 click(포커스된 버튼의 Enter/Space)이 오면 오흡수된다.
     window.addEventListener("click", onClick, { capture: true });
     window.addEventListener("mousedown", onNextGesture, { capture: true });
+    window.addEventListener("keydown", onNextGesture, { capture: true });
   }
 
   /** 스냅샷 반영 진입점 — store 구독에서 revision 순으로 호출된다. */
@@ -253,6 +294,20 @@ export class WorkspaceView {
     this.sweptSessions = unattached;
 
     const ws = activeWorkspace(snapshot);
+
+    // send-mode 수명 가드 (17단계 리뷰 finding): armed 워크스페이스를 떠났거나
+    // 소스 pane 이 사라졌으면 자동 취소한다 — 방치하면 v1 이 제외한 워크스페이스
+    // 간 전달이 우회로로 열리고, 전환 직후의 재-attach 경합 창과 겹친다.
+    const sm = this.sendMode.state;
+    if (sm.type === "armed") {
+      const sourceAlive =
+        ws !== null && Object.prototype.hasOwnProperty.call(ws.panes, String(sm.source));
+      if (snapshot.state.activeWorkspace !== sm.workspace || !sourceAlive) {
+        this.sendMode.cancel();
+        this.syncSendUi();
+      }
+    }
+
     if (ws === null) {
       this.clear();
       this.rootEl.textContent = "(no workspace)";

@@ -408,18 +408,33 @@ mousedown on a pane delivers.
 3. **Bracketed paste safety (vim target)** — open `vim` in the target pane, enter insert
    mode, and send a multi-line selection with `⤷` (send only): the text lands as a paste —
    no autoindent staircase, no literal `ESC[200~`/`ESC[201~` fragments, and **nothing is
-   executed** (send-only must never run anything in the target, TUI or shell). With a
-   shell target *not* in bracketed paste mode, the same multi-line send must not execute
-   the intermediate lines either — the paste goes through xterm's paste path, which tracks
-   the target's paste mode instead of writing raw escape sequences to the PTY.
-4. **No selection surfaces an error** — with no selection in the source terminal (or with
+   executed** (send-only must never run anything in the target, TUI or shell).
+4. **Multi-line to a non-bracketed target is refused** — with a target whose foreground
+   program does *not* enable bracketed paste (e.g. plain `cat` waiting on stdin, or a
+   bare shell with bracketed paste off), sending a **multi-line** selection with either
+   icon is refused with a status-line error (`cannot send multi-line: target is not in
+   bracketed paste mode`), and **nothing** is written to the target. Rationale: without
+   bracketed paste the target cannot distinguish pasted newlines from Enter, so the
+   intermediate lines would execute — refusing is the only safe behavior. A
+   **single-line** send to the same target still works (and with `⤷` never executes).
+5. **No selection surfaces an error** — with no selection in the source terminal (or with
    an empty pane / non-terminal placeholder shown), clicking either icon shows a one-shot
    status-line error (`no selection to send` / `cannot send: no terminal shown in this
    pane`) and does **not** enter target-selection mode.
-5. **Esc and self-click cancel** — arm send mode, press Esc → the prompt clears, nothing
+6. **Esc and self-click cancel** — arm send mode, press Esc → the prompt clears, nothing
    is sent, and the next pane click focuses normally (the Esc must not leak into the
    terminal). Arm again and click the **source** pane itself → cancelled the same way
    (self-send is meaningless).
+7. **Workspace switch auto-cancels** — arm send mode, then switch to another workspace
+   (sidebar click): the prompt clears and the mode is cancelled — a pane click in the new
+   workspace focuses normally instead of delivering (cross-workspace send is out of scope
+   for v1).
+8. **Exited target surfaces an error** — arm send mode and click a pane whose shown
+   terminal has **exited** (run `exit` there first): a status-line error appears
+   (`cannot send: target terminal has exited`) and nothing is silently dropped.
+9. **Send & run ordering** — with `⤷⏎` and a multi-line selection into a bracketed-paste
+   shell, the full pasted text always lands **before** the single CR (the command that
+   runs is the complete pasted text, never a truncated prefix).
 
 ## 11. ARM64 cross-build notes
 

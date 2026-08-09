@@ -64,6 +64,19 @@ export class TerminalView {
   /** replay 재생 완료 전의 onData 억제 플래그 — 낡은 단말 질의에 대한 xterm
    *  자동 응답이 PTY 로 새는 것을 막는다 (attach() 의 onData 배선 주석 참조). */
   private replayDone = false;
+  /** 세션별 stdin write 직렬화 큐 (17단계 리뷰 finding) — write_stdin 은 async
+   *  커맨드라 invoke 마다 별도 blocking task 로 돌아 back-to-back 쓰기(paste
+   *  텍스트 + submit CR)가 역전될 수 있다. 모든 stdin write 를 이 체인으로
+   *  직렬화해 발행 순서 = 도착 순서를 보장한다 (타이핑은 간격이 있어 체감 지연
+   *  없음 — 왕복 1회가 겹치지 않게 될 뿐이다). */
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  /** stdin write 직렬화 진입점 — onData·submit 공용. */
+  private enqueueWrite(data: string): void {
+    this.writeQueue = this.writeQueue
+      .then(() => writeStdin(this.session, data))
+      .catch((err) => console.error("write_stdin failed", err));
+  }
 
   constructor(
     parent: HTMLElement,
@@ -149,12 +162,26 @@ export class TerminalView {
   }
 
   /** 전달 후 실행의 submit 절반 (계획 v2 8장 sendTextAndSubmit) — CR 1회를
-   *  PTY stdin 에 직접 쓴다. paste 와 분리된 별도 호출이라 "전달"만으로는
-   *  절대 실행되지 않는다 (실수 실행 방지). */
+   *  stdin 직렬화 큐로 보낸다. paste 텍스트(onData 경유 — 같은 큐)보다 뒤에
+   *  발행되므로 순서 역전이 없다 (리뷰 finding). "전달"만으로는 절대 실행되지
+   *  않는다 (실수 실행 방지). */
   submit(): void {
-    writeStdin(this.session, "\r").catch((err) =>
-      console.error("write_stdin failed", err),
-    );
+    this.enqueueWrite("\r");
+  }
+
+  /** 전달 수신 가능 여부 (17단계 리뷰 finding) — replay 게이트가 닫혀 있으면
+   *  paste 가 onData 에서 유실되는데 submit CR 만 통과하는 비대칭이 생긴다.
+   *  resolveSend 가 전달 전에 이걸로 판정해 둘 다 스킵 + 에러 표면화한다. */
+  canAcceptSend(): boolean {
+    return this.opened && !this.disposed && this.replayDone;
+  }
+
+  /** 대상 앱의 bracketed paste 모드 (xterm 이 추적) — 여러 줄 전달의 안전 판정.
+   *  모드가 꺼진 대상(예: cmd)에 여러 줄을 paste 하면 중간 라인들이 그대로
+   *  실행된다 (리뷰 finding — paste 경로가 막는 것은 stray ESC[200~ 이지 라인
+   *  실행이 아니다). */
+  bracketedPaste(): boolean {
+    return this.term.modes.bracketedPasteMode;
   }
 
   /** attach 수행 — 생성 직후 정확히 1회 호출한다. 실패는 그대로 reject 로
@@ -184,7 +211,7 @@ export class TerminalView {
         console.debug("[wmux] dropped stale terminal auto-response", data.length);
         return;
       }
-      writeStdin(this.session, data).catch((err) => console.error("write_stdin failed", err));
+      this.enqueueWrite(data);
     });
 
     // 2) attach → raw body [u64 LE end_offset][u8 first_attach][replay] 파싱.
