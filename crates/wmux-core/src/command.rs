@@ -34,11 +34,17 @@ use crate::session::SessionId;
     rename_all_fields = "camelCase"
 )]
 pub enum Command {
-    /// 워크스페이스 + 빈 pane 1개(Leaf)를 만들고 active 로 지정한다.
+    /// 워크스페이스 + pane 1개(Leaf)를 만들고 active 로 지정한다. `tab` 이
+    /// Some 이면 초기 pane 에 그 탭까지 **원자적으로** 생성한다 (계획 13-D1 —
+    /// CreateTab 과 동일한 spawn-first 순서라 스폰 실패 시 워크스페이스·pane·
+    /// next_id 전부 불변이고, 빈 워크스페이스 중간 상태가 스냅샷에 노출되지
+    /// 않는다). None 이면 기존처럼 빈 pane 을 만든다 — 필드 누락 JSON 도
+    /// None 으로 파싱된다 (13단계 이전 클라이언트 하위호환).
     CreateWorkspace {
         name: String,
         root_path: Option<String>,
         distro: Option<String>,
+        tab: Option<NewTab>,
     },
     SwitchWorkspace {
         workspace: WorkspaceId,
@@ -118,9 +124,13 @@ pub enum NewTab {
     rename_all_fields = "camelCase"
 )]
 pub enum CommandOutput {
+    /// CreateWorkspace 결과 — 생성된 안정 ID 전부를 돌려준다 (계획 13-D1).
+    /// `tab`/`session` 은 `CreateWorkspace.tab` 이 Some 이었을 때만 Some.
     WorkspaceCreated {
         workspace: WorkspaceId,
         pane: PaneId,
+        tab: Option<TabId>,
+        session: Option<SessionId>,
     },
     /// SplitPane 결과 — 생성된 안정 ID 전부를 돌려준다 (계획 D5). `tab`/`session`
     /// 은 `SplitPane.tab` 이 Some 이었을 때만 Some (session 은 그중 terminal 탭).
@@ -311,9 +321,28 @@ impl Dispatcher {
                 name,
                 root_path,
                 distro,
+                tab,
             } => {
+                // 원자성: 탭 동반 생성은 spawn 을 **모든 상태 변이보다 먼저**
+                // 수행한다 (CreateTab 과 동일한 spawn-first 순서) — 스폰 실패 시
+                // 워크스페이스·pane·next_id·revision 전부 불변이다. 워크스페이스
+                // 가 아직 상태에 없으므로 기본값(root_path·distro)을 직접 넘긴다.
+                let spawned = match tab {
+                    Some(NewTab::Terminal { cwd }) => {
+                        Some(self.spawn_terminal_with(&root_path, &distro, cwd)?)
+                    }
+                    None => None,
+                };
                 let workspace = WorkspaceId(self.state.alloc_id());
                 let pane = PaneId(self.state.alloc_id());
+                let tab_id = spawned.as_ref().map(|_| TabId(self.state.alloc_id()));
+                let mut initial = empty_pane(pane);
+                if let (Some(tab_id), Some((session, cwd))) = (tab_id, &spawned) {
+                    initial
+                        .tabs
+                        .push(terminal_tab(tab_id, *session, cwd.clone()));
+                    initial.active_tab = Some(tab_id);
+                }
                 self.state.workspaces.push(Workspace {
                     id: workspace,
                     name,
@@ -322,13 +351,18 @@ impl Dispatcher {
                     git_branch: None,
                     git_dirty: None,
                     layout: SplitTree::Leaf { pane },
-                    panes: [(pane, empty_pane(pane))].into(),
+                    panes: [(pane, initial)].into(),
                     active_pane: pane,
                     agent_status: AgentStatus::Idle,
                     last_agent_message: None,
                 });
                 self.state.active_workspace = Some(workspace);
-                Ok(CommandOutput::WorkspaceCreated { workspace, pane })
+                Ok(CommandOutput::WorkspaceCreated {
+                    workspace,
+                    pane,
+                    tab: tab_id,
+                    session: spawned.map(|(session, _)| session),
+                })
             }
 
             Command::SwitchWorkspace { workspace } => {
@@ -495,10 +529,22 @@ impl Dispatcher {
         cwd: Option<String>,
     ) -> Result<(SessionId, Option<String>), CommandError> {
         let ws = &self.state.workspaces[wi];
-        let cwd = cwd.or_else(|| ws.root_path.clone());
+        self.spawn_terminal_with(&ws.root_path, &ws.distro, cwd)
+    }
+
+    /// [`Self::spawn_terminal`] 의 기본값 명시 버전 — CreateWorkspace(tab 포함)는
+    /// 워크스페이스가 아직 상태에 없어 인덱스 대신 만들려는 값의 기본값을 직접
+    /// 넘긴다 (spawn-first 계약은 동일).
+    fn spawn_terminal_with(
+        &self,
+        root_path: &Option<String>,
+        distro: &Option<String>,
+        cwd: Option<String>,
+    ) -> Result<(SessionId, Option<String>), CommandError> {
+        let cwd = cwd.or_else(|| root_path.clone());
         let req = ShellSpawnReq {
             cwd: cwd.clone(),
-            distro: ws.distro.clone(),
+            distro: distro.clone(),
             ..ShellSpawnReq::default()
         };
         let session = self
@@ -552,7 +598,8 @@ fn empty_pane(id: PaneId) -> Pane {
     }
 }
 
-/// 갓 스폰된 터미널 세션의 탭 값 — CreateTab·SplitPane(tab 포함)이 공유한다.
+/// 갓 스폰된 터미널 세션의 탭 값 — CreateTab·SplitPane·CreateWorkspace(tab
+/// 포함)가 공유한다.
 fn terminal_tab(id: TabId, session: SessionId, cwd: Option<String>) -> Tab {
     Tab {
         id,
@@ -646,17 +693,24 @@ mod tests {
         (Dispatcher::new(Box::new(host.clone())), host)
     }
 
-    /// 워크스페이스 1개를 만들고 (workspace, 초기 pane) id 를 돌려주는 헬퍼.
+    /// 워크스페이스 1개(tab 없음)를 만들고 (workspace, 초기 pane) id 를
+    /// 돌려주는 헬퍼.
     fn create_ws(d: &mut Dispatcher, name: &str) -> (WorkspaceId, PaneId) {
         match d
             .dispatch(Command::CreateWorkspace {
                 name: name.into(),
                 root_path: None,
                 distro: None,
+                tab: None,
             })
             .unwrap()
         {
-            CommandOutput::WorkspaceCreated { workspace, pane } => (workspace, pane),
+            CommandOutput::WorkspaceCreated {
+                workspace,
+                pane,
+                tab: None,
+                session: None,
+            } => (workspace, pane),
             other => panic!("unexpected output: {other:?}"),
         }
     }
@@ -709,6 +763,7 @@ mod tests {
                 name: "ws".into(),
                 root_path: Some("/proj".into()),
                 distro: Some("Ubuntu".into()),
+                tab: None,
             })
             .unwrap();
         assert_eq!(
@@ -716,6 +771,8 @@ mod tests {
             CommandOutput::WorkspaceCreated {
                 workspace: WorkspaceId(1),
                 pane: PaneId(2),
+                tab: None,
+                session: None,
             }
         );
         let ws = d.state().workspace(WorkspaceId(1)).unwrap();
@@ -727,6 +784,97 @@ mod tests {
         assert_eq!(d.state().active_workspace, Some(WorkspaceId(1)));
         assert_eq!(d.state().revision, 1);
         assert_eq!(d.state().next_id, 3);
+    }
+
+    #[test]
+    fn create_workspace_with_tab_creates_tab_atomically() {
+        let (mut d, host) = dispatcher();
+        let out = d
+            .dispatch(Command::CreateWorkspace {
+                name: "ws".into(),
+                root_path: Some("/proj".into()),
+                distro: Some("Ubuntu".into()),
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap();
+        // 생성된 안정 ID 전부 반환 (계획 13-D1) — 발급 순서는 workspace →
+        // pane → tab.
+        let CommandOutput::WorkspaceCreated {
+            workspace,
+            pane,
+            tab: Some(tab),
+            session: Some(session),
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+        assert!(workspace.0 < pane.0 && pane.0 < tab.0);
+
+        let w = d.state().workspace(workspace).unwrap();
+        assert_eq!(w.layout, SplitTree::Leaf { pane });
+        assert_eq!(w.active_pane, pane);
+        let p = &w.panes[&pane];
+        assert_eq!(p.tabs.len(), 1);
+        assert_eq!(p.tabs[0].id, tab);
+        assert_eq!(p.active_tab, Some(tab));
+        let TabKind::Terminal {
+            pty_session,
+            status,
+            cwd,
+        } = &p.tabs[0].kind
+        else {
+            panic!("terminal 탭이 아님");
+        };
+        assert_eq!(*pty_session, Some(session));
+        assert_eq!(*status, TerminalStatus::Running);
+        // cwd 미지정 → 워크스페이스 root_path 상속, distro 도 워크스페이스
+        // 기본값 — CreateTab·SplitPane 과 공유하는 스폰 경로.
+        assert_eq!(cwd.as_deref(), Some("/proj"));
+        assert_eq!(host.spawns()[0].cwd.as_deref(), Some("/proj"));
+        assert_eq!(host.spawns()[0].distro.as_deref(), Some("Ubuntu"));
+        assert_eq!(d.state().active_workspace, Some(workspace));
+        assert_eq!(d.state().revision, 1);
+    }
+
+    #[test]
+    fn create_workspace_with_tab_spawn_failure_leaves_state_untouched() {
+        let (mut d, host) = dispatcher();
+        // 기존 워크스페이스를 하나 두어 active_workspace 불변까지 함께 잠근다.
+        create_ws(&mut d, "existing");
+        host.set_fail_spawn(true);
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        let err = d
+            .dispatch(Command::CreateWorkspace {
+                name: "ws".into(),
+                root_path: None,
+                distro: None,
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap_err();
+        assert!(matches!(err, CommandError::SpawnFailed { .. }));
+        // 워크스페이스·pane·next_id·revision 전부 불변 (spawn-first 원자성).
+        let after = serde_json::to_value(d.state()).unwrap();
+        assert_eq!(before, after, "spawn 실패가 상태를 바꿈 (원자성 위반)");
+    }
+
+    #[test]
+    fn create_workspace_tab_field_missing_deserializes_to_none() {
+        // 하위호환 (계획 13-D1): 13단계 이전 클라이언트의 tab 필드 없는 JSON 은
+        // tab: None 으로 파싱된다 (fixture 쪽 잠금은 dispatcher.rs 참조).
+        let cmd: Command = serde_json::from_str(
+            r#"{ "type": "createWorkspace", "name": "ws", "rootPath": null, "distro": null }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::CreateWorkspace {
+                name: "ws".into(),
+                root_path: None,
+                distro: None,
+                tab: None,
+            }
+        );
     }
 
     #[test]
@@ -962,11 +1110,13 @@ mod tests {
                 name: "ws".into(),
                 root_path: Some("/proj".into()),
                 distro: Some("Ubuntu".into()),
+                tab: None,
             })
             .unwrap();
         let CommandOutput::WorkspaceCreated {
             workspace: ws,
             pane: pane1,
+            ..
         } = out
         else {
             panic!("unexpected output: {out:?}");
@@ -1107,6 +1257,7 @@ mod tests {
                 name: "ws".into(),
                 root_path: Some("/proj".into()),
                 distro: Some("Ubuntu".into()),
+                tab: None,
             })
             .unwrap();
         let CommandOutput::WorkspaceCreated { pane, .. } = out else {

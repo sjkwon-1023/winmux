@@ -71,6 +71,11 @@ function commandTag(cmd: Command): string {
   switch (cmd.type) {
     case "createWorkspace":
       expect(typeof cmd.name).toBe("string");
+      // tab 은 필드 누락(undefined)·null·NewTab 전부 허용 — 누락은 13단계
+      // 이전 클라이언트 하위호환 (계획 13-D1).
+      expect(
+        cmd.tab === undefined || cmd.tab === null || cmd.tab.type === "terminal",
+      ).toBe(true);
       return cmd.type;
     case "switchWorkspace":
       expect(typeof cmd.workspace).toBe("number");
@@ -114,6 +119,10 @@ function outputTag(entry: CommandOutput): string {
     case "workspaceCreated":
       expect(typeof entry.workspace).toBe("number");
       expect(typeof entry.pane).toBe("number");
+      // tab/session 은 nullable — createWorkspace.tab 이 null 이면 둘 다 null
+      // (계획 13-D1).
+      expect(entry.tab === null || typeof entry.tab === "number").toBe(true);
+      expect(entry.session === null || typeof entry.session === "number").toBe(true);
       return entry.type;
     case "paneCreated":
       expect(typeof entry.pane).toBe("number");
@@ -258,6 +267,7 @@ describe("stage10-snapshot-empty.json", () => {
 describe("stage10-commands.json", () => {
   it("covers every Command variant with internal tag narrowing", () => {
     const tags = commandsFixture.map(commandTag);
+    // 마지막 createWorkspace 는 tab 필드 누락 하위호환 형태 (계획 13-D1).
     expect(tags).toEqual([
       "createWorkspace",
       "switchWorkspace",
@@ -269,6 +279,7 @@ describe("stage10-commands.json", () => {
       "createTab",
       "activateTab",
       "closeTab",
+      "createWorkspace",
     ]);
   });
 
@@ -277,6 +288,13 @@ describe("stage10-commands.json", () => {
     if (create.type !== "createWorkspace") throw new Error("first must be createWorkspace");
     expect(create.rootPath).toBe("/home/dev/code/wmux");
     expect(create.distro).toBe("Ubuntu-24.04");
+    // 원자 탭 동반 생성 형태 (계획 13-D1).
+    expect(create.tab).toEqual({ type: "terminal", cwd: null });
+
+    // 마지막 엔트리는 tab 필드 누락 하위호환 잠금 — 파싱 시 undefined.
+    const legacy = commandsFixture[10];
+    if (legacy.type !== "createWorkspace") throw new Error("last must be createWorkspace");
+    expect(legacy.tab).toBeUndefined();
 
     const split = commandsFixture[4];
     if (split.type !== "splitPane") throw new Error("fifth must be splitPane");

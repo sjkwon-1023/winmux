@@ -1,12 +1,14 @@
-// wmux 앱 엔트리 — store 구독 → 상단 상태 라인 + 활성 워크스페이스 split tree
-// 렌더 (11~12단계). 분할 렌더·splitter·탭바·클릭 포커스는 workspace-view/
-// pane-view/splitter 가 담당하고, 여기는 부트스트랩과 dispatchUI 래퍼
-// (CommandError 상태 라인 표면화 + D7 focus 보상)만 남는다. dev 훅
+// wmux 앱 엔트리 — store 구독 → 상단 상태 라인 + 좌측 워크스페이스 사이드바
+// (13단계) + 우측 활성 워크스페이스 split tree 렌더 (11~12단계). 분할 렌더·
+// splitter·탭바·클릭 포커스는 workspace-view/pane-view/splitter 가, 카드 리스트·
+// 인라인 폼은 sidebar 가 담당하고, 여기는 부트스트랩과 dispatchUI 래퍼
+// (CommandError 상태 라인 표면화 + focus 보상)만 남는다. dev 훅
 // window.__wmux 는 유지한다 — 콘솔에서 raw dispatch/getState 를 직접 부르는
 // 조작 표면 (주의: dispatchUI 를 우회하므로 focus 보상·에러 표면화가 없다).
 
 import { dispatch, getState } from "./backend";
 import { formatCommandError } from "./command-error";
+import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { Command, CommandOutput, StateSnapshot } from "./types";
@@ -61,6 +63,7 @@ class App {
   private readonly viewEl = requireElement("view");
   private readonly store = new Store();
   private readonly wsView = new WorkspaceView(this.viewEl, (cmd) => this.dispatchUI(cmd));
+  private readonly sidebar = new Sidebar(requireElement("sidebar"), (cmd) => this.dispatchUI(cmd));
   private errorText: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -91,16 +94,23 @@ class App {
     }
   }
 
-  /** D7 focus 보상 경로 — attach 자동 focus 를 제거했으므로, 성공한 dispatch 의
-   *  결과에 따라 focus 할 뷰를 workspace-view 에 예약한다 (렌더 후 해소).
-   *  새 탭 생성(TabCreated / tab 포함 PaneCreated)은 출력의 새 탭, ActivateTab
-   *  은 cmd 의 탭, FocusPane 은 cmd 의 pane 의 표시 중 뷰가 대상이다. */
+  /** focus 보상 경로 (12단계 D7 + 13단계 D5) — attach 자동 focus 를 제거했으므로,
+   *  성공한 dispatch 의 결과에 따라 focus 할 뷰를 workspace-view 에 예약한다
+   *  (렌더 후 해소). 새 탭 생성(TabCreated / tab 포함 PaneCreated / tab 포함
+   *  WorkspaceCreated)은 출력의 새 탭, ActivateTab 은 cmd 의 탭, FocusPane 은
+   *  cmd 의 pane 의 표시 중 뷰가 대상이다. */
   private compensateFocus(cmd: Command, out: CommandOutput): void {
     if (out.type === "tabCreated") {
       this.wsView.requestFocus({ kind: "tab", tab: out.tab });
       return;
     }
     if (out.type === "paneCreated" && out.tab !== null) {
+      this.wsView.requestFocus({ kind: "tab", tab: out.tab });
+      return;
+    }
+    if (out.type === "workspaceCreated" && out.tab !== null) {
+      // 새 워크스페이스는 활성이 된다 (코어 CreateWorkspace 시맨틱) — 원자
+      // 생성된 터미널 탭에 focus (13단계 D5, 기존 tabCreated 분기와 동일 패턴).
       this.wsView.requestFocus({ kind: "tab", tab: out.tab });
       return;
     }
@@ -112,10 +122,16 @@ class App {
       this.wsView.requestFocus({ kind: "pane", pane: cmd.pane });
       return;
     }
-    if (cmd.type === "closeTab" || cmd.type === "closePane" || cmd.type === "closeWorkspace") {
-      // 닫힌 xterm 이 DOM 에서 사라지면 focus 가 body 로 떨어져 키 입력이 죽는다
-      // (리뷰 finding) — 닫기 후 어디가 남는지는 스냅샷이 아는 것이므로, 렌더
-      // 시점의 activePane 으로 보상한다.
+    if (
+      cmd.type === "closeTab" ||
+      cmd.type === "closePane" ||
+      cmd.type === "closeWorkspace" ||
+      cmd.type === "switchWorkspace"
+    ) {
+      // 닫기: 닫힌 xterm 이 DOM 에서 사라지면 focus 가 body 로 떨어져 키 입력이
+      // 죽는다 (리뷰 finding) — 닫기 후 어디가 남는지는 스냅샷이 아는 것이므로,
+      // 렌더 시점의 activePane 으로 보상한다. 전환(13단계 D5)도 같은 경로다 —
+      // 전환 후 활성 pane 은 도착 스냅샷이 알려준다.
       this.wsView.requestFocus({ kind: "activePane" });
     }
   }
@@ -142,6 +158,7 @@ class App {
 
   private render(snapshot: StateSnapshot): void {
     this.renderStatusLine();
+    this.sidebar.render(snapshot);
     this.wsView.render(snapshot);
   }
 

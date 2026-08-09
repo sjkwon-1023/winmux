@@ -71,6 +71,8 @@ fn outputs_fixture_matches_serialization() {
         CommandOutput::WorkspaceCreated {
             workspace: WorkspaceId(1),
             pane: PaneId(2),
+            tab: Some(TabId(3)),
+            session: Some(11),
         },
         CommandOutput::PaneCreated {
             pane: PaneId(9),
@@ -106,9 +108,26 @@ fn commands_fixture_round_trips() {
     let original: serde_json::Value = serde_json::from_str(&text).unwrap();
     let parsed: Vec<Command> = serde_json::from_str(&text).unwrap();
 
-    // 전 Command variant 1개씩 (10종) — variant 추가 시 fixture 도 갱신할 것.
-    assert_eq!(parsed.len(), 10);
+    // 전 Command variant 1개씩(10종) + createWorkspace 의 tab 필드 누락
+    // 하위호환 형태 1개 (마지막 엔트리) — variant 추가 시 fixture 도 갱신할 것.
+    assert_eq!(parsed.len(), 11);
 
+    // 하위호환 잠금 (계획 13-D1): tab 필드가 없는 JSON 은 tab: None 으로
+    // 파싱된다 — 13단계 이전 클라이언트의 createWorkspace 형태.
+    assert!(
+        matches!(&parsed[10], Command::CreateWorkspace { tab: None, .. }),
+        "compat 엔트리가 tab: None 으로 파싱돼야 함: {:?}",
+        parsed[10]
+    );
+
+    // 재직렬화는 None 을 "tab": null 로 명시하므로, 원본의 compat 엔트리에
+    // "tab": null 을 보충한 형태와 비교한다 (그 외 전 엔트리는 strict
+    // round-trip).
+    let mut expected = original.clone();
+    expected[10]
+        .as_object_mut()
+        .unwrap()
+        .insert("tab".to_string(), serde_json::Value::Null);
     let reserialized = serde_json::to_value(&parsed).unwrap();
-    assert_eq!(original, reserialized);
+    assert_eq!(expected, reserialized);
 }

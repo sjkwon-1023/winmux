@@ -103,7 +103,15 @@ export type NewTab = { type: "terminal"; cwd: string | null };
 /** 직렬화 가능한 command bus 명령 집합 (command.rs Command).
  *  JSON 은 internal tag: {"type": "createWorkspace", "name": ...}. */
 export type Command =
-  | { type: "createWorkspace"; name: string; rootPath: string | null; distro: string | null }
+  /** tab 이 non-null 이면 초기 pane 에 그 탭까지 원자 생성 (계획 13-D1).
+   *  필드 누락(undefined)은 null 과 동일 — 13단계 이전 클라이언트 하위호환. */
+  | {
+      type: "createWorkspace";
+      name: string;
+      rootPath: string | null;
+      distro: string | null;
+      tab?: NewTab | null;
+    }
   | { type: "switchWorkspace"; workspace: WorkspaceId }
   | { type: "closeWorkspace"; workspace: WorkspaceId }
   | { type: "focusPane"; pane: PaneId }
@@ -118,7 +126,15 @@ export type Command =
 
 /** dispatch 성공 결과 (command.rs CommandOutput). */
 export type CommandOutput =
-  | { type: "workspaceCreated"; workspace: WorkspaceId; pane: PaneId }
+  /** createWorkspace 결과 — 생성된 안정 ID 전부. tab/session 은
+   *  createWorkspace.tab 이 non-null 이었을 때만 non-null (계획 13-D1). */
+  | {
+      type: "workspaceCreated";
+      workspace: WorkspaceId;
+      pane: PaneId;
+      tab: TabId | null;
+      session: SessionId | null;
+    }
   /** splitPane 결과 — 생성된 안정 ID 전부. tab/session 은 splitPane.tab 이
    *  non-null 이었을 때만 non-null (계획 D5). */
   | {

@@ -41,7 +41,7 @@ Build Tools — not the full Visual Studio IDE.
    selected:
    - **x64**: `MSVC v143 - VS 2022 C++ x64/x86 build tools` (this dev machine's target)
    - **ARM64**: `MSVC v143 - VS 2022 C++ ARM64 build tools` (only needed if you'll build for
-     ARM64 — see section 8)
+     ARM64 — see section 9)
 4. Also confirm a **Windows 10/11 SDK** component is selected (the installer usually pulls one
    in automatically with the C++ workload).
 
@@ -114,12 +114,14 @@ npm run tauri dev
 ```
 
 Same rebuild behavior as spike: Rust changes under `src-tauri/` or `crates/wmux-core`
-trigger a rebuild, frontend changes hot-reload. On boot the app itself dispatches
-`CreateWorkspace` + `CreateTab` (from Tauri `setup`, before the frontend ever attaches),
-so a terminal tab is already running when the window opens. There is no pointer/keyboard
-UI for splits/tabs yet (that lands in stages 11–13) — drive further commands from the
-WebView dev console via the dev hook `window.__wmux.dispatch(command)`. See section 6
-below for the stage 10 manual checklist that exercises this.
+trigger a rebuild, frontend changes hot-reload. On boot the app itself dispatches a
+single atomic `CreateWorkspace{tab}` (from Tauri `setup`, before the frontend ever
+attaches — stage 13 folded the earlier `CreateWorkspace` + `CreateTab` pair into one
+command), so a terminal tab is already running when the window opens. Splits/tabs
+(stages 11–12) and the workspace sidebar (stage 13) are mouse-driven; commands without
+UI yet can still be driven from the WebView dev console via the dev hook
+`window.__wmux.dispatch(command)`. See section 6 below for the stage 10 manual
+checklist that exercises this.
 
 ### Distributable exe (no installer/bundle)
 
@@ -270,7 +272,42 @@ needed where noted.
    -ProcessName wmux` and note the total against the 계획 v2 section 16 budget
    (≤150MB); this is a reference point, not a hard gate for these stages.
 
-## 8. ARM64 cross-build notes
+## 8. Stage 13 manual verification checklist
+
+This is stage 13's completion gate on top of the automated gates: the workspace sidebar
+— create/switch/close workspaces from the UI (계획 v2 section 17 stage 13; design
+decisions in [`docs/plans/mvp-stage13-plan.md`](plans/mvp-stage13-plan.md)). All
+interactions are mouse-driven in the sidebar; the dev hook is only needed where noted.
+
+1. **Boot workspace card** — on launch the sidebar shows one card for the boot
+   workspace with the active highlight, a status icon, and pane/tab counts, matching
+   the workspace rendered on the right. (Agent status/message and git branch stay
+   blank/idle until stages 18–19 — the card just omits them.)
+2. **Create via the sidebar form** — click "+ New workspace", enter a name (rootPath
+   optional — absolute **Linux** path, e.g. `/home/<user>`), submit. A new card
+   appears, the app switches to the new workspace, and a terminal tab is already
+   running with keyboard focus (atomic `CreateWorkspace{tab}` — no empty-workspace
+   flash). If a `rootPath` was given, `pwd` prints it.
+3. **Background workspace keeps flowing** — in the first workspace start a long noisy
+   command (e.g. `seq 1000000` or `bash ~/code/wmux/scripts/wsl/flood.sh 10`), switch
+   to another workspace via its card, wait a few seconds, then check `get_stats` from
+   the dev console: the background session must show `paused: false` and keep making
+   progress (leaving a workspace disposes its views; the detach sweep frees the
+   channels so nothing sticks at paused).
+4. **Switch-back restores** — switch back to the first workspace: layout, tabs, and
+   terminal output are restored via replay (lazy attach), and keyboard input lands in
+   the active pane **without an extra click** (focus compensation). Pane/Tab ids
+   unchanged (`get_state`).
+5. **Close kills sessions** — click a card's ×: a confirm dialog appears when the
+   workspace has terminal tabs; after confirming, the card disappears and no orphaned
+   WSL/shell processes remain (Task Manager, or `ps` inside WSL). Closing the *last*
+   workspace leaves the empty state ("no workspace" on the right), and the sidebar
+   form still creates a fresh workspace from there.
+6. **Reload keeps the workspace list** — with 2+ workspaces, reload (Ctrl+Shift+R):
+   the card list, active workspace, and all ids are unchanged (state lives in Rust,
+   the WebView is just a view).
+
+## 9. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
 (터미널-계획-v2.md section 13) is ARM64. Cross-compiling *from* this x64 Windows machine *for*

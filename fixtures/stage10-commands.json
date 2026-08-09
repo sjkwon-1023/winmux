@@ -3,7 +3,8 @@
     "type": "createWorkspace",
     "name": "wmux",
     "rootPath": "/home/dev/code/wmux",
-    "distro": "Ubuntu-24.04"
+    "distro": "Ubuntu-24.04",
+    "tab": { "type": "terminal", "cwd": null }
   },
   { "type": "switchWorkspace", "workspace": 1 },
   { "type": "closeWorkspace", "workspace": 1 },
@@ -18,5 +19,11 @@
   { "type": "closePane", "pane": 3 },
   { "type": "createTab", "pane": 2, "tab": { "type": "terminal", "cwd": null } },
   { "type": "activateTab", "tab": 5 },
-  { "type": "closeTab", "tab": 5 }
+  { "type": "closeTab", "tab": 5 },
+  {
+    "type": "createWorkspace",
+    "name": "legacy",
+    "rootPath": null,
+    "distro": null
+  }
 ]
