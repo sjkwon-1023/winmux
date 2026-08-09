@@ -195,7 +195,10 @@ four pass.
    dispatcher issues `CreateWorkspace` + `CreateTab` from Tauri `setup`, dogfooding the
    same `Command` bus the UI will use later); the terminal accepts input immediately.
 2. **Reload survives** — type something with a distinguishable marker (e.g. `echo
-   RELOAD-MARK-1`), then reload the WebView (F5, or via a dev-hook-triggered reload).
+   RELOAD-MARK-1`), then reload the WebView with **Ctrl+Shift+R** (or `window.__wmux.reload()` from the
+   dev console). Plain F5 is *not* a reload key here — with the terminal focused, xterm
+   correctly delivers F5 to the shell as `ESC[15~` (TUI apps like htop use it), which is
+   why pressing it just prints a stray `~`.
    The session and its printed text must still be there afterward — that's the stage 10
    bar ("세션 생존 + 텍스트 보존"); pixel-perfect redraw of the TUI screen itself is out
    of scope until stage 14 (plan section 0-2).
@@ -232,7 +235,7 @@ gates. All UI here is mouse-driven; the dev hook is only needed where noted.
    terminal tab (atomic `SplitPane{tab}` — no empty-pane flash), and focus moves to the
    new pane.
 2. **Splitter drag survives reload** — drag a splitter (live preview while dragging, no
-   command spam), release, then F5. The adjusted ratio must persist (it lives in Rust
+   command spam), release, then reload (Ctrl+Shift+R). The adjusted ratio must persist (it lives in Rust
    state, not the DOM). Also observe: if a structural change arrives mid-drag (e.g. a
    session exits in another pane), the drag is deliberately abandoned — the preview snaps
    back and no resize command is sent (expected behavior, not a bug).
@@ -246,7 +249,7 @@ gates. All UI here is mouse-driven; the dev hook is only needed where noted.
    tab, switch away, wait, switch back: the buffer shows the latest output and
    `get_stats` shows `paused: false` throughout (hidden views keep acking).
 5. **Unvisited tab after reload keeps flowing** — create a second tab, start `seq
-   1000000` in it, F5, and do **not** click that tab. Check `get_stats`: the session must
+   1000000` in it, reload (Ctrl+Shift+R), and do **not** click that tab. Check `get_stats`: the session must
    show `paused: false` (the boot reconcile sweeps `detach_terminal` over unattached
    sessions — the post-reload freeze fix). Then click the tab: latest output appears via
    replay.
@@ -255,7 +258,7 @@ gates. All UI here is mouse-driven; the dev hook is only needed where noted.
    leaves an empty pane with the placeholder, and the header icons still work from there.
    After any tab close, keyboard input must land in the surviving tab **without an extra
    click** (focus compensation — a removed xterm otherwise drops focus to the body).
-7. **2×2 reload** — build a 2×2 layout with running TUIs (e.g. `htop`), F5: all four
+7. **2×2 reload** — build a 2×2 layout with running TUIs (e.g. `htop`), reload (Ctrl+Shift+R): all four
    panes re-attach with their sessions and text intact, and the TUIs redraw after the
    resize nudge. Pane/Tab/Split ids unchanged (`get_state`).
 8. **Errors surface** — from the dev console, dispatch `resizeSplit` with a stale id

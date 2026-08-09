@@ -14,8 +14,28 @@ import type { Command, CommandOutput, StateSnapshot } from "./types";
 declare global {
   interface Window {
     /** dev 조작 표면 — 실 UI 미구현 경로(탭 전환·닫기 등)를 콘솔에서 호출한다. */
-    __wmux: { dispatch: typeof dispatch; getState: typeof getState };
+    __wmux: { dispatch: typeof dispatch; getState: typeof getState; reload: () => void };
   }
+}
+
+/** WebView 리로드 단축키 — Ctrl+Shift+R (브라우저 hard-reload 관례).
+ *  F5 는 쓰지 않는다: 터미널에 포커스가 있으면 xterm 이 F5 를 TUI 앱용 시퀀스
+ *  (`ESC[15~`)로 PTY 에 전달하는 게 올바른 동작이라(htop 등이 사용), F5 를
+ *  가로채면 터미널 기능을 깬다. Ctrl+Shift+R 는 터미널 앱과 충돌하지 않는다.
+ *  capture 단계 window 리스너라 xterm 포커스 상태에서도 먼저 잡힌다.
+ *  세션·레이아웃은 전부 Rust 소유라 리로드는 attach 프로토콜로 복원된다 —
+ *  계획 v2 12장 "WebView 리셋 안전망"의 수동 검증 경로이기도 하다. */
+function installReloadKey(): void {
+  window.addEventListener(
+    "keydown",
+    (ev) => {
+      if (ev.ctrlKey && ev.shiftKey && !ev.altKey && ev.code === "KeyR") {
+        ev.preventDefault();
+        location.reload();
+      }
+    },
+    { capture: true },
+  );
 }
 
 /** one-shot 에러 표시 유지 시간 — 이 뒤엔 타이머로 소거한다 (폴링 금지). */
@@ -47,7 +67,8 @@ class App {
   async init(): Promise<void> {
     // dev 훅은 부트스트랩 실패와 무관하게 먼저 노출한다 — 실패 시 콘솔에서
     // getState 로 상태를 직접 확인할 수 있어야 한다.
-    window.__wmux = { dispatch, getState };
+    window.__wmux = { dispatch, getState, reload: () => location.reload() };
+    installReloadKey();
     this.store.subscribe((snapshot) => this.render(snapshot));
     await this.store.init();
   }
