@@ -1,13 +1,13 @@
-# wmux OSC 규약 — Claude Code hook / 셸 프롬프트
+# winmux OSC 규약 — Claude Code hook / 셸 프롬프트
 
-계획 v2 9장 "에이전트 상태 및 알림"의 경로를 실제로 구현하는 **규약 문서**다. wmux 가
+계획 v2 9장 "에이전트 상태 및 알림"의 경로를 실제로 구현하는 **규약 문서**다. winmux 가
 해석하는 OSC 시퀀스의 의미가 여기 정의돼 있고(18단계 확정), Claude Code hook 과 셸
 프롬프트 쪽 절반을 예시로 보인다.
 
 ```
 Claude Code hook (UserPromptSubmit / Notification / Stop)
   → 해석한 TTY(/dev/tty 또는 조상 프로세스의 pts)에 OSC 777 출력
-  → Rust PTY 리더(wmux-core::osc::OscScanner)가 감지
+  → Rust PTY 리더(winmux-core::osc::OscScanner)가 감지
   → 100ms flush 창으로 배치(글루 OscRouter)
   → 탭 unread dot / pane 배지 / 워크스페이스 사이드바 상태 갱신
 ```
@@ -17,21 +17,21 @@ v1은 IPC 서버·Named Pipe·Windows helper CLI를 쓰지 않고 PTY 출력 자
 
 ## OSC 의미 규약
 
-wmux 가 해석하는 시퀀스는 네 종류다.
+winmux 가 해석하는 시퀀스는 네 종류다.
 
 | 시퀀스 | 의미 | 상태(`agentStatus`) | unread dot |
 |---|---|---|---|
-| `OSC 777;notify;wmux:running;<body>` | 에이전트 작업 시작 | `running` | 없음 |
-| `OSC 777;notify;wmux:needsInput;<body>` | 사용자 입력 대기 | `needsInput` | 있음 |
-| `OSC 777;notify;wmux:idle;<body>` | 작업 종료 | `idle` | 있음 |
+| `OSC 777;notify;winmux:running;<body>` | 에이전트 작업 시작 | `running` | 없음 |
+| `OSC 777;notify;winmux:needsInput;<body>` | 사용자 입력 대기 | `needsInput` | 있음 |
+| `OSC 777;notify;winmux:idle;<body>` | 작업 종료 | `idle` | 있음 |
 | 그 밖의 `OSC 777` / 모든 `OSC 9` | 상태 중립 알림 | **불변** | 있음 |
 | `OSC 0`(및 별칭 `OSC 2`) | 탭 제목 | 불변 | 없음 |
 | `OSC 7` `file://host/path` | 탭 cwd (재시작 시 재스폰 위치) | 불변 | 없음 |
 
 세부 규칙:
 
-- **상태 토큰은 title 필드 전체가 정확히 일치**해야 한다 (`wmux:running` /
-  `wmux:needsInput` / `wmux:idle`). 하나라도 어긋나면 상태 중립 알림으로 떨어진다 —
+- **상태 토큰은 title 필드 전체가 정확히 일치**해야 한다 (`winmux:running` /
+  `winmux:needsInput` / `winmux:idle`). 하나라도 어긋나면 상태 중립 알림으로 떨어진다 —
   다른 도구가 쏘는 777, ConEmu 진행률 같은 OSC 9 가 에이전트 상태를 주장하지
   못하게 하는 경계다.
 - `body` 가 비어 있지 않으면 사이드바 미리보기(`lastAgentMessage`)로 남는다. **빈
@@ -61,8 +61,8 @@ UI/로그에 쓰이거나 버려지며, 그대로 터미널 화면에 바이트�
 
 **실측(Claude Code 2.1.226, 체크포인트 2):** hook 프로세스에는 **controlling TTY 가 없어**
 `> /dev/tty` 가 `No such device or address`(ENXIO)로 실패한다. 반면 **Claude Code 본체
-프로세스는 wmux 가 띄운 `/dev/pts/N` 에 그대로 붙어 있다** — 장치는 살아 있는데 hook 쪽에만
-거기로 가는 손잡이가 없는 상태다. 그래서 아래 예시의 `wmux_emit` 은 tty 를 두 단계로 해석한다.
+프로세스는 winmux 가 띄운 `/dev/pts/N` 에 그대로 붙어 있다** — 장치는 살아 있는데 hook 쪽에만
+거기로 가는 손잡이가 없는 상태다. 그래서 아래 예시의 `winmux_emit` 은 tty 를 두 단계로 해석한다.
 
 1. **직접 `/dev/tty`** — controlling TTY 가 있으면(손으로 돌려 보는 경우, hook 을 다른
    경로로 띄우는 경우, 이 전제가 바뀐 미래 버전) 이게 정답이고 한 번에 끝난다.
@@ -81,16 +81,16 @@ UI/로그에 쓰이거나 버려지며, 그대로 터미널 화면에 바이트�
 
 ## hook 스크립트 예시
 
-`~/.claude/hooks/wmux-notify.sh` (실행 권한 부여 필요: `chmod +x`):
+`~/.claude/hooks/winmux-notify.sh` (실행 권한 부여 필요: `chmod +x`):
 
 ```bash
 #!/usr/bin/env bash
-# Claude Code hook에서 호출되어 wmux 상태 토큰을 OSC 777로 실제 터미널 장치에 방출한다.
-# 인자: $1 = 상태 토큰(wmux:running | wmux:needsInput | wmux:idle)
+# Claude Code hook에서 호출되어 winmux 상태 토큰을 OSC 777로 실제 터미널 장치에 방출한다.
+# 인자: $1 = 상태 토큰(winmux:running | winmux:needsInput | winmux:idle)
 #       $2 = 본문(선택). Notification 이벤트는 stdin JSON의 .message를 우선한다.
 set -euo pipefail
 
-STATUS="${1:?usage: wmux-notify.sh <wmux:running|wmux:needsInput|wmux:idle> [body]}"
+STATUS="${1:?usage: winmux-notify.sh <winmux:running|winmux:needsInput|winmux:idle> [body]}"
 BODY="${2:-}"
 
 # OSC 바이트를 실제 터미널 장치에 쓴다. 위 "tty 해석 규율"의 2단계를 그대로 구현한다.
@@ -98,9 +98,9 @@ BODY="${2:-}"
 #   2) /proc 조상 체인 — Claude Code 2.1.226 의 hook 프로세스에는 controlling TTY 가
 #      없어 1)이 ENXIO("No such device or address")로 실패한다. 이때는 자신부터 부모로
 #      거슬러 올라가며 각 프로세스 fd 0/1/2 가 가리키는 /dev/pts/* 를 찾아 거기에 쓴다.
-#      Claude Code 본체가 wmux 의 pts 에 붙어 있으므로 몇 칸 위에서 잡힌다.
+#      Claude Code 본체가 winmux 의 pts 에 붙어 있으므로 몇 칸 위에서 잡힌다.
 # 어느 쪽도 안 되면 조용히 포기한다 — 알림 실패가 Claude 세션을 깨면 안 된다.
-wmux_emit() {
+winmux_emit() {
   local payload="$1"
 
   if { printf '%s' "$payload" > /dev/tty; } 2>/dev/null; then
@@ -148,7 +148,7 @@ fi
 BODY="${BODY//;/,}"
 
 # OSC 777 형식: ESC ] 777 ; notify ; title ; body BEL
-wmux_emit "$(printf '\033]777;notify;%s;%s\007' "$STATUS" "$BODY")" || true
+winmux_emit "$(printf '\033]777;notify;%s;%s\007' "$STATUS" "$BODY")" || true
 
 # 방출에 실패해도 hook 은 성공으로 끝낸다(알림을 놓칠지언정 세션은 깨지 않는다).
 exit 0
@@ -167,7 +167,7 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/wmux-notify.sh wmux:running"
+            "command": "~/.claude/hooks/winmux-notify.sh winmux:running"
           }
         ]
       }
@@ -178,7 +178,7 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/wmux-notify.sh wmux:needsInput 'needs input'"
+            "command": "~/.claude/hooks/winmux-notify.sh winmux:needsInput 'needs input'"
           }
         ]
       }
@@ -189,7 +189,7 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/wmux-notify.sh wmux:idle done"
+            "command": "~/.claude/hooks/winmux-notify.sh winmux:idle done"
           }
         ]
       }
@@ -229,38 +229,38 @@ fi
 ```bash
 # 프롬프트마다 현재 디렉터리(OSC 7)와 탭 제목(OSC 0)을 방출한다.
 # 셸의 stdout이 곧 PTY라 /dev/tty 리다이렉트가 필요 없다.
-__wmux_osc() {
-  # OSC 7: file://<host>/<path> — wmux는 host를 무시하고 경로만 쓴다(ST 종결).
+__winmux_osc() {
+  # OSC 7: file://<host>/<path> — winmux는 host를 무시하고 경로만 쓴다(ST 종결).
   printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-wsl}" "$PWD"
   # OSC 0: 탭 제목 — 여기서는 디렉터리 이름(BEL 종결).
   printf '\033]0;%s\007' "${PWD##*/}"
 }
-PROMPT_COMMAND="__wmux_osc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+PROMPT_COMMAND="__winmux_osc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 ```
 
-- wmux 는 OSC 7 경로를 percent-decode 한다. 경로에 `%` 가 들어 있으면 규약대로
+- winmux 는 OSC 7 경로를 percent-decode 한다. 경로에 `%` 가 들어 있으면 규약대로
   `%25` 로 인코딩해야 정확하다 (`%` 뒤가 16진수 2자리가 아니면 리터럴로 남긴다).
 - 이 cwd 는 **재시작 후 재스폰 위치**로 쓰인다 — 마지막으로 있던 디렉터리에서 셸이
   다시 열린다.
 - 제목을 에이전트 이름 등으로 바꾸고 싶으면 OSC 0 문자열만 갈아 끼우면 된다. ConPTY
-  가 OSC 0 을 OSC 2 로 재인코딩해 흘려도 wmux 는 같은 의미로 받는다.
+  가 OSC 0 을 OSC 2 로 재인코딩해 흘려도 winmux 는 같은 의미로 받는다.
 
 ## 검증
 
-1. `scripts/wsl/osc-test.sh` 로 "/dev/tty로 쓴 OSC 가 wmux 앱까지 도달하는가"를 먼저
+1. `scripts/wsl/osc-test.sh` 로 "/dev/tty로 쓴 OSC 가 winmux 앱까지 도달하는가"를 먼저
    확인한다 (OSC 777 은 7·8·9번 케이스). 이 스크립트는 셸에서 직접 돌아 tty 를 가지므로
    1단계 경로만 탄다 — 전달 경로 자체가 살아 있는지 보는 용도다.
-2. 그다음 Claude Code를 wmux 터미널 안에서 실행해 hook 3종이 실제로 탭 dot·pane
+2. 그다음 Claude Code를 winmux 터미널 안에서 실행해 hook 3종이 실제로 탭 dot·pane
    배지·사이드바 상태/미리보기를 갱신하는지 확인한다
    (`docs/WINDOWS-BUILD.md` 10장 체크포인트 2).
-3. hook 이 조용하면 fallback 이 어디서 끊겼는지부터 본다. wmux 터미널 안에서
+3. hook 이 조용하면 fallback 이 어디서 끊겼는지부터 본다. winmux 터미널 안에서
    `setsid -w bash -c 'printf "" > /dev/tty' ; echo $?` 로 tty 없는 맥락을 재현하고,
    `for p in $(pgrep -f 'claude'); do readlink /proc/$p/fd/1; done` 로 Claude 본체가
    `/dev/pts/*` 에 붙어 있는지 확인한다. 조상 체인이 8칸 안에 있는지도 같이 본다.
 
 ## 참고
 
-- BEL(`\007`)만 완료 신호로 의존하지 않는다(계획 v2 9장) — wmux의 `OscScanner`는 BEL과
+- BEL(`\007`)만 완료 신호로 의존하지 않는다(계획 v2 9장) — winmux의 `OscScanner`는 BEL과
   ST(`ESC \`) 둘 다 종결자로 인식한다.
 - "hook 에 controlling TTY 가 없다"는 것은 Claude Code **2.1.226 에서 실측한 사실**이지
   보장된 계약이 아니다. 예시 스크립트가 1단계를 남겨 둔 이유가 이것이다 — 나중 버전이

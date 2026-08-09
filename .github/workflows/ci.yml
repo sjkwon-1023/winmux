@@ -47,11 +47,11 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: |
-            apps/wmux/package-lock.json
+            apps/winmux/package-lock.json
             apps/spike/package-lock.json
 
       - name: Core tests
-        run: cargo test -p wmux-core
+        run: cargo test -p winmux-core
 
       - name: Clippy (x64 Windows target)
         run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
@@ -59,8 +59,8 @@ jobs:
       - name: Clippy (ARM64 Windows target)
         run: cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
 
-      - name: wmux frontend (build + vitest)
-        working-directory: apps/wmux
+      - name: winmux frontend (build + vitest)
+        working-directory: apps/winmux
         run: |
           npm ci
           npm run build
@@ -97,17 +97,17 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: apps/wmux/package-lock.json
+          cache-dependency-path: apps/winmux/package-lock.json
 
-      - name: Build wmux (release, no bundle)
-        working-directory: apps/wmux
+      - name: Build winmux (release, no bundle)
+        working-directory: apps/winmux
         run: |
           npm ci
           npm run tauri build -- --target ${{ matrix.target }} --no-bundle
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wmux-${{ matrix.target }}
+          name: winmux-${{ matrix.target }}
           # 워크스페이스 루트 target 디렉터리 (레포 루트가 cargo 워크스페이스다).
-          path: target/${{ matrix.target }}/release/wmux-app.exe
+          path: target/${{ matrix.target }}/release/winmux-app.exe
           if-no-files-found: error

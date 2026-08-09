@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    wmux spike 앱의 private working set(WebView2 프로세스 트리 포함)을 주기적으로 측정한다.
+    winmux spike 앱의 private working set(WebView2 프로세스 트리 포함)을 주기적으로 측정한다.
 
 .DESCRIPTION
     계획 v2 3장 "리소스 측정" / spike-plan.md 6장 체크리스트 6번의 실행 도구다.
@@ -10,7 +10,7 @@
     합산해 샘플마다 기록한다.
 
 .PARAMETER ProcessName
-    측정 대상 프로세스 이름(확장자 제외). 기본값 wmux-spike
+    측정 대상 프로세스 이름(확장자 제외). 기본값 winmux-spike
     (apps/spike/src-tauri/tauri.conf.json의 productName과 일치).
 
 .PARAMETER IntervalSec
@@ -25,10 +25,10 @@
 
 .EXAMPLE
     .\measure.ps1
-    기본값(wmux-spike, 5초 간격, 12샘플)으로 콘솔에만 출력.
+    기본값(winmux-spike, 5초 간격, 12샘플)으로 콘솔에만 출력.
 
 .EXAMPLE
-    .\measure.ps1 -ProcessName wmux-spike -IntervalSec 5 -Samples 12 -OutCsv .\ram-4pane.csv
+    .\measure.ps1 -ProcessName winmux-spike -IntervalSec 5 -Samples 12 -OutCsv .\ram-4pane.csv
     spike-plan.md 6장 시나리오(터미널 4개 등)를 CSV로 기록.
 
 .NOTES
@@ -39,7 +39,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$ProcessName = "wmux-spike",
+    [string]$ProcessName = "winmux-spike",
     [int]$IntervalSec = 5,
     [int]$Samples = 12,
     [string]$OutCsv

@@ -19,22 +19,22 @@ snapshot-per-mutation cliff 해소)과 프론트 keyed reconcile(전체 재조�
 
 ## hook / OSC 의미 규약 (canonical: scripts/wsl/claude-hook-example.md 갱신본)
 
-- OSC 777 `notify;title;body` 에서 title 이 `wmux:running` | `wmux:needsInput` | `wmux:idle`
+- OSC 777 `notify;title;body` 에서 title 이 `winmux:running` | `winmux:needsInput` | `winmux:idle`
   이면 **상태 알림**: `Workspace.agent_status` = 해당 값, body 가 비어있지 않으면
   `last_agent_message` = body(500자 절단), unread 는 **needsInput·idle 만** 세팅 (running 은
   진행 신호 — dot 없음).
 - 토큰 불일치 777·OSC 9 는 **상태 중립 알림**: unread + message 만, `agent_status` 불변
   (OSC 9 는 ConEmu 진행률 등 타 도구 잡음 가능성 — 상태를 주장하지 않는다). 백그라운드
   워크스페이스에서 순수 OSC 9 는 탭 dot + 사이드바 집계 dot(아래 B-6)으로 표면화된다 — 의도.
-- Claude Code hook 매핑: `UserPromptSubmit`→`wmux:running`(body 없음) /
-  `Notification`→`wmux:needsInput`+stdin `.message` / `Stop`→`wmux:idle`+"done"
+- Claude Code hook 매핑: `UserPromptSubmit`→`winmux:running`(body 없음) /
+  `Notification`→`winmux:needsInput`+stdin `.message` / `Stop`→`winmux:idle`+"done"
   (transcript 마지막 메시지 추출은 선택 스니펫으로만 문서화 — jq 의존 최소화). 기존
   `> /dev/tty` 규율 유지.
 - OSC 0(및 "2" — ConPTY 재인코딩 대비 별칭) → `Tab.title`. OSC 7 `file://host/path` →
   percent-decode 한 경로를 `TabKind::Terminal.cwd` 에 (respawn 이 탭 cwd 를 사용 —
   command.rs:376). 둘 다 unread 없음.
 
-## core 계약 (crates/wmux-core)
+## core 계약 (crates/winmux-core)
 
 - `osc.rs`: `parse_payload` 에 `"2"` → `Osc0Title` 별칭 (enum 불변 — spike `kind:"0"` 계약
   무영향).
@@ -49,7 +49,7 @@ snapshot-per-mutation cliff 해소)과 프론트 keyed reconcile(전체 재조�
       pub fn take(&mut self) -> OscBatch;                          //   (message), sticky unread
   }
   ```
-  `wmux:` 토큰 파스, `file://` URI→경로(percent-decode), 500자 절단 포함. 메모리는 세션 수에
+  `winmux:` 토큰 파스, `file://` URI→경로(percent-decode), 500자 절단 포함. 메모리는 세션 수에
   상한 (큐가 아니라 cell). 창 내 cross-session 적용 순서는 세션 id 순이지만, 아래 needsInput
   우선 규칙이 load-bearing 케이스를 순서 무관하게 만들므로 수용 (critic 반영).
 - `Dispatcher::apply_osc(&mut self, batch: OscBatch, now_ms: u64) -> bool` —
@@ -79,7 +79,7 @@ snapshot-per-mutation cliff 해소)과 프론트 keyed reconcile(전체 재조�
   last_agent_message = None`·전 탭 `notification = None`·`last_activity_ms = None` 무조건
   초기화 (`pty_session` 소거와 동급 — 죽은 세션의 needsInput 이 재시작을 넘지 않게, 계획 11장).
 
-## glue 계약 (apps/wmux/src-tauri)
+## glue 계약 (apps/winmux/src-tauri)
 
 - 신규 `router.rs`:
   ```rust
@@ -90,19 +90,19 @@ snapshot-per-mutation cliff 해소)과 프론트 keyed reconcile(전체 재조�
   - `push(session, &OscEvent)`: 리더 스레드에서 pending lock 아래 merge + notify 만 —
     **Dispatcher lock 을 핫패스에서 절대 잡지 않는다** (state.rs 잠금 규율).
   - worker: predicate loop(스퓨리어스 웨이크업 안전 — batch 비었고 !closed 인 동안 wait) →
-    비면 아님이 확인되면 `WMUX_OSC_FLUSH_MS`(기본 100, `WMUX_RESET_*` knob 관례) 트레일링
+    비면 아님이 확인되면 `WINMUX_OSC_FLUSH_MS`(기본 100, `WINMUX_RESET_*` knob 관례) 트레일링
     대기 → take(pending lock 해제 후) → dispatcher lock → `apply_osc(now)` → **변경 시에만**
     `publish_state`. pending lock 과 dispatcher lock 을 동시에 잡지 않는다 (데드락 불가 —
     critic 확인: Saver worker 는 dispatcher lock 을 안 잡음).
   - **수명 규율 (critic 반영 — Saver Drop 규율 답습)**: `Drop` 에서 closed 세팅 + notify +
     join. `flush_now()` 는 pending 을 동기 take→apply→publish — 앱 종료(RunEvent::Exit) 시
     **Saver flush 앞**에 호출해 cwd·상태 유실 창을 없앤다.
-- `sink.rs on_osc`: `osc-event` emit 제거 → `router.push` 교체 (wmux 프론트에 osc-event
+- `sink.rs on_osc`: `osc-event` emit 제거 → `router.push` 교체 (winmux 프론트에 osc-event
   리스너 없음 — spike 전용, spike 는 자체 글루라 무관).
 - 구조 변이(dispatch·exit)는 지금처럼 즉시 emit 유지. 중복 emit 이중 방어: `apply_osc` false
   → emit 스킵 + 프론트 store revision 가드.
 
-## 프론트 계약 (apps/wmux/src)
+## 프론트 계약 (apps/winmux/src)
 
 - `types.ts`: `Workspace.agentStatusSource?: TabId` (optional — 런타임 스냅샷에 실릴 수 있음,
   fixture 는 불변).

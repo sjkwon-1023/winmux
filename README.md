@@ -1,4 +1,4 @@
-# wmux
+# winmux
 
 A lightweight cmux-style terminal for Windows, centered on WSL2 and coding agents
 (Claude Code / Codex). Windows 11 ARM64 first, x64 supported.
@@ -12,7 +12,7 @@ A lightweight cmux-style terminal for Windows, centered on WSL2 and coding agent
 ## Layout
 
 ```
-crates/wmux-core/   Pure Rust core: PTY session, flow control (backpressure),
+crates/winmux-core/   Pure Rust core: PTY session, flow control (backpressure),
                     OSC 777/9/7 scanner, replay buffer. No Tauri dependency;
                     unit/integration tested on Linux.
 apps/spike/         Tauri v2 spike app: xterm.js frontend + thin command glue.
@@ -26,9 +26,9 @@ docs/               Build instructions and plans.
 Core logic is developed and tested inside WSL:
 
 ```bash
-cargo test -p wmux-core
-cargo clippy -p wmux-core --all-targets -- -D warnings
-cargo check -p wmux-core --target x86_64-pc-windows-msvc
+cargo test -p winmux-core
+cargo clippy -p winmux-core --all-targets -- -D warnings
+cargo check -p winmux-core --target x86_64-pc-windows-msvc
 cd apps/spike && npm run build && npx vitest run
 ```
 

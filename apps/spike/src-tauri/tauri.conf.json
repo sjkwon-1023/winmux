@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "wmux-spike",
+  "productName": "winmux-spike",
   "version": "0.1.0",
-  "identifier": "app.wmux.spike",
+  "identifier": "app.winmux.spike",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "wmux spike",
+        "title": "winmux spike",
         "width": 1150,
         "height": 780
       }

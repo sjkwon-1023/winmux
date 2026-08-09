@@ -11,16 +11,16 @@
 
 ## 핵심 결정 (critic 반영)
 
-- **distro 해석 (critic high)**: 인자(workspace.distro) → env `WMUX_DISTRO` →
+- **distro 해석 (critic high)**: 인자(workspace.distro) → env `WINMUX_DISTRO` →
   **`wsl.exe -l -q` 기본 배포판 lazy 질의 + 프로세스 수명 캐시** → 전부 실패 시에만 loud
   에러. 터미널 스폰(host.rs — 없음 허용)과 정합: 가장 흔한 구성(둘 다 미설정)에서 뷰어가
   죽는 비대칭을 만들지 않는다. `wsl.exe -l -q` 출력은 UTF-16LE — 디코드 후 첫 비어있지
-  않은 줄. 질의 실패 에러 메시지에 "set workspace distro or WMUX_DISTRO" 안내 포함.
+  않은 줄. 질의 실패 에러 메시지에 "set workspace distro or WINMUX_DISTRO" 안내 포함.
 - **MarkdownViewer 는 타입부터 청크 D (critic high)**: 청크 A 의 `NewTab` 추가분은
   FolderBrowser·TextViewer 2종만. D 절단 시에도 dispatcher 표면에 미구현 경로가 남지
   않는다 (command.rs 의 "variant 생략 = 타입 수준 부재" 원칙).
-- 경로 검증·UNC 매핑 순수 함수는 **wmux-core 신규 `wslpath.rs`** — 게이트가
-  `cargo test -p wmux-core` 만 돌리므로 글루에 두면 어떤 게이트로도 테스트가 안 돈다
+- 경로 검증·UNC 매핑 순수 함수는 **winmux-core 신규 `wslpath.rs`** — 게이트가
+  `cargo test -p winmux-core` 만 돌리므로 글루에 두면 어떤 게이트로도 테스트가 안 돈다
   (critic 정정: "src-tauri 는 Linux 컴파일 불가"가 아니라 이것이 정확한 근거).
 - 디렉터리 탐색은 뷰 내부 상태가 아니라 **dispatcher 명령** (계획 4장 명문 + persist
   최신성). 파일 내용 읽기(fs_*)는 attach_terminal 류 콘텐츠 플레인 직접 invoke 전례와
@@ -28,7 +28,7 @@
 - 뷰어 수명은 기존 `planViewSync`(터미널 keep-alive) **무변경**, 반대 시맨틱의 신규 순수
   함수 `planViewerSync` + 병렬 레지스트리로 공존.
 
-## core 계약 (crates/wmux-core)
+## core 계약 (crates/winmux-core)
 
 ```rust
 pub enum NewTab {
@@ -73,7 +73,7 @@ pub fn to_unc(distro: &str, linux_path: &str) -> Result<String, String>;
 알려진 한계로 rustdoc 에 기록 (verbatim `\\?\UNC` 미채택 — MVP). 심볼릭 링크는 9P 가
 해석 — 읽기 전용 + 본인 머신이라 탈출 위협 모델이 아님을 rustdoc 에 명시.
 
-## glue 계약 (apps/wmux/src-tauri) — 전부 spawn_blocking, `Result<T, String>` 관례
+## glue 계약 (apps/winmux/src-tauri) — 전부 spawn_blocking, `Result<T, String>` 관례
 
 ```rust
 fs_list_dir(distro: Option<String>, path: String) -> Result<DirListing, String>
@@ -88,7 +88,7 @@ fs_read_chunk(distro: Option<String>, path: String, offset: u64, len: u32)
 - distro 해석은 위 "핵심 결정" 순서. `#[cfg(not(windows))]` 는 Linux 경로 직사용 (Unix
   dev 실행 대칭).
 
-## 프론트 계약 (apps/wmux/src)
+## 프론트 계약 (apps/winmux/src)
 
 - `planViewerSync(aliveViewerTabs, snapshot) -> { mount: VisibleViewer[], dispose: ViewerDispose[] }`
   — mount = 활성 워크스페이스 각 pane 의 active 뷰어 탭만, dispose = 그 외 전부.

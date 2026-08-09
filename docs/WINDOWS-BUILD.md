@@ -1,9 +1,9 @@
 # Windows Build Guide
 
-How to set up a Windows machine to build and run wmux, and how to run the Windows-side
+How to set up a Windows machine to build and run winmux, and how to run the Windows-side
 verification. Two apps share this guide:
 
-- **`apps/wmux`** — the MVP app, active development from 계획 v2 section 17 stage 10
+- **`apps/winmux`** — the MVP app, active development from 계획 v2 section 17 stage 10
   onward (section 3 below).
 - **`apps/spike`** — the Tauri v2 + xterm.js spike. Its sign-off was completed on
   2026-08-08 (candidate A adopted — see
@@ -79,7 +79,7 @@ npm run tauri dev
 ```
 
 This starts the Vite dev server and launches the Tauri window pointed at it. Rust changes under
-`src-tauri/` or `crates/wmux-core` trigger a rebuild; frontend changes hot-reload.
+`src-tauri/` or `crates/winmux-core` trigger a rebuild; frontend changes hot-reload.
 
 ### Distributable exe (no installer/bundle)
 
@@ -88,14 +88,14 @@ npm run tauri build -- --no-bundle
 ```
 
 `--no-bundle` skips MSI/NSIS installer packaging (not needed for Spike verification) and leaves
-a plain `wmux-spike.exe` under `apps\spike\src-tauri\target\release\`. This is the binary
+a plain `winmux-spike.exe` under `apps\spike\src-tauri\target\release\`. This is the binary
 [`scripts/win/measure.ps1`](../scripts/win/measure.ps1) expects by default (`-ProcessName
-wmux-spike`, matching `productName` in `src-tauri/tauri.conf.json`).
+winmux-spike`, matching `productName` in `src-tauri/tauri.conf.json`).
 
-## 3. Build and run `apps/wmux`
+## 3. Build and run `apps/winmux`
 
-`apps/wmux` is the MVP app (계획 v2 section 17, stage 10 onward) — same Tauri v2 +
-Node/npm toolchain as `apps/spike` above, but its Rust glue drives the `wmux-core`
+`apps/winmux` is the MVP app (계획 v2 section 17, stage 10 onward) — same Tauri v2 +
+Node/npm toolchain as `apps/spike` above, but its Rust glue drives the `winmux-core`
 `Dispatcher` over the single `Command` bus instead of spike's thin per-call commands.
 Architecture: [`docs/adr/0002`](adr/0002-stage10-architecture.md) and
 [`docs/adr/0003`](adr/0003-split-tab-ui-architecture.md).
@@ -103,7 +103,7 @@ Architecture: [`docs/adr/0002`](adr/0002-stage10-architecture.md) and
 From the repo root on Windows:
 
 ```powershell
-cd apps\wmux
+cd apps\winmux
 npm install
 ```
 
@@ -113,14 +113,14 @@ npm install
 npm run tauri dev
 ```
 
-Same rebuild behavior as spike: Rust changes under `src-tauri/` or `crates/wmux-core`
+Same rebuild behavior as spike: Rust changes under `src-tauri/` or `crates/winmux-core`
 trigger a rebuild, frontend changes hot-reload. On boot the app itself dispatches a
 single atomic `CreateWorkspace{tab}` (from Tauri `setup`, before the frontend ever
 attaches — stage 13 folded the earlier `CreateWorkspace` + `CreateTab` pair into one
 command), so a terminal tab is already running when the window opens. Splits/tabs
 (stages 11–12) and the workspace sidebar (stage 13) are mouse-driven; commands without
 UI yet can still be driven from the WebView dev console via the dev hook
-`window.__wmux.dispatch(command)`. See section 6 below for the stage 10 manual
+`window.__winmux.dispatch(command)`. See section 6 below for the stage 10 manual
 checklist that exercises this.
 
 ### Distributable exe (no installer/bundle)
@@ -129,16 +129,16 @@ checklist that exercises this.
 npm run tauri build -- --no-bundle
 ```
 
-Leaves a plain `wmux.exe` under `apps\wmux\src-tauri\target\release\` (distinct from
-spike's `wmux-spike.exe` — the two apps' binaries don't collide).
+Leaves a plain `winmux.exe` under `apps\winmux\src-tauri\target\release\` (distinct from
+spike's `winmux-spike.exe` — the two apps' binaries don't collide).
 
-## 4. `WMUX_DISTRO` environment variable
+## 4. `WINMUX_DISTRO` environment variable
 
-Both apps spawn the WSL shell as `wsl.exe [-d $WMUX_DISTRO] -- bash -l` — spike's glue
-reads it directly per spawn (see spike-plan.md section 4.5); wmux threads it through
-`wmux-core`'s `Command::CreateWorkspace` → `ShellSpawnReq::distro` (see
-`crates/wmux-core/src/command.rs`), same underlying `wsl.exe` invocation either way.
-`WMUX_DISTRO` selects which WSL distribution to spawn into:
+Both apps spawn the WSL shell as `wsl.exe [-d $WINMUX_DISTRO] -- bash -l` — spike's glue
+reads it directly per spawn (see spike-plan.md section 4.5); winmux threads it through
+`winmux-core`'s `Command::CreateWorkspace` → `ShellSpawnReq::distro` (see
+`crates/winmux-core/src/command.rs`), same underlying `wsl.exe` invocation either way.
+`WINMUX_DISTRO` selects which WSL distribution to spawn into:
 
 - **Unset**: `wsl.exe` uses your default distribution (`wsl -l -v` shows which one has `*`).
 - **Set**: `wsl.exe -d <name>` targets that distribution explicitly — useful if you have more
@@ -149,11 +149,11 @@ reads it directly per spawn (see spike-plan.md section 4.5); wmux threads it thr
 Set it for the current PowerShell session before launching the app:
 
 ```powershell
-$env:WMUX_DISTRO = "Ubuntu-24.04"
+$env:WINMUX_DISTRO = "Ubuntu-24.04"
 npm run tauri dev
 ```
 
-or persist it for your user account (`setx WMUX_DISTRO "Ubuntu-24.04"`, new shells only).
+or persist it for your user account (`setx WINMUX_DISTRO "Ubuntu-24.04"`, new shells only).
 
 ## 5. Spike verification checklist (regression reference)
 
@@ -162,7 +162,7 @@ renderer comparison, RAM measurement — is [`docs/plans/spike-plan.md`](plans/s
 section 6 ("Windows Spike 검증 체크리스트"). It was fully executed for the Spike sign-off
 (results in ADR-0001) and, now that `apps/spike` is frozen as a measurement harness (section
 2), doubles as the regression checklist for MVP-era changes. This runs against `apps/spike`;
-`apps/wmux`'s own stage 10 checklist is section 6 below.
+`apps/winmux`'s own stage 10 checklist is section 6 below.
 
 Scripts referenced by that checklist:
 
@@ -174,14 +174,14 @@ Scripts referenced by that checklist:
 - [`scripts/wsl/scrollback-test.sh`](../scripts/wsl/scrollback-test.sh) — emits 12,000 lines to
   confirm the 5,000-line scrollback cap actually evicts old lines.
 - [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md) — the canonical
-  OSC contract (`wmux:` status tokens, title/cwd) plus the Claude Code hook and shell-prompt
+  OSC contract (`winmux:` status tokens, title/cwd) plus the Claude Code hook and shell-prompt
   snippets that emit it, for the agent-notification half of the checklist.
 - [`scripts/win/measure.ps1`](../scripts/win/measure.ps1) — run from a **Windows** PowerShell
   prompt (not inside WSL) while the Spike app is running, to record private working set (WebView2
   process tree included) over time and export it to CSV:
 
   ```powershell
-  .\scripts\win\measure.ps1 -ProcessName wmux-spike -IntervalSec 5 -Samples 12 -OutCsv .\ram-4pane.csv
+  .\scripts\win\measure.ps1 -ProcessName winmux-spike -IntervalSec 5 -Samples 12 -OutCsv .\ram-4pane.csv
   ```
 
   No administrator privileges are required.
@@ -197,7 +197,7 @@ checklist for later work on the attach protocol and dispatcher.
    dispatcher issues `CreateWorkspace` + `CreateTab` from Tauri `setup`, dogfooding the
    same `Command` bus the UI will use later); the terminal accepts input immediately.
 2. **Reload survives** — type something with a distinguishable marker (e.g. `echo
-   RELOAD-MARK-1`), then reload the WebView with **Ctrl+Shift+R** (or `window.__wmux.reload()` from the
+   RELOAD-MARK-1`), then reload the WebView with **Ctrl+Shift+R** (or `window.__winmux.reload()` from the
    dev console). Plain F5 is *not* a reload key here — with the terminal focused, xterm
    correctly delivers F5 to the shell as `ESC[15~` (TUI apps like htop use it), which is
    why pressing it just prints a stray `~`.
@@ -205,7 +205,7 @@ checklist for later work on the attach protocol and dispatcher.
    bar ("세션 생존 + 텍스트 보존"); pixel-perfect redraw of the TUI screen itself is out
    of scope until stage 14 (plan section 0-2).
 3. **Dev-hook commands land** — from the WebView dev console, drive
-   `window.__wmux.dispatch(...)` with `CreateTab`, `CloseTab`, and `SplitPane` commands.
+   `window.__winmux.dispatch(...)` with `CreateTab`, `CloseTab`, and `SplitPane` commands.
    Each should update the `state-changed` snapshot, and closing tabs/panes must not leave
    orphaned WSL/shell processes behind (check via Task Manager, or `ps` inside WSL).
 4. **IDs are stable across reload** — note the `Pane`/`Tab` ids from `get_state` (or the
@@ -213,7 +213,7 @@ checklist for later work on the attach protocol and dispatcher.
    afterward.
 5. **Background tab stays free-running** — create a second terminal tab, start a long
    noisy command in it (e.g. `seq 1000000`), switch back to the first tab, wait a few
-   seconds, then check `window.__wmux` dev hook → `get_stats` (or `invoke("get_stats")`):
+   seconds, then check `window.__winmux` dev hook → `get_stats` (or `invoke("get_stats")`):
    the background session must show `paused: false` and keep making progress.
    *(Historical note: when this item was written, tab switching disposed the view and
    detached its channel. Since stage 12 landed keep-alive views, switching tabs keeps the
@@ -249,7 +249,7 @@ needed where noted.
    **A single click on an *inactive* pane's tab must land** (activate the tab, not just
    focus the pane) — regression guard for a mid-click re-render that used to require two
    clicks.
-4. **Hidden tab keeps flowing** — run `bash ~/code/wmux/scripts/wsl/flood.sh 10` in a
+4. **Hidden tab keeps flowing** — run `bash ~/code/winmux/scripts/wsl/flood.sh 10` in a
    tab, switch away, wait, switch back: the buffer shows the latest output and
    `get_stats` shows `paused: false` throughout (hidden views keep acking).
 5. **Unvisited tab after reload keeps flowing** — create a second tab, start `seq
@@ -269,7 +269,7 @@ needed where noted.
    (e.g. `{ type: "resizeSplit", split: 9999, ratio: 0.5 }`): the status line shows the
    error and the layout stays consistent.
 9. **RAM reference** — with the 2×2 layout idle, run `scripts/win/measure.ps1
-   -ProcessName wmux` and note the total against the 계획 v2 section 16 budget
+   -ProcessName winmux` and note the total against the 계획 v2 section 16 budget
    (≤150MB); this is a reference point, not a hard gate for these stages.
 
 ## 8. Stage 13 manual verification checklist
@@ -289,7 +289,7 @@ interactions are mouse-driven in the sidebar; the dev hook is only needed where 
    running with keyboard focus (atomic `CreateWorkspace{tab}` — no empty-workspace
    flash). If a `rootPath` was given, `pwd` prints it.
 3. **Background workspace keeps flowing** — in the first workspace start a long noisy
-   command (e.g. `seq 1000000` or `bash ~/code/wmux/scripts/wsl/flood.sh 10`), switch
+   command (e.g. `seq 1000000` or `bash ~/code/winmux/scripts/wsl/flood.sh 10`), switch
    to another workspace via its card, wait a few seconds, then check `get_stats` from
    the dev console: the background session must show `paused: false` and keep making
    progress (leaving a workspace disposes its views; the detach sweep frees the
@@ -322,23 +322,23 @@ regression checklist.
 ### Auto-reset environment variables
 
 The reset supervisor reads six environment variables at app start (set them in the
-PowerShell session before `npm run tauri dev`, e.g. `$env:WMUX_RESET_IDLE_SECS = "30"`).
+PowerShell session before `npm run tauri dev`, e.g. `$env:WINMUX_RESET_IDLE_SECS = "30"`).
 `0` disables the trigger it belongs to; invalid values fall back to the default with a
 loud stderr warning. The effective config is printed to stderr on boot
-(`[wmux] reset: config ...`).
+(`[winmux] reset: config ...`).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WMUX_RESET_IDLE_SECS` | `1800` | Idle reset: fire once this many seconds after the last real user input (`0` = off). Re-arms only on the next real input. |
-| `WMUX_RESET_HIDDEN_SECS` | `600` | Hidden reset: fire after the window stays unfocused **and** invisible for this long continuously (`0` = off). Once per hidden stretch. |
-| `WMUX_RESET_MEM_MB` | `1536` | Memory watchdog: when the WebView2 process tree's private memory exceeds this many MB, schedule a reset for the next safe moment (`0` = off). |
-| `WMUX_RESET_MEM_POLL_SECS` | `60` | Watchdog sampling period. `0` is rejected (would busy-loop) — default + warning. |
-| `WMUX_RESET_SAFE_IDLE_SECS` | `60` | Seconds since the last input for a pending watchdog reset to count as "safe" (`0` = immediately safe). |
-| `WMUX_RESET_COOLDOWN_SECS` | `300` | Suppression window after any reset fires (`0` = no cooldown). |
+| `WINMUX_RESET_IDLE_SECS` | `1800` | Idle reset: fire once this many seconds after the last real user input (`0` = off). Re-arms only on the next real input. |
+| `WINMUX_RESET_HIDDEN_SECS` | `600` | Hidden reset: fire after the window stays unfocused **and** invisible for this long continuously (`0` = off). Once per hidden stretch. |
+| `WINMUX_RESET_MEM_MB` | `1536` | Memory watchdog: when the WebView2 process tree's private memory exceeds this many MB, schedule a reset for the next safe moment (`0` = off). |
+| `WINMUX_RESET_MEM_POLL_SECS` | `60` | Watchdog sampling period. `0` is rejected (would busy-loop) — default + warning. |
+| `WINMUX_RESET_SAFE_IDLE_SECS` | `60` | Seconds since the last input for a pending watchdog reset to count as "safe" (`0` = immediately safe). |
+| `WINMUX_RESET_COOLDOWN_SECS` | `300` | Suppression window after any reset fires (`0` = no cooldown). |
 
-Reset activity is stderr-only by design (no UI): look for `[wmux] reset: reloading
+Reset activity is stderr-only by design (no UI): look for `[winmux] reset: reloading
 webview (trigger=...)` lines. A manual reset is available from the dev console as
-`window.__wmux.resetUi()` (dev hook / future MCP only — there is deliberately no UI
+`window.__winmux.resetUi()` (dev hook / future MCP only — there is deliberately no UI
 button, 계획 v2 section 12).
 
 ### Checklist
@@ -354,14 +354,14 @@ button, 계획 v2 section 12).
    data dir, restart → the app starts fresh, keeps the original as
    `state.json.corrupt-<epoch>`, and logs the reason to stderr.
 4. **Switch latency readout** — build a 4-pane workspace plus a second workspace, switch
-   back and forth → read `window.__wmux.lastSwitch` in the dev console: total should be
+   back and forth → read `window.__winmux.lastSwitch` in the dev console: total should be
    in the ~100ms class, with per-tab replay timings populated.
 5. **Replay trim keeps lines whole** — flood 1MB+ of colored output (e.g.
-   `bash ~/code/wmux/scripts/wsl/flood.sh`), switch away and back → the top of the
+   `bash ~/code/winmux/scripts/wsl/flood.sh`), switch away and back → the top of the
    restored buffer starts at a line boundary with no broken escape sequences /
    half-colored garbage.
-6. **Idle reset fires once, invisibly** — set `WMUX_RESET_IDLE_SECS=30` (and
-   `WMUX_RESET_COOLDOWN_SECS=0` for this item), leave the app alone for 30s → exactly one
+6. **Idle reset fires once, invisibly** — set `WINMUX_RESET_IDLE_SECS=30` (and
+   `WINMUX_RESET_COOLDOWN_SECS=0` for this item), leave the app alone for 30s → exactly one
    reset fires (stderr `trigger=idle`); sessions and terminal text survive and the reload
    is visually seamless. Keep waiting another 30s **without touching anything**: no
    second reset — the post-reset automatic attach/resize/ack must **not** re-arm the idle
@@ -370,16 +370,16 @@ button, 계획 v2 section 12).
    auto-answers after the replay, and those synthetic writes must not re-arm idle either
    (review finding — stdin writes deliberately don't count as activity; only the
    frontend's real-gesture ping does).
-7. **Hidden reset, and never while typing** — set `WMUX_RESET_HIDDEN_SECS=30`, minimize
+7. **Hidden reset, and never while typing** — set `WINMUX_RESET_HIDDEN_SECS=30`, minimize
    or fully cover + unfocus the window for 30s → reset fires. Then keep the window
    focused and type continuously for well past 30s → **no** reset ever fires (guards
    against a spurious `Focused(false)` misdetection — real input re-arms the hidden
    countdown too).
-8. **Mem watchdog waits for a safe moment** — set `WMUX_RESET_MEM_MB=100` (trivially
+8. **Mem watchdog waits for a safe moment** — set `WINMUX_RESET_MEM_MB=100` (trivially
    exceeded) → while typing/scrolling nothing fires; stop touching the app for
-   `WMUX_RESET_SAFE_IDLE_SECS` (or switch workspaces) → the pending reset fires
+   `WINMUX_RESET_SAFE_IDLE_SECS` (or switch workspaces) → the pending reset fires
    (`trigger=memWatchdog` with the sampled bytes in stderr).
-9. **Scrollback reading is activity** — with `WMUX_RESET_IDLE_SECS=30`, read scrollback
+9. **Scrollback reading is activity** — with `WINMUX_RESET_IDLE_SECS=30`, read scrollback
    using **wheel only** (no keys) for over 30s → no reset fires (the throttled activity
    ping counts pure viewing as activity).
 10. **Kill survives** — force-kill the app from Task Manager, restart → state is restored
@@ -454,14 +454,14 @@ regression once the model fields are dynamic.
    token-mismatched 777 are status-neutral — `agentStatus` on the card must **not**
    change). Repeat while that tab is the pane's **shown** terminal: no dot appears at all
    (visible-tab suppression happens at apply time, not just on next activation).
-2. **Real Claude Code + hook 3-tuple** — run Claude Code in a wmux tab with the
+2. **Real Claude Code + hook 3-tuple** — run Claude Code in a winmux tab with the
    `UserPromptSubmit`/`Notification`/`Stop` hooks from `claude-hook-example.md` wired up:
    submitting a prompt shows `running` (no dot), a permission prompt shows `needsInput`
    with the sidebar preview populated from the hook's message (dot set), and finishing a
    turn shows `idle` (dot set, preview persists — an empty body never clears the previous
    message). Activating the tab clears its dot immediately.
 3. **needsInput priority across tabs** — with one tab's session at `needsInput`, trigger
-   `wmux:running` on a **different** tab (`osc-test.sh` case 10, or another hook run): the
+   `winmux:running` on a **different** tab (`osc-test.sh` case 10, or another hook run): the
    workspace's sidebar status stays `needsInput` — only the same tab that raised it
    (`agentStatusSource`) can demote it, which happens naturally once its own
    `UserPromptSubmit` fires `running`.
@@ -480,7 +480,7 @@ regression once the model fields are dynamic.
    of the notification path covered by items 1–4 and 6–8.
 6. **OSC flood** — run [`scripts/wsl/flood.sh`](../scripts/wsl/flood.sh) in a tab: the UI
    stays responsive throughout (coalescing keeps model updates at the 100ms flush cadence
-   regardless of OSC volume — `WMUX_OSC_FLUSH_MS`), the persistence Saver's debounce cadence
+   regardless of OSC volume — `WINMUX_OSC_FLUSH_MS`), the persistence Saver's debounce cadence
    is undisturbed, and RAM stays stable (no unbounded growth from the flood).
 7. **Closing a needsInput tab returns the sidebar to idle** — with a tab at `needsInput`,
    close it via **CloseTab**, then repeat and close via **ClosePane** instead: in both
@@ -492,7 +492,7 @@ regression once the model fields are dynamic.
    `lastAgentMessage`, and every tab's `notification` is cleared — same guarantee as the
    existing `pty_session` reset, extended to the new notification fields.
 
-### Stage 20 — three-tier keyboard navigation (계획 v2 "키보드 모델"; the canonical interception list lives in the [`apps/wmux/src/keys.ts`](../apps/wmux/src/keys.ts) module doc)
+### Stage 20 — three-tier keyboard navigation (계획 v2 "키보드 모델"; the canonical interception list lives in the [`apps/winmux/src/keys.ts`](../apps/winmux/src/keys.ts) module doc)
 
 One movement key per tier: `Ctrl+1`…`Ctrl+9` (workspace), `Alt+arrows` (pane focus, by
 on-screen adjacency), `Ctrl+Tab` / `Ctrl+Shift+Tab` (tab cycle inside the active pane).
@@ -555,7 +555,7 @@ pane**, so leaving and returning is a real unmount/remount.
 3. **A huge file opens instantly and stays bounded** — from WSL, make a few-hundred-MB log
    (`yes "$(date)" | head -c 400M > /tmp/big.log`) and click it in the folder browser: the
    text tab appears **immediately** (no multi-second freeze), and the bar above the text
-   reads `bytes 0–… of …`. With `scripts/win/measure.ps1 -ProcessName wmux` taken before
+   reads `bytes 0–… of …`. With `scripts/win/measure.ps1 -ProcessName winmux` taken before
    and after, the private working set grows by **less than 20MB**. Then walk with `next` /
    `prev` / `last` / `first`: each button loads exactly one 512KiB window, the byte range
    updates, and the working set does **not** grow with the number of jumps — only one
@@ -607,12 +607,12 @@ pane**, so leaving and returning is a real unmount/remount.
     terminal is exactly where it was and still running, with **no replay flash** and no
     re-attach. Mounting a viewer must not disturb the keep-alive terminal views.
 12. **Unconfigured distro resolves automatically** — with **no** workspace distro and
-    **no** `WMUX_DISTRO` (section 4), open a folder browser and a text file: both work,
+    **no** `WINMUX_DISTRO` (section 4), open a folder browser and a text file: both work,
     because the glue falls back to the WSL default distro (`wsl.exe -l -q`, cached for the
-    process lifetime). Then set `WMUX_DISTRO` to a second installed distro, restart, and
+    process lifetime). Then set `WINMUX_DISTRO` to a second installed distro, restart, and
     confirm the viewers read **that** distro's filesystem. If every resolution path fails
     (e.g. no distro installed), the inline banner must say so loudly and name the fix
-    (workspace distro or `WMUX_DISTRO`) — never a silently empty listing.
+    (workspace distro or `WINMUX_DISTRO`) — never a silently empty listing.
 
 ### Post-checkpoint-2 fixes and keyboard-first UX — re-verification
 
@@ -632,7 +632,7 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
    window: `fs_stat` polling must stop within one 2s cycle (verify by appending to the
    file while minimized — no re-render happens until restore). Restore: polling resumes
    and the change lands within ~2-4s. Also confirm **no false positives**: dragging the
-   window edge to resize and focusing another window (wmux still visible) must NOT stop
+   window edge to resize and focusing another window (winmux still visible) must NOT stop
    polling — the live-preview-while-editing-elsewhere flow depends on it. (The minimize
    signal is a 0x0-Resized heuristic that cannot be checked on the Linux host.)
 3. **Shell scripts run directly** — `bash scripts/wsl/osc-test.sh` works without the
@@ -665,7 +665,7 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
    is now centered on the saved offset instead of starting at it).
 9. **Per-tab shell history** — run distinct commands in two terminal tabs, restart the
    app: each respawned tab's `history` (and up-arrow) shows only its own tab's commands
-   (`~/.wmux/history/tab-<id>` in the distro). Then close a tab normally and restart:
+   (`~/.winmux/history/tab-<id>` in the distro). Then close a tab normally and restart:
    report whether its history survived — bash writes `HISTFILE` on exit, and if the kill
    path skips it we need a `history -a` follow-up.
 10. **Reload-while-minimized edge (known, accept)** — if the WebView reloads while the
@@ -681,6 +681,30 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
     no more `⚡`/`🔔` icons, pane/tab counts, or branch field. Pane headers no longer show
     the `#<id>` label or the permanently disabled `◎` browser button — the unread `●`
     badge and the six working buttons (`+ ▤ ⤷ ⤷⏎ ◫ ⊟`) stay, with their tooltips intact.
+12. **Rename migration (`wmux` → `winmux`)** — the project was renamed (the old name
+    collided with an unrelated existing project). This is a one-time, single-developer
+    migration handled by hand, not by migration code. On the Windows checkout:
+    - **Remote** — GitHub redirects the old repository URL, but update it explicitly:
+      `git remote set-url origin git@github.com:sjkwon-1023/winmux.git`. The local folder
+      name is free (rename it to `winmux` or leave it — nothing reads it).
+    - **App state (do this or you boot fresh)** — the Tauri identifier changed from
+      `app.wmux.desktop` to `app.winmux.desktop`, so the state directory moved. Rename
+      `%APPDATA%\app.wmux.desktop` to `%APPDATA%\app.winmux.desktop` and the existing
+      workspaces/panes/tabs restore exactly as before. Skip it and the app boots with an
+      empty state — nothing is lost, the data just sits in the old folder until you move
+      it. (The spike's identifier moved `app.wmux.spike` → `app.winmux.spike` the same
+      way, but it persists nothing.)
+    - **Environment variables** — every `WMUX_*` knob is now `WINMUX_*`. If you had
+      `WMUX_DISTRO` set (section 4), set `WINMUX_DISTRO` instead — the old name is no
+      longer read, and a stale one silently does nothing. Same for any `WMUX_RESET_*` /
+      `WMUX_OSC_FLUSH_MS` you set for the section 9 checks.
+    - **Claude Code hooks** — the OSC status token is now `winmux:running` /
+      `winmux:needsInput` / `winmux:idle`. Rewire the hooks from the updated
+      [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md);
+      hooks still emitting `wmux:*` land as status-neutral notifications (unread dot, no
+      status change), which is exactly what a missed rewire looks like.
+    - **Shell history in WSL** — `mv ~/.wmux ~/.winmux` in the distro keeps every tab's
+      history (item 9). Without it each respawned tab starts with an empty history.
 
 ## 11. ARM64 cross-build notes
 
@@ -705,10 +729,10 @@ ARM64 Windows:
 
 Cross-compiled ARM64 binaries can only be *built* here — running them and doing the actual
 Spike verification (ConPTY OSC passthrough, IME, RAM) requires real ARM64 hardware (or an
-ARM64 VM), since this machine cannot execute ARM64 Windows binaries. `crates/wmux-core` itself
+ARM64 VM), since this machine cannot execute ARM64 Windows binaries. `crates/winmux-core` itself
 has no target-specific code (it's checked against `x86_64-pc-windows-msvc` in the WSL-side gate
 per spike-plan.md section 5), so the ARM64-specific risk surface is `portable-pty`'s ConPTY
-backend and Tauri/WebView2, not `wmux-core`.
+backend and Tauri/WebView2, not `winmux-core`.
 
 ### CI artifacts (stage 22) and device testing (stage 23)
 
@@ -717,14 +741,14 @@ Since stage 22, `.github/workflows/ci.yml` runs the full gate set (including
 commands never link, so this needs no MSVC libraries and also runs on the Linux dev host)
 on every push, and builds **release artifacts for both targets** on a manual
 `workflow_dispatch` (GitHub → Actions → CI → Run workflow) or a `v*` tag: download
-`wmux-aarch64-pc-windows-msvc` from the run's artifacts for the ARM64 device.
+`winmux-aarch64-pc-windows-msvc` from the run's artifacts for the ARM64 device.
 
 Stage 23 (device verification) runs on the ARM64 machine, WSL2 + ARM64 Ubuntu installed:
 1. The artifact runs natively (Task Manager shows no emulation; ARM64 process).
 2. Spike-era regression spot: OSC routing (`osc-test.sh`), IME (한글), flood
    responsiveness, copy/paste — sections 5–6 spot checks.
 3. Checkpoint-2 spot: one item each from the Stage 17/18/20/21 subsections of §10.
-4. RAM: `scripts/win/measure.ps1 -ProcessName wmux-app` with the 4-pane + viewer
+4. RAM: `scripts/win/measure.ps1 -ProcessName winmux-app` with the 4-pane + viewer
    composition from checkpoint 2 — same 100–150MB acceptance band.
 5. Claude Code inside ARM64 WSL (and Codex CLI if its Linux ARM64 binary exists — 계획
    v2 section 13 precheck) with the hook contract wired.

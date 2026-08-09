@@ -1,4 +1,4 @@
-//! `SessionSink` 구현 — wmux-core 세션의 출력·이벤트를 프론트엔드로 나른다.
+//! `SessionSink` 구현 — winmux-core 세션의 출력·이벤트를 프론트엔드로 나른다.
 //!
 //! - 터미널 출력: `tauri::ipc::Channel`에 `InvokeResponseBody::Raw`로 바이너리 그대로
 //!   전송한다. JSON 직렬화 금지(계획 v2 2·12장) — 프론트엔드는 ArrayBuffer로 받는다.
@@ -6,8 +6,8 @@
 
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
-use wmux_core::osc::OscEvent;
-use wmux_core::session::{Delivery, SessionId, SessionSink};
+use winmux_core::osc::OscEvent;
+use winmux_core::session::{Delivery, SessionId, SessionSink};
 
 /// `osc-event` 이벤트 payload — 프론트엔드 계약과 일치:
 /// `{ id, kind: "777"|"9"|"7"|"0", title, body }`.
@@ -20,7 +20,7 @@ pub struct OscEventPayload {
 }
 
 impl OscEventPayload {
-    /// wmux-core `OscEvent` → 프론트엔드 계약 형태로 변환.
+    /// winmux-core `OscEvent` → 프론트엔드 계약 형태로 변환.
     /// kind별 배치: 777은 title/body 그대로, 9는 알림 메시지를 body에,
     /// 7은 cwd URI를 body에, 0은 창 제목을 title에 둔다 (비는 칸은 빈 문자열).
     pub fn from_event(id: u32, event: &OscEvent) -> Self {
@@ -88,7 +88,7 @@ impl SessionSink for ChannelSink {
                 // 거동이 달라지므로 spike-plan §6 측정 재현 시 이 차이를 감안할 것
                 // (ADR-0002 시기의 변경). 실패 자체는 삼키지 않고 stderr 에 남긴다.
                 eprintln!(
-                    "[wmux-spike] raw output channel send failed (id={}): {err}",
+                    "[winmux-spike] raw output channel send failed (id={}): {err}",
                     self.id
                 );
                 Delivery::Dropped
@@ -99,7 +99,7 @@ impl SessionSink for ChannelSink {
     fn on_osc(&self, event: &OscEvent) {
         let payload = OscEventPayload::from_event(self.id, event);
         if let Err(err) = self.app.emit("osc-event", payload) {
-            eprintln!("[wmux-spike] osc-event emit failed (id={}): {err}", self.id);
+            eprintln!("[winmux-spike] osc-event emit failed (id={}): {err}", self.id);
         }
     }
 
@@ -107,7 +107,7 @@ impl SessionSink for ChannelSink {
         let payload = TerminalExitPayload { id: self.id, code };
         if let Err(err) = self.app.emit("terminal-exit", payload) {
             eprintln!(
-                "[wmux-spike] terminal-exit emit failed (id={}): {err}",
+                "[winmux-spike] terminal-exit emit failed (id={}): {err}",
                 self.id
             );
         }

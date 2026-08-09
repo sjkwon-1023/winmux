@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-wmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and coding agents
+winmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and coding agents
 (Claude Code / Codex). Product plan: `터미널-계획-v2.md` (Korean). Decisions: `docs/adr/`.
 
 ## Current state
@@ -34,9 +34,9 @@ Stages 17–21 are **code-complete, Windows verification pending** (2026-08-09, 
 **checkpoint 2** — `docs/WINDOWS-BUILD.md` §10): stage 17 (inter-pane text passing:
 send/send&run icons, target-pick mode, bracketed-paste delivery guards), stage 18 (OSC
 routing: `notify.rs` merge-cell coalescing + glue `OscRouter` 100ms flush,
-`wmux:<status>` hook contract in `scripts/wsl/claude-hook-example.md`, keyed reconcile
+`winmux:<status>` hook contract in `scripts/wsl/claude-hook-example.md`, keyed reconcile
 for sidebar/tab strip with node-identity tests), stage 20 (keyboard navigation:
-Ctrl+1–9 / Alt+arrows / Ctrl+Tab; intercept list canonical in `apps/wmux/src/keys.ts`),
+Ctrl+1–9 / Alt+arrows / Ctrl+Tab; intercept list canonical in `apps/winmux/src/keys.ts`),
 stage 21 (viewer tabs: folderBrowser/textViewer/markdownViewer, `wslpath` UNC
 validation, fs_* invokes with default-distro resolution, viewer unmount lifecycle).
 Plan files `docs/plans/mvp-stage{17,18,20,21}-plan.md` stay until checkpoint 2 passes,
@@ -55,11 +55,11 @@ Stage 23 (ARM64 device checklist, WINDOWS-BUILD §11) awaits hardware.
 
 ## Layout
 
-- `crates/wmux-core` — pure Rust core (PTY session, flow control, OSC scanner, replay
+- `crates/winmux-core` — pure Rust core (PTY session, flow control, OSC scanner, replay
   buffer, and the `model`/`command` state + dispatcher). No Tauri dependency; this is
   where unit/integration tests live.
-- `apps/wmux` — the MVP app (계획 v2 section 17, stage 10 onward): Tauri v2 + vanilla TS
-  frontend driving the `wmux-core` `Dispatcher` over a single serializable `Command` bus.
+- `apps/winmux` — the MVP app (계획 v2 section 17, stage 10 onward): Tauri v2 + vanilla TS
+  frontend driving the `winmux-core` `Dispatcher` over a single serializable `Command` bus.
   Architecture: ADR-0002 (state/bus/attach), ADR-0003 (split/tab UI).
 - `apps/spike` — **frozen as the measurement harness** (ADR-0001 reproduction rig):
   feature work stops here, only compiling is maintained going forward. Its checklist and
@@ -72,12 +72,12 @@ Stage 23 (ARM64 device checklist, WINDOWS-BUILD §11) awaits hardware.
 
 ```bash
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
-cargo test -p wmux-core
+cargo test -p winmux-core
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
 cargo check --workspace --target x86_64-pc-windows-msvc
 cd apps/spike && npm run build && npx vitest run
-cd apps/wmux && npm run build && npx vitest run
+cd apps/winmux && npm run build && npx vitest run
 ```
 
 The ARM64 clippy works on the Linux dev host because check-family commands never link —
@@ -91,7 +91,7 @@ Windows runners bill at 2x).
   sudo-free setup (apt-get download + dpkg -x into `~/.local/llvm`) is in README
   "Development".
 - Windows build/run and the manual verification flow: `docs/WINDOWS-BUILD.md`.
-- The app spawns `wsl.exe [-d $WMUX_DISTRO] -- bash -l` on Windows, `$SHELL -l` on Unix.
+- The app spawns `wsl.exe [-d $WINMUX_DISTRO] -- bash -l` on Windows, `$SHELL -l` on Unix.
 
 ## Conventions
 
@@ -100,13 +100,13 @@ Windows runners bill at 2x).
 - The terminal output hot path stays raw binary end to end (`ipc::Channel` +
   `InvokeResponseBody::Raw`; xterm gets `Uint8Array`). No JSON on that path — JSON is
   fine for low-frequency events (`state-changed`, `terminal-exit`, stats). OSC no longer
-  crosses the IPC boundary in `apps/wmux` — it is routed into the model in Rust (stage 18);
+  crosses the IPC boundary in `apps/winmux` — it is routed into the model in Rust (stage 18);
   the `osc-event` emit survives only in the frozen `apps/spike`.
 - Lock discipline in the glue: never hold the session-registry mutex across a blocking
   PTY call. Write/resize/spawn go through `spawn_blocking`; `ack_output` stays sync and
   cheap. See the module docs in `apps/spike/src-tauri/src/commands.rs`.
 - Flow control must pause the PTY *read* (backpressure into the OS pipe), never just the
-  delivery. See `wmux-core::session` reader loop.
+  delivery. See `winmux-core::session` reader loop.
 
 ## Docs
 

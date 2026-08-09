@@ -1,8 +1,8 @@
 [
   {
     "type": "createWorkspace",
-    "name": "wmux",
-    "rootPath": "/home/dev/code/wmux",
+    "name": "winmux",
+    "rootPath": "/home/dev/code/winmux",
     "distro": "Ubuntu-24.04",
     "tab": { "type": "terminal", "cwd": null }
   },
@@ -20,7 +20,7 @@
   { "type": "createTab", "pane": 2, "tab": { "type": "terminal", "cwd": null } },
   { "type": "activateTab", "tab": 5 },
   { "type": "closeTab", "tab": 5 },
-  { "type": "navigateFolder", "tab": 7, "path": "/home/dev/code/wmux/src" },
+  { "type": "navigateFolder", "tab": 7, "path": "/home/dev/code/winmux/src" },
   { "type": "setViewerScroll", "tab": 8, "scrollTop": 4096.0 },
   {
     "type": "createTab",
@@ -30,12 +30,12 @@
   {
     "type": "createTab",
     "pane": 2,
-    "tab": { "type": "textViewer", "path": "/home/dev/code/wmux/notes.txt" }
+    "tab": { "type": "textViewer", "path": "/home/dev/code/winmux/notes.txt" }
   },
   {
     "type": "createTab",
     "pane": 2,
-    "tab": { "type": "markdownViewer", "path": "/home/dev/code/wmux/README.md" }
+    "tab": { "type": "markdownViewer", "path": "/home/dev/code/winmux/README.md" }
   },
   {
     "type": "createWorkspace",
