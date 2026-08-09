@@ -1,4 +1,4 @@
-// formatCommandError 검증 — 4개 CommandError variant 의 한 줄 요약과 계약 밖
+// formatCommandError 검증 — 7개 CommandError variant 의 한 줄 요약과 계약 밖
 // payload(문자열·객체·undefined) 폴백.
 
 import { describe, expect, it } from "vitest";
@@ -31,6 +31,27 @@ describe("formatCommandError", () => {
     expect(
       formatCommandError({ type: "spawnFailed", message: "line1\n  line2\r\nline3" }),
     ).toBe("Shell spawn failed: line1 line2 line3");
+  });
+
+  it("formats kindMismatch with the target tab (21단계)", () => {
+    expect(formatCommandError({ type: "kindMismatch", tab: 7 })).toBe(
+      "Tab 7 does not accept this command (wrong tab kind)",
+    );
+  });
+
+  it("formats invalidPath and collapses the reason to one line", () => {
+    expect(
+      formatCommandError({ type: "invalidPath", message: 'path must be absolute: "x"' }),
+    ).toBe('Invalid path: path must be absolute: "x"');
+    expect(
+      formatCommandError({ type: "invalidPath", message: "reason\nwith\nlines" }),
+    ).toBe("Invalid path: reason with lines");
+  });
+
+  it("formats invalidScroll with the offending value", () => {
+    expect(formatCommandError({ type: "invalidScroll", value: -1 })).toBe(
+      "Invalid scroll position -1 (must be finite and >= 0)",
+    );
   });
 
   it("passes through non-contract string payloads", () => {

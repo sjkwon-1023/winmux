@@ -443,6 +443,334 @@ body {
   height: 100%;
 }
 
+/* ── 뷰어 탭 — folderBrowser (21단계) ─────────────────────────────────
+   pane 콘텐츠를 꽉 채우는 세로 스택: 상단 배너(로딩·truncated·에러) + 스크롤
+   목록. 행은 <button> 이라 헤더 버튼 규칙(.pane-header button)과 겹치지 않게
+   자체 스타일을 갖는다. */
+
+.folder-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  outline: none; /* 프로그램적 focus(tabindex -1) 표시는 하지 않는다 */
+}
+
+.folder-banner {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-banner.error {
+  color: var(--error);
+}
+
+.folder-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 1px 6px;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-row:hover {
+  background: var(--border);
+}
+
+.folder-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* 디렉터리 행 강조 — 이름 뒤 `/` 와 함께 두 겹으로 구분한다 */
+.folder-row.dir .folder-row-name {
+  color: var(--accent);
+}
+
+.folder-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-row-size {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+/* ── 뷰어 탭 — textViewer (21단계) ────────────────────────────────────
+   folderBrowser 와 같은 세로 스택(배너 + 본문)에 창 이동 바가 하나 더 붙는다.
+   본문은 **고정 행높이 + no-wrap 실스크롤**이다: 행높이의 정본은 TS 상수
+   (text-view.ts LINE_HEIGHT_PX)이고 뷰가 --text-line-height 로 내려준다 —
+   여기서 다른 값을 쓰면 spacer 높이·슬라이스 위치가 어긋나 행이 밀린다. */
+
+.text-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.text-banner {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-banner.error {
+  color: var(--error);
+}
+
+/* 창 이동 바 — 파일이 창(512KiB)보다 클 때만 표시된다 (자동 이어읽기 없음) */
+.text-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.text-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-window-button {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.text-window-button:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--border);
+}
+
+.text-window-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 실스크롤 컨테이너 — 가로(no-wrap)·세로 둘 다 여기서 스크롤된다 */
+.text-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  outline: none; /* 프로그램적 focus(tabindex -1) 표시는 하지 않는다 */
+}
+
+/* 전체 높이 spacer — 실제로 그리는 것은 viewport 근처 행뿐이다 */
+.text-spacer {
+  position: relative;
+}
+
+.text-lines {
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* 가장 긴 행만큼 넓어져 가로 스크롤이 성립한다 */
+  width: max-content;
+  min-width: 100%;
+  font-family: monospace;
+}
+
+.text-line {
+  height: var(--text-line-height);
+  line-height: var(--text-line-height);
+  font-size: 12px;
+  white-space: pre;
+  tab-size: 8;
+}
+
+/* ── 뷰어 탭 — markdownViewer (21단계 청크 D) ─────────────────────────
+   folderBrowser·textViewer 와 같은 세로 스택(배너 + 본문). 본문만 산문이라 읽기
+   폭을 제한하고 줄간격을 조금 넓힌다 — 그 이상의 타이포그래피는 두지 않는다
+   (뷰어이지 문서 뷰 제품이 아니다). 스크롤 컨테이너의 scrollTop(px)이 모델의
+   scrollTop 시맨틱 그대로다. */
+
+.markdown-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.markdown-banner {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown-banner.error {
+  color: var(--error);
+}
+
+.markdown-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  outline: none; /* 프로그램적 focus(tabindex -1) 표시는 하지 않는다 */
+}
+
+.markdown-body {
+  max-width: 80ch;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  /* 긴 URL·식별자가 가로 스크롤을 만들지 않게 */
+  overflow-wrap: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 1.2em 0 0.5em;
+  line-height: 1.3;
+}
+
+.markdown-body h1 {
+  font-size: 1.5em;
+}
+
+.markdown-body h2 {
+  font-size: 1.25em;
+}
+
+.markdown-body h3 {
+  font-size: 1.1em;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body table {
+  margin: 0.6em 0;
+}
+
+.markdown-body code {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--bg-panel);
+  padding: 0 3px;
+  border-radius: 2px;
+}
+
+.markdown-body pre {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 6px 8px;
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.markdown-body blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  color: var(--fg-muted);
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--border);
+  padding: 2px 6px;
+  text-align: left;
+}
+
+/* 링크는 href 가 없다 (markdown-view.ts 계약 1) — 색만 주고 커서는 기본값이다:
+   눌러도 아무 일이 없는 것이 계약이라 클릭 가능한 척하지 않는다 */
+.markdown-body .md-link {
+  color: var(--accent);
+}
+
+/* 이미지 자리 표시 — 원격 로드를 하지 않는다는 사실이 화면에 보이게 */
+.markdown-body .md-image {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+/* 2MiB 초과 안내 — 렌더를 거부하고 텍스트 뷰어로 여는 길만 준다 */
+.markdown-notice {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.markdown-open-text {
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.markdown-open-text:hover {
+  background: var(--border);
+}
+
 /* ── send-mode 대상 선택 (17단계) ──────────────────────────────────────
    workspace-view 가 #view 에 .send-mode 를 토글한다. pane 전체가 "클릭 = 대상
    확정"임을 커서(crosshair)와 hover 테두리로 최소 표시한다. 셀렉터에 #view id

@@ -113,19 +113,22 @@ pub enum Command {
         path: String,
     },
     /// 뷰어 스크롤 위치를 기록한다 — unmount 복원·persist 용 (21단계). 값 시맨틱은
-    /// 탭 종류별로 다르다 ([`TabKind`] rustdoc 참조). finite·0 이상이어야 하고
-    /// (아니면 [`CommandError::InvalidScroll`]), 대상은 스크롤 위치를 모델에
-    /// 가진 뷰어 탭이어야 한다 — folderBrowser 는 그 필드가 없으므로
-    /// [`CommandError::KindMismatch`] (기결정).
+    /// 탭 종류별로 다르다 ([`TabKind`] rustdoc 참조): textViewer 는 최상단 가시
+    /// 행의 전역 byte offset, markdownViewer 는 렌더 컨테이너의 **px** 다. 코어는
+    /// 둘을 구분하지 않고 f64 를 그대로 보관한다 — 해석은 그 종류의 뷰 몫이다.
+    /// finite·0 이상이어야 하고 (아니면 [`CommandError::InvalidScroll`]), 대상은
+    /// 스크롤 위치를 모델에 가진 뷰어 탭(textViewer·markdownViewer)이어야 한다 —
+    /// folderBrowser 는 그 필드가 없으므로 [`CommandError::KindMismatch`]
+    /// (기결정).
     SetViewerScroll {
         tab: TabId,
         scroll_top: f64,
     },
 }
 
-/// 탭 생성 명세 — CreateTab·SplitPane·CreateWorkspace 가 공유한다. markdownViewer
-/// 는 아직 없다: variant 자체를 생략해 미구현 경로가 타입 수준에서 존재하지 않게
-/// 한다 (21단계 청크 D 에서 추가).
+/// 탭 생성 명세 — CreateTab·SplitPane·CreateWorkspace 가 공유한다. 21단계 뷰어
+/// 3종이 모두 착지해 [`TabKind`] 와 종류가 일대일이다 (terminal 은 스폰을
+/// 동반하고, 뷰어 3종은 순수 변이다).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -145,6 +148,12 @@ pub enum NewTab {
     },
     /// 텍스트 파일 뷰어 탭 (에디터가 아니다 — 읽기 전용). 경로는 필수다.
     TextViewer {
+        path: String,
+    },
+    /// 마크다운 렌더 뷰어 탭 (21단계 청크 D). TextViewer 와 같은 파일을 다른
+    /// 방식으로 볼 뿐이라 계약은 동일하다 — 읽기 전용, 경로 필수. 스크롤
+    /// 시맨틱만 다르다 (렌더된 px — [`TabKind`] rustdoc).
+    MarkdownViewer {
         path: String,
     },
 }
@@ -848,11 +857,16 @@ impl Dispatcher {
                     .expect("locate_tab 이 존재를 보장")
                     .tabs[ti];
                 // folderBrowser·terminal 은 모델에 스크롤 위치가 없다 — 조용한
-                // no-op 대신 KindMismatch 로 드러낸다.
-                let TabKind::TextViewer {
+                // no-op 대신 KindMismatch 로 드러낸다. 값의 단위는 종류마다
+                // 다르지만(byte offset vs px) 코어는 f64 를 그대로 보관한다.
+                let (TabKind::TextViewer {
                     scroll_top: current,
                     ..
-                } = &mut tab_ref.kind
+                }
+                | TabKind::MarkdownViewer {
+                    scroll_top: current,
+                    ..
+                }) = &mut tab_ref.kind
                 else {
                     return Err(CommandError::KindMismatch { tab });
                 };
@@ -901,6 +915,17 @@ impl Dispatcher {
                     title: path_title(&path),
                     // 새 탭은 항상 파일 선두에서 시작한다 (복원은 persist 몫).
                     kind: TabKind::TextViewer {
+                        path,
+                        scroll_top: 0.0,
+                    },
+                })
+            }
+            NewTab::MarkdownViewer { path } => {
+                validate_viewer_path(&path)?;
+                Ok(PreparedTab::Viewer {
+                    title: path_title(&path),
+                    // TextViewer 와 같이 문서 선두(px 0)에서 시작한다.
+                    kind: TabKind::MarkdownViewer {
                         path,
                         scroll_top: 0.0,
                     },
@@ -2037,6 +2062,31 @@ mod tests {
     }
 
     #[test]
+    fn create_markdown_viewer_starts_at_pixel_zero() {
+        // markdownViewer 는 TextViewer 와 같은 생성 계약(스폰 없음·basename 제목)
+        // 이고 scroll_top 만 px 시맨틱이다 (21단계 청크 D).
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws_rooted(&mut d, "ws", Some("/proj"));
+        let tab = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::MarkdownViewer {
+                path: "/proj/README.md".into(),
+            },
+        );
+        assert!(host.spawns().is_empty(), "뷰어 탭 생성은 스폰이 없다");
+        let t = tab_view(&d, tab);
+        assert_eq!(
+            t.kind,
+            TabKind::MarkdownViewer {
+                path: "/proj/README.md".into(),
+                scroll_top: 0.0,
+            }
+        );
+        assert_eq!(t.title, "README.md");
+    }
+
+    #[test]
     fn create_workspace_and_split_pane_accept_viewer_tabs_atomically() {
         let (mut d, host) = dispatcher();
         // 워크스페이스 + 뷰어 탭 원자 생성 — session 만 None 이고 tab 은 Some.
@@ -2153,6 +2203,13 @@ mod tests {
                 path: "/proj/a.txt".into(),
             },
         );
+        let markdown = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::MarkdownViewer {
+                path: "/proj/a.md".into(),
+            },
+        );
         let before = serde_json::to_value(d.state()).unwrap();
 
         let cases = [
@@ -2170,6 +2227,13 @@ mod tests {
                     path: "/x".into(),
                 },
                 text,
+            ),
+            (
+                Command::NavigateFolder {
+                    tab: markdown,
+                    path: "/x".into(),
+                },
+                markdown,
             ),
             // SetViewerScroll 은 스크롤 위치를 모델에 가진 뷰어만 받는다 —
             // folderBrowser 는 그 필드가 없어 KindMismatch (기결정).
@@ -2225,6 +2289,10 @@ mod tests {
                 Command::CreateTab {
                     pane,
                     tab: NewTab::TextViewer { path: path.into() },
+                },
+                Command::CreateTab {
+                    pane,
+                    tab: NewTab::MarkdownViewer { path: path.into() },
                 },
                 Command::CreateTab {
                     pane,
@@ -2306,6 +2374,46 @@ mod tests {
     }
 
     #[test]
+    fn set_viewer_scroll_records_pixel_offset_for_markdown_viewer() {
+        // 같은 명령이 markdownViewer 도 받는다 — 값은 렌더 px 지만 코어는 단위를
+        // 해석하지 않고 f64 를 그대로 보관한다 (21단계 청크 D).
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let tab = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::MarkdownViewer {
+                path: "/proj/README.md".into(),
+            },
+        );
+
+        let out = d
+            .dispatch(Command::SetViewerScroll {
+                tab,
+                scroll_top: 120.5,
+            })
+            .unwrap();
+        assert_eq!(out, CommandOutput::Done);
+        assert_eq!(
+            tab_view(&d, tab).kind,
+            TabKind::MarkdownViewer {
+                path: "/proj/README.md".into(),
+                scroll_top: 120.5,
+            }
+        );
+
+        let before = serde_json::to_value(d.state()).unwrap();
+        let err = d
+            .dispatch(Command::SetViewerScroll {
+                tab,
+                scroll_top: -1.0,
+            })
+            .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidScroll { .. }), "{err:?}");
+        assert_eq!(serde_json::to_value(d.state()).unwrap(), before);
+    }
+
+    #[test]
     fn viewer_tabs_survive_persist_round_trip() {
         // 뷰어 탭은 sanitize 대상이 아니다 — 경로·스크롤이 재시작을 넘어 남아야
         // 뷰어 재로드(계획 v2 "상태 저장")가 성립한다.
@@ -2320,9 +2428,21 @@ mod tests {
                 path: "/proj/notes.txt".into(),
             },
         );
+        let markdown = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::MarkdownViewer {
+                path: "/proj/README.md".into(),
+            },
+        );
         d.dispatch(Command::SetViewerScroll {
             tab: text,
             scroll_top: 4096.0,
+        })
+        .unwrap();
+        d.dispatch(Command::SetViewerScroll {
+            tab: markdown,
+            scroll_top: 120.5,
         })
         .unwrap();
 
@@ -2360,6 +2480,13 @@ mod tests {
                 scroll_top: 4096.0,
             },
             "sanitize 가 뷰어 스크롤을 건드리면 안 된다"
+        );
+        assert_eq!(
+            kind_of(&state, markdown),
+            TabKind::MarkdownViewer {
+                path: "/proj/README.md".into(),
+                scroll_top: 120.5,
+            }
         );
 
         // 재스폰 대상은 terminal 탭뿐 — 뷰어 탭은 열거에 끼지 않는다.

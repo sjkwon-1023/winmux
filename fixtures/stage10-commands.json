@@ -33,6 +33,11 @@
     "tab": { "type": "textViewer", "path": "/home/dev/code/wmux/notes.txt" }
   },
   {
+    "type": "createTab",
+    "pane": 2,
+    "tab": { "type": "markdownViewer", "path": "/home/dev/code/wmux/README.md" }
+  },
+  {
     "type": "createWorkspace",
     "name": "legacy",
     "rootPath": null,

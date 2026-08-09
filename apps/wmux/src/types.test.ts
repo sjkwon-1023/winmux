@@ -68,7 +68,7 @@ function tabKindLabel(kind: TabKind): string {
 }
 
 /** NewTab 전 variant 를 narrowing 으로 통과시키며 태그를 돌려준다 (21단계 —
- *  markdownViewer 는 아직 union 에 없다). */
+ *  청크 D 로 뷰어 3종이 모두 union 에 있다). */
 function newTabTag(spec: NewTab): string {
   switch (spec.type) {
     case "terminal":
@@ -79,6 +79,9 @@ function newTabTag(spec: NewTab): string {
       expect(spec.path === null || typeof spec.path === "string").toBe(true);
       return spec.type;
     case "textViewer":
+      expect(typeof spec.path).toBe("string");
+      return spec.type;
+    case "markdownViewer":
       expect(typeof spec.path).toBe("string");
       return spec.type;
     default:
@@ -311,7 +314,7 @@ describe("stage10-snapshot-empty.json", () => {
 describe("stage10-commands.json", () => {
   it("covers every Command variant with internal tag narrowing", () => {
     const tags = commandsFixture.map(commandTag);
-    // 뒤쪽 createTab 2개는 뷰어 NewTab 2종을 실은 형태(21단계)이고, 마지막
+    // 뒤쪽 createTab 3개는 뷰어 NewTab 3종을 실은 형태(21단계)이고, 마지막
     // createWorkspace 는 tab 필드 누락 하위호환 형태다 (계획 13-D1).
     expect(tags).toEqual([
       "createWorkspace",
@@ -328,6 +331,7 @@ describe("stage10-commands.json", () => {
       "setViewerScroll",
       "createTab",
       "createTab",
+      "createTab",
       "createWorkspace",
     ]);
   });
@@ -341,7 +345,7 @@ describe("stage10-commands.json", () => {
     expect(create.tab).toEqual({ type: "terminal", cwd: null });
 
     // 마지막 엔트리는 tab 필드 누락 하위호환 잠금 — 파싱 시 undefined.
-    const legacy = commandsFixture[14];
+    const legacy = commandsFixture[15];
     if (legacy.type !== "createWorkspace") throw new Error("last must be createWorkspace");
     expect(legacy.tab).toBeUndefined();
 
@@ -381,6 +385,14 @@ describe("stage10-commands.json", () => {
     expect(textTab.tab).toEqual({
       type: "textViewer",
       path: "/home/dev/code/wmux/notes.txt",
+    });
+
+    // markdownViewer NewTab (21단계 청크 D) — textViewer 와 같은 형태(path 필수).
+    const markdownTab = commandsFixture[14];
+    if (markdownTab.type !== "createTab") throw new Error("15th must be createTab");
+    expect(markdownTab.tab).toEqual({
+      type: "markdownViewer",
+      path: "/home/dev/code/wmux/README.md",
     });
   });
 });

@@ -529,6 +529,91 @@ that direction, 0–1 tabs) the app does nothing — silently, with no status-li
    own, and the follow-up is to pick a replacement binding (e.g. `Ctrl+PgUp`/`Ctrl+PgDn`)
    in `keys.ts` and re-run item 3. Record which behavior you observed.
 
+### Stage 21 — viewer tabs (folderBrowser / textViewer / markdownViewer; 계획 v2 "탭 타입별 동작"; contract in [`docs/plans/mvp-stage21-plan.md`](plans/mvp-stage21-plan.md))
+
+Tabs are no longer terminals only. The pane header's `▤` icon opens a **folderBrowser**
+tab, and clicking a file row there opens a viewer tab in the same pane — a
+**markdownViewer** for `.md`/`.markdown`, a **textViewer** for everything else. All three
+are viewers, never editors. The Rust side reads the WSL filesystem through
+`\\wsl.localhost\<distro>\...` (`fs_list_dir` / `fs_stat` / `fs_read_chunk`), so these
+items exercise a Windows→WSL path that has no equivalent on the Linux dev host — none of
+it can be checked before this checkpoint. Two contracts drive most of the items:
+navigation is a **dispatcher command** (`navigateFolder`), so the current path is part of
+the persisted model; and a viewer tab is mounted **only while it is the active tab of its
+pane**, so leaving and returning is a real unmount/remount.
+
+1. **Folder browser opens on the workspace root** — click the pane header's `▤` icon: a
+   new tab opens in that pane listing the workspace's `rootPath` (`/` when the workspace
+   has none), with **directories first** and each group sorted by name (case-insensitive).
+   Directory rows end with `/`, file rows show a size, and a directory with more than
+   5,000 entries shows the truncation banner instead of hanging.
+2. **Navigation goes through the model** — click into a subdirectory, then use the `..`
+   row to come back: the listing and the **tab title** follow the path each time. Now
+   restart the app: the tab reopens on the **last visited path**, and the listing is a
+   fresh read — create a file in that directory from WSL before restarting and it is there
+   without any refresh gesture.
+3. **A huge file opens instantly and stays bounded** — from WSL, make a few-hundred-MB log
+   (`yes "$(date)" | head -c 400M > /tmp/big.log`) and click it in the folder browser: the
+   text tab appears **immediately** (no multi-second freeze), and the bar above the text
+   reads `bytes 0–… of …`. With `scripts/win/measure.ps1 -ProcessName wmux` taken before
+   and after, the private working set grows by **less than 20MB**. Then walk with `next` /
+   `prev` / `last` / `first`: each button loads exactly one 512KiB window, the byte range
+   updates, and the working set does **not** grow with the number of jumps — only one
+   window is resident, and scrolling to the end of a window never continues automatically.
+4. **Scroll position survives unmount and restart** — scroll to the middle of a text tab,
+   switch to another tab in that pane and back: the same lines are on screen (the position
+   is recorded ~0.5s after scrolling settles, and immediately on leaving the tab). Restart
+   the app: the same lines again. Repeat once in a window **other than the first** (jump
+   with `next`, scroll, leave, return) — the recorded value is a byte offset, so the
+   restored view must land in that window, not back at the top of the file.
+5. **Background viewer tabs hold no DOM** — with a viewer tab in the background (another
+   tab active in that pane), inspect that pane's `.pane-content` in devtools: there is no
+   `.folder-view` / `.text-view` element for the background tab. Activating it again
+   re-mounts and re-reads.
+6. **Missing and deleted files surface inline** — with a text tab open, delete the file
+   from WSL, then leave the tab and come back: the tab **stays open** and shows
+   `cannot read <path>: …` where the content was. Same shape for a folder browser whose
+   directory was removed (`cannot list <path>: …`), and its `..` row still navigates out.
+
+7. **Markdown renders and reloads live** — click a `.md` file in the folder browser: it
+   opens **rendered** (headings, lists, code blocks), not as source. With that tab active,
+   append a line from WSL (`echo '## appended' >> notes.md`): the rendered view picks it up
+   within **2–4 seconds** without any gesture, and the scroll position stays where it was.
+   Now switch to another tab in that pane and, from WSL, append again: nothing polls while
+   the viewer is unmounted, and coming back re-reads once and shows the new content.
+   Minimize the window (or switch to another app so the WebView reports `document.hidden`)
+   and confirm from devtools that no `fs_stat` traffic continues while hidden; restoring
+   the window resumes the 2s cycle. Finally, open a `.md` file **larger than 2MiB**: it
+   refuses to render, says so in the banner, and offers **open as text** — clicking that
+   opens the same path in a textViewer tab.
+8. **Raw HTML is inert and links do nothing** — put this in a `.md` file and open it:
+   `<script>alert('x')</script>`, `<img src=x onerror=alert(1)>`, `[click](javascript:alert(1))`,
+   `![alt](https://example.com/pic.png)`. No dialog ever appears; the script and img tags
+   are displayed **as literal text**; the image is a `[image: alt]` placeholder with no
+   network request (check devtools Network); and clicking the link does nothing — no
+   navigation, no new window, and the anchor has no `href` in the inspector. This is the
+   security contract of the markdown viewer: this WebView holds the `dispatch`/`fs_*` IPC,
+   so file-borne HTML must never reach the DOM.
+9. **Locked-down distro** — repeat items 1–4 in a workspace whose distro has `automount`
+   and `interop` disabled in `/etc/wsl.conf` (then `wsl --shutdown`): the viewers still
+   work. File access runs Windows→WSL over `\\wsl.localhost`, the direction those settings
+   do not gate (계획 v2 section 5).
+10. **No edit affordance anywhere** — no viewer offers any way to change the file: no
+    editable field, no rename/delete/save control, typing into a focused text or markdown
+    view does nothing, and the only file-scoped controls are the text viewer's window
+    movement buttons and the markdown viewer's **open as text** button (both read-only).
+11. **Terminals stay alive across viewer switches** — start a long-running command (e.g.
+    `top`) in a terminal tab, switch to a viewer tab in the same pane and back: the
+    terminal is exactly where it was and still running, with **no replay flash** and no
+    re-attach. Mounting a viewer must not disturb the keep-alive terminal views.
+12. **Unconfigured distro resolves automatically** — with **no** workspace distro and
+    **no** `WMUX_DISTRO` (section 4), open a folder browser and a text file: both work,
+    because the glue falls back to the WSL default distro (`wsl.exe -l -q`, cached for the
+    process lifetime). Then set `WMUX_DISTRO` to a second installed distro, restart, and
+    confirm the viewers read **that** distro's filesystem. If every resolution path fails
+    (e.g. no distro installed), the inline banner must say so loudly and name the fix
+    (workspace distro or `WMUX_DISTRO`) — never a silently empty listing.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

@@ -14,6 +14,13 @@
 // dispose(탭 사라짐·워크스페이스 밖) / detachSessions(attach 안 하는 세션 전부 —
 // fire-and-forget 스윕, 부트 첫 스냅샷 포함) / visible(pane 별 표시 탭)을 집행한다.
 //
+// 뷰어 뷰 수명 (21단계): 시맨틱이 반대라(활성 탭만 마운트 — viewer-view.ts)
+// 병렬 레지스트리 viewerViews 를 두고 planViewerSync 로 집행한다. 두 레지스트리의
+// 키는 겹치지 않는다 (탭은 terminal 이거나 뷰어 하나다). dispose 시 탭이 아직
+// 스냅샷에 남아 있으면(단순 unmount) flushScroll 로 스크롤을 모델에 남기고,
+// 탭 자체가 사라졌으면 flush 없이 바로 내린다 — 없는 탭에 setViewerScroll 을
+// 보내면 unknownTarget 잡음이 되기 때문이다.
+//
 // focus 보상 경로 (계획 D7 — attach 자동 focus 제거의 대가): pendingFocus 1칸을
 // 두고 ① 부트/리로드 첫 리컨실 후 활성 pane 의 뷰, ② main.dispatchUI 가
 // requestFocus 로 넘긴 대상(TabCreated/PaneCreated 의 새 탭, ActivateTab 탭,
@@ -31,17 +38,21 @@
 // keydown capture 를 걸었다 뗀다 (상시 리스너 금지 — 평시 Esc 는 PTY 소유).
 
 import { detachTerminal } from "./backend";
+import { FolderView } from "./folder-view";
 import type { PaneRect } from "./keys";
+import { MarkdownView } from "./markdown-view";
 import { PaneView } from "./pane-view";
-import type { SendController, ViewRegistry } from "./pane-view";
+import type { SendController, ViewRegistry, ViewerRegistry } from "./pane-view";
 import { SendMode, sendModePrompt } from "./send-mode";
 import { Splitter } from "./splitter";
 import type { DragGuard } from "./splitter";
 import { flexPair, structureKey } from "./split-layout";
 import type { SwitchTracer } from "./switch-trace";
 import { TerminalView } from "./terminal-view";
-import { planViewSync } from "./view-reconcile";
-import type { VisibleView } from "./view-reconcile";
+import { TextView } from "./text-view";
+import type { ViewerView } from "./viewer-view";
+import { planViewSync, planViewerSync } from "./view-reconcile";
+import type { VisibleView, VisibleViewer } from "./view-reconcile";
 import type {
   Command,
   CommandOutput,
@@ -97,6 +108,8 @@ export class WorkspaceView {
 
   /** 탭별 keep-alive 터미널 뷰 — 앱 수준 레지스트리 (계획 D3). */
   private readonly views = new Map<TabId, TerminalView>();
+  /** 탭별 뷰어 뷰 — 활성 탭만 들어 있는 병렬 레지스트리 (21단계, 파일 상단). */
+  private readonly viewerViews = new Map<TabId, ViewerView>();
   /** 보상 focus 보류 1칸. rendersLeft: 미해소 렌더가 이만큼 지나면 stale 로
    *  폐기한다 — invoke 응답이 앞선 무관 이벤트 렌더보다 먼저 처리되는 race 에서
    *  구 revision 렌더가 보상을 조기 폐기하지 않게 하면서(리뷰 finding), 닫힌 탭
@@ -118,6 +131,13 @@ export class WorkspaceView {
   private readonly registry: ViewRegistry = {
     get: (tab) => this.views.get(tab),
     ensure: (tab, session, parent, onAttachError) => this.ensureView(tab, session, parent, onAttachError),
+  };
+
+  /** 뷰어 뷰 레지스트리 접근 계약 (21단계) — 터미널과 같은 규약이다: 생성·조회만
+   *  노출하고 dispose 는 리컨실(render)이 독점한다. */
+  private readonly viewerRegistry: ViewerRegistry = {
+    get: (tab) => this.viewerViews.get(tab),
+    ensure: (target, parent) => this.ensureViewerView(target, parent),
   };
 
   /** splitter 의 dispatch 실패·pointercancel 복원 콜백 — 최신 채택 스냅샷의
@@ -294,6 +314,24 @@ export class WorkspaceView {
     }
     this.sweptSessions = unattached;
 
+    // 뷰어 리컨실 (21단계) — 터미널과 같은 자리에서, 같은 이유로 구조 렌더보다
+    // 먼저 돈다. 마운트는 updatePanes 가 pane 별로 수행한다.
+    const viewerPlan = planViewerSync(this.viewerViews.keys(), snapshot);
+    for (const item of viewerPlan.dispose) {
+      const view = this.viewerViews.get(item.tab);
+      this.viewerViews.delete(item.tab);
+      if (view === undefined) continue;
+      // 한 뷰의 정리 이상이 나머지 정리·렌더 전체를 중단시키지 않게 격리.
+      try {
+        // 탭이 아직 있으면 단순 unmount — 스크롤을 모델에 남긴다. 탭이 사라진
+        // 경우의 flush 는 unknownTarget 잡음이라 건너뛴다 (파일 상단).
+        if (item.tabExists) view.flushScroll();
+        view.dispose();
+      } catch (err) {
+        console.error("viewer dispose failed", item.tab, err);
+      }
+    }
+
     const ws = activeWorkspace(snapshot);
 
     // send-mode 수명 가드 (17단계 리뷰 finding): armed 워크스페이스를 떠났거나
@@ -322,7 +360,7 @@ export class WorkspaceView {
     } else {
       this.syncRatios(ws.layout);
     }
-    this.updatePanes(ws, plan.visible);
+    this.updatePanes(ws, plan.visible, viewerPlan.mount);
 
     // 부트/리로드 보상 focus (D7) — 첫 리컨실 후 활성 pane 의 뷰 1곳.
     if (!this.booted) {
@@ -377,8 +415,10 @@ export class WorkspaceView {
   }
 
   /** 요청 → focus 할 뷰. 숨은 뷰는 대상이 아니다 (display:none 은 focus 불가) —
-   *  표시 여부는 pane 의 shownTab 으로 판정한다. */
-  private focusTarget(req: FocusRequest): TerminalView | null {
+   *  표시 여부는 pane 의 shownTab 으로 판정한다. 뷰어 뷰도 대상이다 (21단계):
+   *  둘 다 focus() 를 가지므로 20단계 키보드 내비·D7 보상이 뷰어 탭에서도
+   *  그대로 성립한다. 두 레지스트리는 키가 겹치지 않아 순서 의존이 없다. */
+  private focusTarget(req: FocusRequest): TerminalView | ViewerView | null {
     if (req.kind === "activePane") {
       const ws = this.lastSnapshot === null ? null : activeWorkspace(this.lastSnapshot);
       if (ws === null) return null;
@@ -387,9 +427,10 @@ export class WorkspaceView {
     if (req.kind === "pane") {
       const paneView = this.paneViews.get(req.pane);
       const shown = paneView?.shownTab ?? null;
-      return shown === null ? null : this.views.get(shown) ?? null;
+      if (shown === null) return null;
+      return this.views.get(shown) ?? this.viewerViews.get(shown) ?? null;
     }
-    const view = this.views.get(req.tab);
+    const view = this.views.get(req.tab) ?? this.viewerViews.get(req.tab);
     if (view === undefined) return null;
     for (const paneView of this.paneViews.values()) {
       if (paneView.shownTab === req.tab) return view;
@@ -428,6 +469,47 @@ export class WorkspaceView {
     return created;
   }
 
+  /** 뷰어 레지스트리 ensure 구현 (21단계) — 없으면 생성해 parent 에 마운트한다.
+   *  distro 는 최신 채택 스냅샷의 활성 워크스페이스 값이다 (없으면 null — 글루가
+   *  WMUX_DISTRO·기본 배포판 순으로 해석한다). 청크 D 로 뷰어 3종이 모두 착지해
+   *  실제로 null 을 돌리는 경로는 없다 — 반환 타입의 null 은 pane 의 placeholder
+   *  안전망(계약)으로 남긴다. */
+  private ensureViewerView(target: VisibleViewer, parent: HTMLElement): ViewerView | null {
+    const existing = this.viewerViews.get(target.tab);
+    if (existing !== undefined) return existing;
+    const ws = this.lastSnapshot === null ? null : activeWorkspace(this.lastSnapshot);
+    const distro = ws?.distro ?? null;
+    let created: ViewerView;
+    switch (target.kind.type) {
+      case "folderBrowser":
+        created = new FolderView(
+          parent,
+          target.tab,
+          target.pane,
+          distro,
+          target.kind,
+          this.dispatch,
+        );
+        break;
+      case "textViewer":
+        created = new TextView(parent, target.tab, distro, target.kind, this.dispatch);
+        break;
+      case "markdownViewer":
+        created = new MarkdownView(
+          parent,
+          target.tab,
+          // 2MiB 초과 시의 "open as text" 탭이 이 pane 에 들어간다.
+          target.pane,
+          distro,
+          target.kind,
+          this.dispatch,
+        );
+        break;
+    }
+    this.viewerViews.set(target.tab, created);
+    return created;
+  }
+
   /** 구조 재구축 — pane 뷰는 레지스트리 재사용, 이탈 pane 은 dispose.
    *  (터미널 뷰 수명은 planViewSync 소유 — pane dispose 는 DOM·observer 만.) */
   private rebuild(tree: SplitTree): void {
@@ -462,7 +544,13 @@ export class WorkspaceView {
     if (tree.type === "leaf") {
       let view = this.paneViews.get(tree.pane);
       if (view === undefined) {
-        view = new PaneView(tree.pane, this.dispatch, this.registry, this.sendCtl);
+        view = new PaneView(
+          tree.pane,
+          this.dispatch,
+          this.registry,
+          this.viewerRegistry,
+          this.sendCtl,
+        );
         this.paneViews.set(tree.pane, view);
       }
       return view.root; // 기존 뷰는 append 시 자동 reparent 된다
@@ -513,9 +601,15 @@ export class WorkspaceView {
     second.style.flex = `${pair.second} 1 0px`;
   }
 
-  private updatePanes(ws: Workspace, visible: VisibleView[]): void {
+  private updatePanes(
+    ws: Workspace,
+    visible: VisibleView[],
+    mountViewers: VisibleViewer[],
+  ): void {
     const visibleByPane = new Map<PaneId, VisibleView>();
     for (const entry of visible) visibleByPane.set(entry.pane, entry);
+    const viewerByPane = new Map<PaneId, VisibleViewer>();
+    for (const entry of mountViewers) viewerByPane.set(entry.pane, entry);
     for (const [id, view] of this.paneViews) {
       // panes 맵 키는 문자열 숫자 (JSON object 키 제약 — types.ts 참조).
       const pane = ws.panes[String(id)];
@@ -524,11 +618,16 @@ export class WorkspaceView {
         console.error("pane in layout but missing from panes map", id);
         continue;
       }
-      view.update(pane, id === ws.activePane, visibleByPane.get(id) ?? null);
+      view.update(
+        pane,
+        id === ws.activePane,
+        visibleByPane.get(id) ?? null,
+        viewerByPane.get(id) ?? null,
+      );
     }
   }
 
-  /** 전체 해제 — 워크스페이스 부재(no workspace) 상태 전환용. 터미널 뷰
+  /** 전체 해제 — 워크스페이스 부재(no workspace) 상태 전환용. 터미널·뷰어 뷰
    *  레지스트리는 여기 오기 전에 이미 비어 있다 — render 의 리컨실이 먼저 돌고,
    *  활성 워크스페이스가 없으면 alive 탭 전부가 dispose 목록에 떨어지기 때문. */
   private clear(): void {

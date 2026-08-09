@@ -1,9 +1,10 @@
-// view-reconcile(planViewSync) 검증 — 부트 스윕(D4-b)·탭 닫힘·워크스페이스 밖
-// dispose·keep-alive 유지·세션 없는 active 탭.
+// view-reconcile 검증 — planViewSync(부트 스윕(D4-b)·탭 닫힘·워크스페이스 밖
+// dispose·keep-alive 유지·세션 없는 active 탭)와 planViewerSync(21단계: 활성
+// 탭만 마운트·나머지 전부 dispose·탭 실존 플래그).
 
 import { describe, expect, it } from "vitest";
 
-import { planViewSync } from "./view-reconcile";
+import { planViewSync, planViewerSync } from "./view-reconcile";
 import type { Pane, StateSnapshot, Tab, Workspace } from "./types";
 
 function terminalTab(id: number, session: number | null, exited = false): Tab {
@@ -16,6 +17,26 @@ function terminalTab(id: number, session: number | null, exited = false): Tab {
       status: exited ? { type: "exited", code: 0 } : { type: "running" },
       cwd: null,
     },
+    notification: "none",
+    lastActivityMs: null,
+  };
+}
+
+function folderTab(id: number, path = "/home/u"): Tab {
+  return {
+    id,
+    title: `folder ${id}`,
+    kind: { type: "folderBrowser", path },
+    notification: "none",
+    lastActivityMs: null,
+  };
+}
+
+function textTab(id: number, path = "/home/u/log.txt", scrollTop = 0): Tab {
+  return {
+    id,
+    title: `text ${id}`,
+    kind: { type: "textViewer", path, scrollTop },
     notification: "none",
     lastActivityMs: null,
   };
@@ -151,5 +172,100 @@ describe("planViewSync", () => {
     expect(plan.visible).toEqual([]);
     expect(plan.dispose).toEqual([10]);
     expect(plan.detachSessions).toEqual([]);
+  });
+
+  it("ignores viewer tabs entirely (they belong to planViewerSync)", () => {
+    const snap = snapshot(
+      [workspace(1, [pane(1, [folderTab(10), terminalTab(11, 101)], 10)], 1)],
+      1,
+    );
+    const plan = planViewSync([], snap);
+    // active 탭이 뷰어라 visible 은 비고, 배경 터미널은 스윕된다.
+    expect(plan.visible).toEqual([]);
+    expect(plan.detachSessions).toEqual([101]);
+  });
+});
+
+describe("planViewerSync", () => {
+  it("mounts only the active viewer tab of each pane in the active workspace", () => {
+    const snap = snapshot(
+      [
+        workspace(
+          1,
+          [
+            // pane 1: active 뷰어 + 배경 뷰어, pane 2: active 뷰어.
+            pane(1, [folderTab(10, "/home/u"), textTab(11)], 10),
+            pane(2, [textTab(12, "/var/log/syslog", 42)], 12),
+          ],
+          1,
+        ),
+        // 비활성 워크스페이스의 active 뷰어는 마운트 대상이 아니다.
+        workspace(2, [pane(3, [folderTab(13, "/etc")], 13)], 3),
+      ],
+      1,
+    );
+    const plan = planViewerSync([], snap);
+    expect(plan.mount).toEqual([
+      { pane: 1, tab: 10, kind: { type: "folderBrowser", path: "/home/u" } },
+      { pane: 2, tab: 12, kind: { type: "textViewer", path: "/var/log/syslog", scrollTop: 42 } },
+    ]);
+    expect(plan.dispose).toEqual([]);
+  });
+
+  it("never mounts a terminal tab", () => {
+    const snap = snapshot(
+      [workspace(1, [pane(1, [terminalTab(10, 100), folderTab(11)], 10)], 1)],
+      1,
+    );
+    expect(planViewerSync([], snap).mount).toEqual([]);
+  });
+
+  it("disposes a viewer that became a background tab, flagging the tab as alive", () => {
+    // 같은 pane 안에서 뷰어 10 → 터미널 11 로 active 가 옮겨간 직후.
+    const snap = snapshot(
+      [workspace(1, [pane(1, [folderTab(10), terminalTab(11, 101)], 11)], 1)],
+      1,
+    );
+    const plan = planViewerSync([10], snap);
+    expect(plan.mount).toEqual([]);
+    // 탭은 살아 있다 — unmount 전에 flushScroll 을 보내야 하는 경우.
+    expect(plan.dispose).toEqual([{ tab: 10, tabExists: true }]);
+  });
+
+  it("flags a vanished tab so the caller skips the scroll flush", () => {
+    const snap = snapshot([workspace(1, [pane(1, [terminalTab(11, 101)], 11)], 1)], 1);
+    // 뷰어 탭 10 이 닫혔다 — flush 를 보내면 unknownTarget 잡음이 된다.
+    expect(planViewerSync([10], snap).dispose).toEqual([{ tab: 10, tabExists: false }]);
+  });
+
+  it("keeps tabExists true for a viewer left behind in another workspace", () => {
+    const snap = snapshot(
+      [
+        workspace(1, [pane(1, [terminalTab(10, 100)], 10)], 1),
+        workspace(2, [pane(2, [folderTab(20)], 20)], 2),
+      ],
+      1,
+    );
+    // 워크스페이스 전환 직후: ws 2 의 뷰어 20 은 unmount 대상이지만 탭은 남아 있다.
+    const plan = planViewerSync([20], snap);
+    expect(plan.mount).toEqual([]);
+    expect(plan.dispose).toEqual([{ tab: 20, tabExists: true }]);
+  });
+
+  it("keeps a mounted viewer mounted across snapshots (no churn)", () => {
+    const snap = snapshot([workspace(1, [pane(1, [folderTab(10)], 10)], 1)], 1);
+    const plan = planViewerSync([10], snap);
+    expect(plan.dispose).toEqual([]);
+    expect(plan.mount).toEqual([
+      { pane: 1, tab: 10, kind: { type: "folderBrowser", path: "/home/u" } },
+    ]);
+  });
+
+  it("disposes every viewer when there is no active workspace", () => {
+    const snap = snapshot([workspace(1, [pane(1, [folderTab(10)], 10)], 1)], null);
+    const plan = planViewerSync([10], snap);
+    expect(plan.mount).toEqual([]);
+    // 스냅샷에는 남아 있는 탭이므로 flush 대상이다.
+    expect(plan.dispose).toEqual([{ tab: 10, tabExists: true }]);
   });
 });

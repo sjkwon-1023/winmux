@@ -39,7 +39,8 @@ export function getState(): Promise<StateSnapshot> {
 
 /** 기존 PTY 세션에 attach 한다. **호출 전에 onOutput 채널의 onmessage 를 먼저
  *  걸어야 한다** (채널 먼저·reattach 나중 — 코어 session.rs reattach 계약).
- *  응답은 raw body `[u64 LE end_offset][replay bytes]` — frame.ts 로 파싱한다. */
+ *  응답은 raw body `[u64 LE end_offset][u8 first_attach][replay bytes]` —
+ *  frame.ts 의 parseAttachBody(ATTACH_HEADER_BYTES=9)가 정본이다. */
 export function attachTerminal(
   session: SessionId,
   onOutput: Channel<OutputChunk>,

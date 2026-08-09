@@ -106,14 +106,14 @@ export type TerminalStatus =
   | { type: "exited"; code: number | null };
 
 /** 탭 생성 명세 (command.rs NewTab) — createTab·splitPane·createWorkspace 공유.
- *  markdownViewer 는 아직 없다 (21단계 청크 D 에서 추가 — variant 를 생략해
- *  미구현 경로가 타입 수준에서 존재하지 않게 한다). */
+ *  21단계 뷰어 3종이 모두 착지해 TabKind 와 종류가 일대일이다. */
 export type NewTab =
   | { type: "terminal"; cwd: string | null }
   /** path 가 null 이면 워크스페이스 rootPath, 그것도 null 이면 "/" (terminal
    *  cwd 와 대칭). */
   | { type: "folderBrowser"; path: string | null }
-  | { type: "textViewer"; path: string };
+  | { type: "textViewer"; path: string }
+  | { type: "markdownViewer"; path: string };
 
 /** 직렬화 가능한 command bus 명령 집합 (command.rs Command).
  *  JSON 은 internal tag: {"type": "createWorkspace", "name": ...}. */

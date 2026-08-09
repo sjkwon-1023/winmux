@@ -130,13 +130,13 @@ fn commands_fixture_round_trips() {
     let original: serde_json::Value = serde_json::from_str(&text).unwrap();
     let parsed: Vec<Command> = serde_json::from_str(&text).unwrap();
 
-    // 전 Command variant 1개씩(12종) + 뷰어 NewTab 2종을 실은 createTab 2개
+    // 전 Command variant 1개씩(12종) + 뷰어 NewTab 3종을 실은 createTab 3개
     // (21단계) + createWorkspace 의 tab 필드 누락 하위호환 형태 1개 (마지막
     // 엔트리) — variant 추가 시 fixture 도 갱신할 것.
-    assert_eq!(parsed.len(), 15);
+    assert_eq!(parsed.len(), 16);
 
     // 뷰어 NewTab 잠금 (21단계): folderBrowser 의 path 는 nullable(= 워크스페이스
-    // root_path 상속), textViewer 는 필수다.
+    // root_path 상속), textViewer·markdownViewer 는 필수다.
     assert!(
         matches!(
             &parsed[12],
@@ -159,20 +159,31 @@ fn commands_fixture_round_trips() {
         "textViewer 엔트리: {:?}",
         parsed[13]
     );
+    assert!(
+        matches!(
+            &parsed[14],
+            Command::CreateTab {
+                tab: NewTab::MarkdownViewer { .. },
+                ..
+            }
+        ),
+        "markdownViewer 엔트리: {:?}",
+        parsed[14]
+    );
 
     // 하위호환 잠금 (계획 13-D1): tab 필드가 없는 JSON 은 tab: None 으로
     // 파싱된다 — 13단계 이전 클라이언트의 createWorkspace 형태.
     assert!(
-        matches!(&parsed[14], Command::CreateWorkspace { tab: None, .. }),
+        matches!(&parsed[15], Command::CreateWorkspace { tab: None, .. }),
         "compat 엔트리가 tab: None 으로 파싱돼야 함: {:?}",
-        parsed[14]
+        parsed[15]
     );
 
     // 재직렬화는 None 을 "tab": null 로 명시하므로, 원본의 compat 엔트리에
     // "tab": null 을 보충한 형태와 비교한다 (그 외 전 엔트리는 strict
     // round-trip).
     let mut expected = original.clone();
-    expected[14]
+    expected[15]
         .as_object_mut()
         .unwrap()
         .insert("tab".to_string(), serde_json::Value::Null);

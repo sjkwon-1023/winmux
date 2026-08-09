@@ -25,11 +25,18 @@
 // 노드를 유지한 채 제목·dot·클래스만 갱신) / rebuild(멤버십·순서 변화 → 재조립)
 // 셋으로 갈린다 — renderTabStrip 주석 참조. 헤더에는 pane 층 집계 배지(●)가
 // 붙는다 (계획 v2 9장: 탭 → pane → 워크스페이스 3층).
+//
+// 뷰어 탭(21단계): 콘텐츠 영역에는 터미널 뷰(keep-alive)와 뷰어 뷰(활성 탭만
+// 마운트)가 공존한다. 어느 쪽이 이번 렌더의 표시 대상인지는 workspace-view 가
+// planViewSync(visible)·planViewerSync(mount) 판정으로 내려주고, 여기서는 그
+// 둘 중 하나를 shown 으로 삼는다 — **shownTab = 표시 중인 탭**(터미널이든 뷰어든)
+// 이고, placeholder 는 둘 다 없을 때만 뜬다 (동시 표시 금지).
 
 import { paneUnread, sameTabButton, tabStripModel, tabStripPlan } from "./tab-strip-model";
 import type { TabButtonModel } from "./tab-strip-model";
 import type { TerminalView } from "./terminal-view";
-import type { VisibleView } from "./view-reconcile";
+import type { ViewerView } from "./viewer-view";
+import type { VisibleView, VisibleViewer } from "./view-reconcile";
 import type {
   Command,
   CommandOutput,
@@ -56,6 +63,16 @@ export interface ViewRegistry {
     parent: HTMLElement,
     onAttachError: (message: string) => void,
   ): TerminalView;
+}
+
+/** 뷰어 뷰 레지스트리 접근 계약 (21단계) — 소유자는 workspace-view 다.
+ *  터미널과 별도 레지스트리인 이유는 수명 시맨틱이 반대이기 때문이다
+ *  (viewer-view.ts 참조). ensure 는 없으면 생성해 parent 에 마운트한다. 뷰어
+ *  3종이 모두 착지한 지금 null 은 나오지 않지만, 반환 타입에는 남겨 pane 이
+ *  placeholder 경로로 되돌아가는 안전망을 유지한다. */
+export interface ViewerRegistry {
+  get(tab: TabId): ViewerView | undefined;
+  ensure(target: VisibleViewer, parent: HTMLElement): ViewerView | null;
 }
 
 /** send-mode 접근 계약 (17단계) — 소유자는 workspace-view 다. pane-view 는
@@ -89,7 +106,7 @@ function setText(el: HTMLElement, text: string): void {
   if (el.textContent !== text) el.textContent = text;
 }
 
-/** 콘텐츠 placeholder 텍스트 (터미널 뷰가 없는 경우 — 영어 UI 텍스트). */
+/** 콘텐츠 placeholder 텍스트 (터미널 뷰도 뷰어 뷰도 없는 경우 — 영어 UI 텍스트). */
 function placeholderText(tab: Tab | null): string {
   if (tab === null) return "no tabs — press + to open a new terminal tab";
   const kind: TabKind = tab.kind;
@@ -98,11 +115,15 @@ function placeholderText(tab: Tab | null): string {
       // ptySession 없는 terminal 탭 — visible 판정에서 제외된 경우.
       return "(terminal tab without pty session)";
     case "folderBrowser":
-      return `folderBrowser: ${kind.path} (viewer lands in stage 21)`;
+      // 21단계 C1 이후로 folderBrowser 는 항상 마운트된다 — 이 문구는 뷰
+      // 생성이 없었던 경우에만 남는 안전망이다.
+      return `folderBrowser: ${kind.path} (no viewer mounted)`;
     case "textViewer":
-      return `textViewer: ${kind.path} (viewer lands in stage 21)`;
+      // 21단계 C2 이후로 textViewer 도 항상 마운트된다 (위와 같은 안전망).
+      return `textViewer: ${kind.path} (no viewer mounted)`;
     case "markdownViewer":
-      return `markdownViewer: ${kind.path} (viewer lands in stage 21)`;
+      // 21단계 D 이후로 markdownViewer 도 항상 마운트된다 (위와 같은 안전망).
+      return `markdownViewer: ${kind.path} (no viewer mounted)`;
   }
 }
 
@@ -120,6 +141,7 @@ export class PaneView {
     readonly paneId: PaneId,
     private readonly dispatch: DispatchFn,
     private readonly views: ViewRegistry,
+    private readonly viewers: ViewerRegistry,
     private readonly send: SendController,
   ) {
     this.root = document.createElement("div");
@@ -175,7 +197,10 @@ export class PaneView {
     this.resizeObserver.observe(this.contentEl);
   }
 
-  /** 현재 표시 중인 탭 — workspace-view 의 focus 보상 경로가 조회한다. */
+  /** 현재 표시 중인 탭 — 터미널 뷰든 뷰어 뷰든 지금 콘텐츠 영역을 차지한 탭이다
+   *  (파일 상단 shown 시맨틱). workspace-view 의 focus 보상·send-mode 대상 판정이
+   *  조회한다 — 뷰어 탭이 shown 이면 TerminalView 레지스트리에서 미스가 나
+   *  "대상에 터미널이 없다" 에러로 떨어진다 (resolveSend). */
   get shownTab(): TabId | null {
     return this.shown;
   }
@@ -201,6 +226,13 @@ export class PaneView {
         type: "createTab",
         pane: this.paneId,
         tab: { type: "terminal", cwd: null },
+      })),
+      // 폴더 탐색 탭 (21단계) — path null 이면 워크스페이스 rootPath, 그것도
+      // 없으면 "/" 로 코어가 해석한다 (terminal 의 cwd 와 대칭).
+      this.iconButton("▤", "New folder browser tab", () => ({
+        type: "createTab",
+        pane: this.paneId,
+        tab: { type: "folderBrowser", path: null },
       })),
       browser,
       // 패널 간 텍스트 전달 (17단계 D2) — "전달"과 "전달 후 실행"을 아이콘부터
@@ -279,8 +311,15 @@ export class PaneView {
   }
 
   /** 스냅샷 반영 — 활성 테두리·탭바 갱신 + keep-alive 뷰 가시성 전환.
-   *  visible 은 planViewSync 가 이 pane 에 대해 판정한 항목(없으면 null)이다. */
-  update(pane: Pane, active: boolean, visible: VisibleView | null): void {
+   *  visible 은 planViewSync 가, visibleViewer 는 planViewerSync 가 이 pane 에
+   *  대해 판정한 항목(없으면 null)이다. 탭 하나는 terminal 이거나 뷰어이지 둘
+   *  다일 수 없으므로 둘이 동시에 non-null 로 오지 않는다. */
+  update(
+    pane: Pane,
+    active: boolean,
+    visible: VisibleView | null,
+    visibleViewer: VisibleViewer | null,
+  ): void {
     this.isActive = active;
     this.root.classList.toggle("active", active);
     this.renderTabStrip(pane);
@@ -291,6 +330,14 @@ export class PaneView {
         this.showAttachError(visible.tab, message),
       );
       this.shown = visible.tab;
+    } else if (visibleViewer !== null) {
+      // 뷰어는 활성 탭일 때만 마운트된다 (viewer-view.ts) — 첫 마운트 때 생성,
+      // 이후 렌더는 update 로 kind 만 밀어 넣는다(무변경이면 뷰가 no-op).
+      const view = this.viewers.ensure(visibleViewer, this.contentEl);
+      view?.update(visibleViewer.kind);
+      // 아직 구현이 없는 뷰어 종류면 view 가 null 이고, 표시 중인 것이 없으므로
+      // placeholder 경로로 되돌아간다.
+      this.shown = view === null ? null : visibleViewer.tab;
     } else {
       this.shown = null;
     }
@@ -409,8 +456,9 @@ export class PaneView {
       return;
     }
     // 이미 active 탭: dispatch 없이(no-op 스킵) 뷰 focus 만. pane 이 비활성인
-    // 경우는 mousedown 의 FocusPane 성공 보상이 focus 를 처리한다.
-    if (this.isActive) this.views.get(model.tab)?.focus();
+    // 경우는 mousedown 의 FocusPane 성공 보상이 focus 를 처리한다. 뷰어 탭도
+    // focus() 를 갖는다 (21단계 — 두 레지스트리는 키가 겹치지 않는다).
+    if (this.isActive) (this.views.get(model.tab) ?? this.viewers.get(model.tab))?.focus();
   }
 
   /** attach 실패 노출 — 레지스트리(ensure)가 뷰를 정리한 뒤 부른다. 실패한 탭이
