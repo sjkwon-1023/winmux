@@ -3,8 +3,12 @@
 // Workspace 배열 + activeWorkspace 를 렌더 가능한 카드 모델 배열로 사영한다.
 // DOM 조립(sidebar.ts)과 판정 로직을 분리해 상태 매핑·경로 축약·null 생략을
 // 순수 테스트로 잠근다 (tab-strip-model 과 같은 구도). 18단계부터 agentStatus·
-// message·unread 는 OSC 라우팅으로 실제 값이 들어오는 동적 필드다 — gitBranch/
-// gitDirty 만 19단계 전까지 null 이라 branch 는 생략 렌더가 기본이다.
+// message·unread 는 OSC 라우팅으로 실제 값이 들어오는 동적 필드다.
+//
+// 카드는 3줄이다: 이름(+ unread dot) / 상태 텍스트 + 메시지 첫 줄 / 축약 경로.
+// pane·탭 개수와 git branch 는 카드에 싣지 않는다 — 개수는 화면(split tree)이
+// 이미 보여주고, gitBranch/gitDirty 는 19단계가 v2 로 미뤄져 v1 에서 항상 null
+// 이다 (코어 모델 필드는 예약된 채 남는다).
 //
 // 여기에 렌더 판정(reconcilePlan)까지 두는 이유: DOM 재조립 여부는 카드 모델의
 // id 멤버십·필드 동일성만으로 결정되는 순수 판정이라, DOM 없는 vitest 로 잠글 수
@@ -19,26 +23,24 @@ export interface WorkspaceCardModel {
   /** activeWorkspace 인지 — 하이라이트 + 클릭 no-op 판정에 쓰인다. */
   active: boolean;
   status: AgentStatus;
-  /** 상태 아이콘 — running ⚡ / needsInput 🔔 / idle · (계획 v2 6장). */
-  statusIcon: string;
-  /** lastAgentMessage 의 첫 줄 미리보기 — null·공백뿐이면 null (카드에서 생략). */
+  /** 상태 표시 텍스트 — 아이콘 대신 단어로 읽힌다 (계획 v2 6장의 3상태 그대로). */
+  statusLabel: string;
+  /** lastAgentMessage 의 첫 줄 미리보기 — null·공백뿐이면 null (상태 줄에서 생략). */
   message: string | null;
   /** 워크스페이스 집계 unread dot — 어느 pane 의 어느 탭이든 미확인 알림이 있으면
    *  true. agentStatus 와 별개인 이유: 토큰 불일치 777·OSC 9 같은 **상태 중립**
    *  알림은 agent_status 를 바꾸지 않으므로(18단계 규약), 집계 dot 이 없으면
    *  백그라운드 워크스페이스에서 그 알림이 어디에도 안 보인다 (3층 중 워크스페이스 층). */
   unread: boolean;
-  /** "main*" 형식 (dirty 면 * 접미) — gitBranch null 이면 null. */
-  branch: string | null;
   /** rootPath 축약 (~/ 치환 + 뒤 2세그먼트 유지) — null 이면 null. */
   path: string | null;
-  counts: { panes: number; tabs: number };
 }
 
-const STATUS_ICONS: Record<AgentStatus, string> = {
-  running: "⚡",
-  needsInput: "🔔",
-  idle: "·",
+/** 상태 → 표시 텍스트 (영어 UI 문자열). */
+const STATUS_LABELS: Record<AgentStatus, string> = {
+  running: "running",
+  needsInput: "needs input",
+  idle: "idle",
 };
 
 /** rootPath 축약 — `/home/<user>` 접두를 `~` 로 치환하고, 나머지 세그먼트가
@@ -86,25 +88,18 @@ export function sidebarModel(
   workspaces: Workspace[],
   activeWorkspace: WorkspaceId | null,
 ): WorkspaceCardModel[] {
-  return workspaces.map((ws) => {
-    const panes = Object.values(ws.panes);
-    return {
-      workspace: ws.id,
-      name: ws.name,
-      active: ws.id === activeWorkspace,
-      status: ws.agentStatus,
-      statusIcon: STATUS_ICONS[ws.agentStatus],
-      message: firstLine(ws.lastAgentMessage),
-      unread: panes.some((pane) => pane.tabs.some((tab) => tab.notification === "unread")),
-      // gitDirty 는 boolean|null — null(값 미도입, 19단계 전)은 clean 취급.
-      branch: ws.gitBranch === null ? null : `${ws.gitBranch}${ws.gitDirty === true ? "*" : ""}`,
-      path: abbreviatePath(ws.rootPath),
-      counts: {
-        panes: panes.length,
-        tabs: panes.reduce((sum, pane) => sum + pane.tabs.length, 0),
-      },
-    };
-  });
+  return workspaces.map((ws) => ({
+    workspace: ws.id,
+    name: ws.name,
+    active: ws.id === activeWorkspace,
+    status: ws.agentStatus,
+    statusLabel: STATUS_LABELS[ws.agentStatus],
+    message: firstLine(ws.lastAgentMessage),
+    unread: Object.values(ws.panes).some((pane) =>
+      pane.tabs.some((tab) => tab.notification === "unread"),
+    ),
+    path: abbreviatePath(ws.rootPath),
+  }));
 }
 
 /** 카드 리스트 렌더 판정 (18단계 B-6).
@@ -121,13 +116,10 @@ export function sameCard(a: WorkspaceCardModel, b: WorkspaceCardModel): boolean 
     a.name === b.name &&
     a.active === b.active &&
     a.status === b.status &&
-    a.statusIcon === b.statusIcon &&
+    a.statusLabel === b.statusLabel &&
     a.message === b.message &&
     a.unread === b.unread &&
-    a.branch === b.branch &&
-    a.path === b.path &&
-    a.counts.panes === b.counts.panes &&
-    a.counts.tabs === b.counts.tabs
+    a.path === b.path
   );
 }
 

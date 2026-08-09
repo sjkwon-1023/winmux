@@ -1,4 +1,4 @@
-// sidebar-model 검증 — 상태 매핑·경로 축약 경계·null 생략·counts 집계·집계 unread,
+// sidebar-model 검증 — 상태 매핑·경로 축약 경계·null 생략·집계 unread,
 // 그리고 렌더 판정(reconcilePlan)의 skip/patch/rebuild 3분기.
 
 import { describe, expect, it } from "vitest";
@@ -40,8 +40,6 @@ function ws(
   opts: {
     name?: string;
     rootPath?: string | null;
-    gitBranch?: string | null;
-    gitDirty?: boolean | null;
     agentStatus?: AgentStatus;
     lastAgentMessage?: string | null;
     panes?: Record<string, Pane>;
@@ -52,8 +50,9 @@ function ws(
     name: opts.name ?? `ws ${id}`,
     rootPath: opts.rootPath ?? null,
     distro: null,
-    gitBranch: opts.gitBranch ?? null,
-    gitDirty: opts.gitDirty ?? null,
+    // gitBranch/gitDirty 는 19단계(v2)까지 항상 null 인 예약 필드 — 카드가 읽지 않는다.
+    gitBranch: null,
+    gitDirty: null,
     layout: { type: "leaf", pane: 1 },
     panes: opts.panes ?? { "1": pane(1, [terminalTab(10)]) },
     activePane: 1,
@@ -63,7 +62,7 @@ function ws(
 }
 
 describe("sidebarModel", () => {
-  it("maps agentStatus to status and icon", () => {
+  it("maps agentStatus to status and label", () => {
     const models = sidebarModel(
       [
         ws(1, { agentStatus: "running" }),
@@ -73,7 +72,7 @@ describe("sidebarModel", () => {
       1,
     );
     expect(models.map((m) => m.status)).toEqual(["running", "needsInput", "idle"]);
-    expect(models.map((m) => m.statusIcon)).toEqual(["⚡", "🔔", "·"]);
+    expect(models.map((m) => m.statusLabel)).toEqual(["running", "needs input", "idle"]);
   });
 
   it("marks only the activeWorkspace as active, preserving order", () => {
@@ -86,10 +85,9 @@ describe("sidebarModel", () => {
     expect(sidebarModel([ws(1)], null).map((m) => m.active)).toEqual([false]);
   });
 
-  it("omits message/branch/path as null when the model values are null", () => {
+  it("omits message/path as null when the model values are null", () => {
     const m = sidebarModel([ws(1)], 1)[0];
     expect(m?.message).toBeNull();
-    expect(m?.branch).toBeNull();
     expect(m?.path).toBeNull();
   });
 
@@ -109,18 +107,6 @@ describe("sidebarModel", () => {
       null,
       null,
     ]);
-  });
-
-  it("formats branch with a dirty asterisk; null gitDirty counts as clean", () => {
-    const models = sidebarModel(
-      [
-        ws(1, { gitBranch: "main", gitDirty: true }),
-        ws(2, { gitBranch: "main", gitDirty: false }),
-        ws(3, { gitBranch: "feat/x", gitDirty: null }),
-      ],
-      1,
-    );
-    expect(models.map((m) => m.branch)).toEqual(["main*", "main", "feat/x"]);
   });
 
   it("aggregates unread across every pane and tab of the workspace", () => {
@@ -153,22 +139,6 @@ describe("sidebarModel", () => {
     )[0];
     expect(m?.status).toBe("idle");
     expect(m?.unread).toBe(true);
-  });
-
-  it("counts panes and sums tabs across panes", () => {
-    const m = sidebarModel(
-      [
-        ws(1, {
-          panes: {
-            "1": pane(1, [terminalTab(10), terminalTab(11)]),
-            "2": pane(2, [terminalTab(12)]),
-            "3": pane(3, []),
-          },
-        }),
-      ],
-      1,
-    )[0];
-    expect(m?.counts).toEqual({ panes: 3, tabs: 3 });
   });
 });
 

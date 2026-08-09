@@ -412,9 +412,4 @@ describe("PaneView viewer seam (21단계)", () => {
       { type: "createTab", pane: 4, tab: { type: "folderBrowser", path: null } },
     ]);
   });
-
-  it("keeps the reserved browser button disabled and untouched", () => {
-    const { headerButton } = mount();
-    expect(headerButton("Browser tab (v2)").disabled).toBe(true);
-  });
 });

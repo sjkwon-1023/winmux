@@ -104,7 +104,7 @@ interface TabNodes {
 
 /** 버튼 툴팁 — "<기능> (<단축키>)". 단축키 문자열은 keys.ts 의 shortcutLabel
  *  단일 소스에서만 받는다 (키를 바꾸면 툴팁이 따라오도록 — 표류 방지). 단축키가
- *  없는 버튼(⤷ 류·예약 ◎)은 이 헬퍼를 쓰지 않고 기능 설명만 단다. */
+ *  없는 버튼(⤷ 류)은 이 헬퍼를 쓰지 않고 기능 설명만 단다. */
 function withShortcut(label: string, id: ShortcutId): string {
   return `${label} (${shortcutLabel(id)})`;
 }
@@ -218,17 +218,7 @@ export class PaneView {
     const header = document.createElement("div");
     header.className = "pane-header";
 
-    const browser = this.iconButton("◎", "Browser tab (v2)", null);
-    browser.disabled = true;
-
-    // 진단 (체크포인트 1 버그 3): 헤더가 어느 pane 소속인지 화면에서 바로 보이게
-    // id 를 표시한다 — "클릭한 헤더 ≠ 의도한 pane" 재현 시 즉시 판별된다.
-    const idLabel = document.createElement("span");
-    idLabel.className = "pane-id";
-    idLabel.textContent = `#${this.paneId}`;
-
     header.append(
-      idLabel,
       this.unreadEl,
       this.tabStripEl,
       this.iconButton("+", withShortcut("New terminal tab", "newTerminalTab"), () => ({
@@ -243,7 +233,9 @@ export class PaneView {
         pane: this.paneId,
         tab: { type: "folderBrowser", path: null },
       })),
-      browser,
+      // 브라우저 탭 버튼(◎)은 여기 있었다 — 영구 disabled 라 자리만 차지해
+      // 뺐다. v2 에서 기능과 함께 돌아온다.
+
       // 패널 간 텍스트 전달 (17단계 D2) — "전달"과 "전달 후 실행"을 아이콘부터
       // 분리한다 (실수 실행 방지, 계획 v2 8장). 단축키 미배정이라 툴팁은 기능
       // 설명만 (대상 선택이 아직 마우스 제스처 — 키보드화는 v2 후보).
@@ -297,26 +289,20 @@ export class PaneView {
     this.send.arm(this.paneId, text, submit);
   }
 
-  private iconButton(
-    label: string,
-    title: string,
-    command: (() => Command) | null,
-  ): HTMLButtonElement {
+  private iconButton(label: string, title: string, command: () => Command): HTMLButtonElement {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = label;
     btn.title = title;
-    if (command !== null) {
-      btn.addEventListener("click", () => {
-        const cmd = command();
-        // 진단 로그 (체크포인트 1 버그 3 — "엉뚱한 pane 분할" 재현 시 어떤
-        // PaneView 의 버튼이 어떤 커맨드를 보냈는지 즉시 판별하기 위한 상시
-        // debug 레벨 기록. 정적 분석으로는 배선·구조 경로가 결백해 재현
-        // 데이터가 필요하다).
-        console.debug("[wmux] pane-icon click", { pane: this.paneId, cmd });
-        void this.dispatch(cmd);
-      });
-    }
+    btn.addEventListener("click", () => {
+      const cmd = command();
+      // 진단 로그 (체크포인트 1 버그 3 — "엉뚱한 pane 분할" 재현 시 어떤
+      // PaneView 의 버튼이 어떤 커맨드를 보냈는지 즉시 판별하기 위한 상시
+      // debug 레벨 기록. 정적 분석으로는 배선·구조 경로가 결백해 재현
+      // 데이터가 필요하다).
+      console.debug("[wmux] pane-icon click", { pane: this.paneId, cmd });
+      void this.dispatch(cmd);
+    });
     return btn;
   }
 

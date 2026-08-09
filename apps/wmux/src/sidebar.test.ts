@@ -35,6 +35,7 @@ function ws(
   id: number,
   opts: {
     name?: string;
+    rootPath?: string | null;
     agentStatus?: AgentStatus;
     lastAgentMessage?: string | null;
     notification?: NotificationState;
@@ -44,7 +45,7 @@ function ws(
   return {
     id,
     name: opts.name ?? `ws ${id}`,
-    rootPath: null,
+    rootPath: opts.rootPath ?? null,
     distro: null,
     gitBranch: null,
     gitDirty: null,
@@ -103,7 +104,7 @@ describe("Sidebar rendering", () => {
     // 안 바뀌는 이름의 텍스트 노드 — setText 가드가 이 노드를 살려두는지 본다.
     const nameNode = child(before[1], ".ws-card-name").firstChild;
     expect(child(before[1], ".ws-card-dot").hidden).toBe(true);
-    expect(child(before[1], ".ws-card-message").hidden).toBe(true);
+    expect(child(before[1], ".ws-card-status").textContent).toBe("idle");
 
     sidebar.render(
       snapshot(
@@ -125,12 +126,26 @@ describe("Sidebar rendering", () => {
     expect(after[0]).toBe(before[0]);
     expect(after[1]).toBe(before[1]);
     expect(after[2]).toBe(before[2]);
-    expect(child(after[1], ".ws-card-status").textContent).toBe("🔔");
-    expect(child(after[1], ".ws-card-status").title).toBe("needsInput");
-    expect(child(after[1], ".ws-card-message").textContent).toBe("continue?");
-    expect(child(after[1], ".ws-card-message").hidden).toBe(false);
+    // 상태 줄은 상태 텍스트 + 메시지 첫 줄 한 줄이다 (별도 메시지 줄 없음).
+    expect(child(after[1], ".ws-card-status").textContent).toBe("needs input — continue?");
+    expect(child(after[1], ".ws-card-status").title).toBe("needs input — continue?");
+    expect(child(after[1], ".ws-card-status").classList.contains("needs-input")).toBe(true);
     expect(child(after[1], ".ws-card-dot").hidden).toBe(false);
     expect(child(after[1], ".ws-card-name").firstChild).toBe(nameNode);
+  });
+
+  it("toggles the path row in place, keeping it out of the layout while null", () => {
+    const { sidebar, cards } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    const before = cards();
+    expect(child(before[0], ".ws-card-path").hidden).toBe(true);
+
+    sidebar.render(snapshot(2, [ws(1, { rootPath: "/home/u/code/wmux" }), ws(2), ws(3)], 1));
+
+    const after = cards();
+    expect(after[0]).toBe(before[0]);
+    expect(child(after[0], ".ws-card-path").hidden).toBe(false);
+    expect(child(after[0], ".ws-card-path").textContent).toBe("~/code/wmux");
   });
 
   it("touches nothing when the card model is unchanged", () => {

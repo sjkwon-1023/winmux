@@ -34,15 +34,21 @@ body {
   overflow: hidden;
 }
 
-/* 상단 상태 라인 — 워크스페이스 이름·pane 수·revision (+ one-shot 에러) */
+/* 상단 상태 라인 — 일시 표시다: send-mode 프롬프트·one-shot 에러가 있을 때만
+   main.ts 가 펼치고, 없으면 hidden 으로 접혀 본문이 그 자리를 가져간다.
+   display 를 지정하지 않아 hidden 속성만으로 감춰진다 */
 #status-line {
   flex: 0 0 auto;
-  padding: 6px 12px;
+  padding: 4px 12px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   font-family: monospace;
   white-space: pre-wrap;
+}
+
+#status-line.error {
+  color: var(--error);
 }
 
 /* 상태 라인 아래 본문 행 — 좌 사이드바 + 우 뷰 (13단계 D6) */
@@ -104,15 +110,11 @@ body {
   border-color: var(--accent);
 }
 
+/* 카드 1줄 — 이름 + 집계 unread dot + 닫기 */
 .ws-card-head {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.ws-card-status {
-  flex: 0 0 auto;
-  font-size: 11px;
 }
 
 .ws-card-name {
@@ -154,17 +156,23 @@ body {
   background: var(--border);
 }
 
-/* 마지막 에이전트 메시지 미리보기 — 1줄 말줄임 (모델이 첫 줄로 절단) */
-.ws-card-message {
+/* 카드 2줄 — 상태 텍스트 + 마지막 에이전트 메시지 첫 줄 (1줄 말줄임) */
+.ws-card-status {
   margin-top: 2px;
   color: var(--fg-muted);
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* 메타 1줄 — branch · path · counts (null 필드는 sidebar.ts 가 생략) */
-.ws-card-meta {
+/* 개입을 기다리는 상태만 눈에 띈다 — running·idle 은 muted 그대로 */
+.ws-card-status.needs-input {
+  color: var(--accent);
+}
+
+/* 카드 3줄 — 축약된 rootPath (없으면 sidebar.ts 가 hidden 으로 접는다) */
+.ws-card-path {
   margin-top: 2px;
   color: var(--fg-muted);
   font-family: monospace;
@@ -324,13 +332,8 @@ body {
   cursor: pointer;
 }
 
-.pane-header button:hover:not(:disabled) {
+.pane-header button:hover {
   background: var(--border);
-}
-
-.pane-header button:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 /* ── 탭바 (12단계) ─────────────────────────────────────────────────── */
@@ -809,21 +812,13 @@ body {
   border-color: var(--send);
 }
 
-/* 진단용 pane id 라벨 (체크포인트 1 버그 3) — 헤더 소속 pane 을 화면에서 판별 */
-.pane-id {
-  font-size: 10px;
-  color: var(--fg-muted);
-  padding: 0 4px;
-  align-self: center;
-  flex: 0 0 auto;
-}
-
 /* pane 집계 unread 배지 (18단계) — 이 pane 의 어느 탭이든 미확인 알림이 있으면
-   #id 라벨 옆에 뜬다. 탭바가 넘쳐 잘린 탭의 dot 을 pane 층에서 대신 보여주는
-   자리다. display 를 지정하지 않아 hidden 속성만으로 감춰진다 (패치 대상) */
+   헤더 맨 앞(탭바 왼쪽)에 뜬다. 탭바가 넘쳐 잘린 탭의 dot 을 pane 층에서 대신
+   보여주는 자리다. display 를 지정하지 않아 hidden 속성만으로 감춰진다 (패치 대상) */
 .pane-dot {
   flex: 0 0 auto;
   align-self: center;
+  margin: 0 2px;
   color: var(--accent);
   font-size: 7px;
 }

@@ -42,14 +42,14 @@ import type { Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types
 type DispatchFn = (cmd: Command) => Promise<CommandOutput | null>;
 
 /** 카드 1개의 DOM 노드 묶음 — in-place 패치 대상. model 은 이 카드가 지금 그리고
- *  있는 모델로, 클릭 핸들러가 stale 클로저 대신 여기서 최신 값을 읽는다. */
+ *  있는 모델로, 클릭 핸들러가 stale 클로저 대신 여기서 최신 값을 읽는다.
+ *  3줄 구성: head(이름 + unread dot + ×) / status(상태 텍스트 + 메시지) / path. */
 interface CardNodes {
   root: HTMLElement;
-  status: HTMLSpanElement;
   name: HTMLSpanElement;
   dot: HTMLSpanElement;
-  message: HTMLDivElement;
-  meta: HTMLDivElement;
+  status: HTMLDivElement;
+  path: HTMLDivElement;
   model: WorkspaceCardModel;
 }
 
@@ -59,10 +59,12 @@ function setText(el: HTMLElement, text: string): void {
   if (el.textContent !== text) el.textContent = text;
 }
 
-/** 메타 1줄 — branch · path · counts (null 필드는 생략, 말줄임은 CSS). */
-function metaText(model: WorkspaceCardModel): string {
-  const counts = `${model.counts.panes}p ${model.counts.tabs}t`;
-  return [model.branch, model.path, counts].filter((p): p is string => p !== null).join(" · ");
+/** 상태 1줄 — 상태 텍스트에 마지막 에이전트 메시지 첫 줄을 이어붙인다 (없으면
+ *  상태 텍스트만, 말줄임은 CSS). 메시지에 별도 줄을 주지 않는 이유는 카드를
+ *  3줄로 유지하기 위해서다 — 긴 메시지는 어차피 한 줄로 잘린다. */
+function statusText(model: WorkspaceCardModel): string {
+  if (model.message === null) return model.statusLabel;
+  return `${model.statusLabel} — ${model.message}`;
 }
 
 export class Sidebar {
@@ -169,7 +171,7 @@ export class Sidebar {
     return input;
   }
 
-  /** 카드 DOM 조립 — 값에 따라 있다 없다 하는 행(미리보기·집계 dot)도 노드는
+  /** 카드 DOM 조립 — 값에 따라 있다 없다 하는 행(경로·집계 dot)도 노드는
    *  항상 만들고 hidden 으로만 토글한다. 노드 존재 자체가 변하면 그 카드의
    *  자식이 갈아치워져 in-place 패치의 의미가 없어지기 때문이다. */
   private card(model: WorkspaceCardModel): CardNodes {
@@ -178,9 +180,6 @@ export class Sidebar {
 
     const head = document.createElement("div");
     head.className = "ws-card-head";
-
-    const status = document.createElement("span");
-    status.className = "ws-card-status";
 
     const name = document.createElement("span");
     name.className = "ws-card-name";
@@ -201,17 +200,19 @@ export class Sidebar {
       this.onClose(model.workspace);
     });
 
-    head.append(status, name, dot, close);
+    head.append(name, dot, close);
 
-    const message = document.createElement("div");
-    message.className = "ws-card-message";
+    // 상태 줄 — 텍스트 상태 + 메시지 첫 줄. 상태는 항상 있으므로 이 줄은 감추지
+    // 않는다 (경로 줄과 달리 hidden 토글이 없다).
+    const status = document.createElement("div");
+    status.className = "ws-card-status";
 
-    const meta = document.createElement("div");
-    meta.className = "ws-card-meta";
+    const path = document.createElement("div");
+    path.className = "ws-card-path";
 
-    el.append(head, message, meta);
+    el.append(head, status, path);
 
-    const nodes: CardNodes = { root: el, status, name, dot, message, meta, model };
+    const nodes: CardNodes = { root: el, name, dot, status, path, model };
     this.applyCard(nodes, model);
 
     el.addEventListener("click", () => {
@@ -229,21 +230,20 @@ export class Sidebar {
     nodes.model = model;
     nodes.root.classList.toggle("active", model.active);
 
-    setText(nodes.status, model.statusIcon);
-    nodes.status.title = model.status;
-
     setText(nodes.name, model.name);
     nodes.name.title = model.name; // 잘린 이름의 툴팁
 
     nodes.dot.hidden = !model.unread;
 
-    setText(nodes.message, model.message ?? "");
-    nodes.message.title = model.message ?? "";
-    nodes.message.hidden = model.message === null;
+    const status = statusText(model);
+    setText(nodes.status, status);
+    nodes.status.title = status;
+    // 3상태 중 needsInput 만 강조한다 — 사용자의 개입을 기다리는 유일한 상태다.
+    nodes.status.classList.toggle("needs-input", model.status === "needsInput");
 
-    const meta = metaText(model);
-    setText(nodes.meta, meta);
-    nodes.meta.title = meta;
+    setText(nodes.path, model.path ?? "");
+    nodes.path.title = model.path ?? "";
+    nodes.path.hidden = model.path === null;
   }
 
   /** × 클릭 — 터미널 탭이 있으면 confirm 후 CloseWorkspace (계획 D4). */

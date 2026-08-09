@@ -280,9 +280,9 @@ decisions in [`docs/plans/mvp-stage13-plan.md`](plans/mvp-stage13-plan.md)). All
 interactions are mouse-driven in the sidebar; the dev hook is only needed where noted.
 
 1. **Boot workspace card** — on launch the sidebar shows one card for the boot
-   workspace with the active highlight, a status icon, and pane/tab counts, matching
-   the workspace rendered on the right. (Agent status/message and git branch stay
-   blank/idle until stages 18–19 — the card just omits them.)
+   workspace with the active highlight, its name, and the status line (`idle` until an
+   agent reports otherwise), matching the workspace rendered on the right. (The card
+   carries no pane/tab counts and no git branch — see §10 item 11.)
 2. **Create via the sidebar form** — click "+ New workspace", enter a name (rootPath
    optional — absolute **Linux** path, e.g. `/home/<user>`), submit. A new card
    appears, the app switches to the new workspace, and a terminal tab is already
@@ -441,7 +441,7 @@ mousedown on a pane delivers.
 OSC 777/9 agent notifications and OSC 0 (alias "2")/7 are now routed into the Rust model
 through a 100ms-trailing-window coalescer (`OscRouter`), surfacing on three layers: the
 tab's unread dot, the pane header's aggregate badge (`●`), and the workspace sidebar card
-(status icon, message preview, aggregate unread dot). The frontend applies snapshot
+(status text, message preview, aggregate unread dot). The frontend applies snapshot
 updates with keyed in-place reconcile (sidebar cards and tab-strip entries patch by id
 instead of rebuilding the DOM) — this is what guards the ADR-0003 d7 mid-click swallow
 regression once the model fields are dynamic.
@@ -671,6 +671,16 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
 10. **Reload-while-minimized edge (known, accept)** — if the WebView reloads while the
     window is minimized (auto-reset), polling resumes until the next minimize/restore
     cycle. Accepted narrow window; no action needed unless it bites in practice.
+11. **UI cleanup (display only — no feature was removed)** — the top status line is now
+    ephemeral: at rest it is collapsed entirely (no `workspace: … · panes: … · rev …`
+    log, and the terminal area starts right below the title bar). It appears only while
+    send-mode is armed (the prompt) or for a dispatch error (red, gone after ~5s), and
+    collapses again afterwards. Sidebar cards are three lines — name (+ unread dot, ×) /
+    status text (`running` / `needs input` / `idle`, followed by ` — <last agent message>`
+    when there is one, `needs input` being the only accented one) / abbreviated path;
+    no more `⚡`/`🔔` icons, pane/tab counts, or branch field. Pane headers no longer show
+    the `#<id>` label or the permanently disabled `◎` browser button — the unread `●`
+    badge and the six working buttons (`+ ▤ ⤷ ⤷⏎ ◫ ⊟`) stay, with their tooltips intact.
 
 ## 11. ARM64 cross-build notes
 

@@ -1,4 +1,4 @@
-// wmux 앱 엔트리 — store 구독 → 상단 상태 라인 + 좌측 워크스페이스 사이드바
+// wmux 앱 엔트리 — store 구독 → 좌측 워크스페이스 사이드바
 // (13단계) + 우측 활성 워크스페이스 split tree 렌더 (11~12단계). 분할 렌더·
 // splitter·탭바·클릭 포커스는 workspace-view/pane-view/splitter 가, 카드 리스트·
 // 인라인 폼은 sidebar 가 담당하고, 여기는 부트스트랩과 dispatchUI 래퍼
@@ -83,15 +83,6 @@ function requireElement(id: string): HTMLElement {
   return el;
 }
 
-/** 상태 라인 기본 텍스트 — 활성 워크스페이스 이름·pane 수·revision. */
-function statusText(snapshot: StateSnapshot | null): string {
-  if (snapshot === null) return "booting…";
-  const ws = activeWorkspace(snapshot);
-  if (ws === null) return `no workspace · rev ${snapshot.revision}`;
-  const paneCount = Object.keys(ws.panes).length;
-  return `workspace: ${ws.name} · panes: ${paneCount} · rev ${snapshot.revision}`;
-}
-
 class App {
   private readonly statusEl = requireElement("status-line");
   private readonly viewEl = requireElement("view");
@@ -117,7 +108,7 @@ class App {
   private errorText: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
   /** send-mode 지속 프롬프트 (17단계) — one-shot 에러와 별개 슬롯: 모드 활성
-   *  동안 유지되고 해제 시 null 로 기본 상태 라인이 복원된다 (타이머 없음). */
+   *  동안 유지되고 해제 시 null 이 되어 상태 라인이 다시 접힌다 (타이머 없음). */
   private promptText: string | null = null;
 
   async init(): Promise<void> {
@@ -326,7 +317,7 @@ class App {
     this.renderStatusLine();
   }
 
-  /** send-mode 프롬프트 갱신 — null 이면 해제(기본 표시 복원). 무변경 재렌더는
+  /** send-mode 프롬프트 갱신 — null 이면 해제(바가 다시 접힌다). 무변경 재렌더는
    *  건너뛴다 (arm 덮어쓰기 등에서 같은 문자열이 반복 유입될 수 있다). */
   private setPrompt(text: string | null): void {
     if (this.promptText === text) return;
@@ -348,7 +339,6 @@ class App {
     // 전환 스냅샷 도착 시각 — wsView.render(attach 시작 기록)보다 먼저 찍는다.
     // 이 콜백은 store 구독이라 offer 채택 직후 동기 호출된다 (스냅샷 시각과 동일).
     this.tracer.markSnapshot(snapshot.state.activeWorkspace, performance.now());
-    this.renderStatusLine();
     this.sidebar.render(snapshot);
     this.wsView.render(snapshot);
     // 렌더 말미 봉인 — 이 렌더에서 attach 를 시작한 탭이 없으면(터미널 0개·전부
@@ -356,12 +346,16 @@ class App {
     this.tracer.settle();
   }
 
-  /** 상태 라인 조립 — 기본 텍스트 · [send-mode 프롬프트] · [one-shot 에러]. */
+  /** 상태 라인 조립 — [send-mode 프롬프트] · [one-shot 에러]. **일시 표시**다:
+   *  둘 다 없으면 바를 hidden 으로 접어 그만큼 터미널 영역이 넓어진다 (상시
+   *  로그를 띄우지 않는다). 에러가 섞이면 error 클래스로 색을 구분한다. */
   private renderStatusLine(): void {
-    const parts = [statusText(this.store.snapshot)];
+    const parts: string[] = [];
     if (this.promptText !== null) parts.push(this.promptText);
     if (this.errorText !== null) parts.push(`ERROR: ${this.errorText}`);
     this.statusEl.textContent = parts.join(" · ");
+    this.statusEl.classList.toggle("error", this.errorText !== null);
+    this.statusEl.hidden = parts.length === 0;
   }
 }
 
@@ -372,7 +366,12 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error("app bootstrap failed", err);
-  // 부트스트랩 실패를 화면에도 노출한다 — 빈 화면으로 가리지 않는다.
+  // 부트스트랩 실패를 화면에도 노출한다 — 빈 화면으로 가리지 않는다. 상태 라인은
+  // 평시 접혀 있으므로(index.html 의 hidden) 여기서 직접 펼친다.
   const el = document.getElementById("status-line");
-  if (el !== null) el.textContent = `bootstrap failed: ${String(err)}`;
+  if (el !== null) {
+    el.textContent = `bootstrap failed: ${String(err)}`;
+    el.classList.add("error");
+    el.hidden = false;
+  }
 });
