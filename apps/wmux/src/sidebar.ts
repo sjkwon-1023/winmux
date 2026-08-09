@@ -17,8 +17,12 @@
 // 아니다 — 입력 중 스냅샷이 와도 폼 상태가 날아가지 않는다.
 //
 // 폼 입력은 표준 DOM <input> 이다 — 키 가로채기를 하지 않는다. 폼에 포커스가
-// 있는 동안 키 입력은 xterm 포커스 밖이라 터미널로 새지 않고, 전역 캡처는
-// Ctrl+Shift+R(리로드)뿐이라 충돌하지 않는다.
+// 있는 동안 키 입력은 xterm 포커스 밖이라 터미널로 새지 않는다. 전역 캡처
+// (keys.ts 가로채기 목록 + main.ts 의 Ctrl+Shift+R 리로드)는 폼 포커스 중에도
+// 그대로 동작하지만 전부 modifier 조합이라 이름·경로 타이핑과 충돌하지 않는다.
+//
+// 폼 열기는 하단 버튼 클릭 외에 Ctrl+Shift+N 으로도 들어온다 — main.ts 글루가
+// focusNewWorkspace() 를 부른다 (dispatch 가 아닌 유일한 키 액션).
 //
 // 상호작용 (계획 D4):
 // - 카드 클릭 = SwitchWorkspace (이미 활성이면 no-op 스킵 — 무변경 revision 잡음 방지).
@@ -29,6 +33,7 @@
 //   워크스페이스 프레임 없이 터미널까지 한 번에 뜬다. 성공 시 폼을 닫고,
 //   실패는 dispatchUI 가 상태 라인에 표면화하므로 폼을 유지해 재시도하게 한다.
 
+import { shortcutLabel } from "./keys";
 import { hasRunningTerminals, reconcilePlan, sameCard, sidebarModel } from "./sidebar-model";
 import type { WorkspaceCardModel } from "./sidebar-model";
 import type { Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
@@ -88,6 +93,8 @@ export class Sidebar {
     newBtn.type = "button";
     newBtn.className = "sidebar-new";
     newBtn.textContent = "+ New workspace";
+    // 단축키 표기는 keys.ts 의 shortcutLabel 단일 소스에서 받는다 (표류 방지).
+    newBtn.title = `New workspace (${shortcutLabel("newWorkspace")})`;
 
     this.nameInput = this.textInput("name");
     this.nameInput.required = true;
@@ -139,6 +146,17 @@ export class Sidebar {
       });
     }
     this.lastCards = model;
+  }
+
+  /** 새 워크스페이스 폼 열기 + name 입력 포커스 (Ctrl+Shift+N — main.ts 글루가
+   *  부른다). 버튼 클릭이 토글인 것과 달리 여기는 항상 여는 방향이다: 단축키를
+   *  다시 눌러 폼이 닫히면 "이름을 치려다 폼이 사라지는" 동작이 된다. */
+  focusNewWorkspace(): void {
+    this.formEl.hidden = false;
+    this.nameInput.focus();
+    // 이미 열려 있고 값이 남아 있는 경우를 위해 선택까지 해 둔다 — 바로 덮어쓸
+    // 수 있다 (폼은 성공 제출 때만 reset 되므로 실패한 입력이 남아 있을 수 있다).
+    this.nameInput.select();
   }
 
   private textInput(placeholder: string): HTMLInputElement {

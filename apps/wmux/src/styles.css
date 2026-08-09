@@ -446,14 +446,14 @@ body {
 /* ── 뷰어 탭 — folderBrowser (21단계) ─────────────────────────────────
    pane 콘텐츠를 꽉 채우는 세로 스택: 상단 배너(로딩·truncated·에러) + 스크롤
    목록. 행은 <button> 이라 헤더 버튼 규칙(.pane-header button)과 겹치지 않게
-   자체 스타일을 갖는다. */
+   자체 스타일을 갖는다. 키보드 탐색(체크포인트 2)의 focus 는 목록 컨테이너가
+   갖고, 현재 행은 .folder-row.selected 로 보인다. */
 
 .folder-view {
   height: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  outline: none; /* 프로그램적 focus(tabindex -1) 표시는 하지 않는다 */
 }
 
 .folder-banner {
@@ -475,6 +475,9 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  /* 프로그램적 focus(tabindex -1) 에는 테두리를 그리지 않는다 — 어느 행이
+     현재인지는 .selected 가 보여준다 */
+  outline: none;
 }
 
 .folder-row {
@@ -501,9 +504,26 @@ body {
   outline-offset: -1px;
 }
 
+/* 키보드 선택 행 — hover 와 겹쳐도 구분되게 accent 배경 + 좌측 마커를 쓴다
+   (마커는 padding 안쪽 border 라 행 높이·정렬이 변하지 않는다) */
+.folder-row.selected {
+  background: var(--accent);
+  color: #ffffff;
+  border-left: 2px solid #ffffff;
+  padding-left: 4px;
+}
+
 /* 디렉터리 행 강조 — 이름 뒤 `/` 와 함께 두 겹으로 구분한다 */
 .folder-row.dir .folder-row-name {
   color: var(--accent);
+}
+
+/* 선택 행 안에서는 디렉터리 강조·크기 색을 배경에 맞춰 되돌린다. 위의 `.dir`
+   규칙과 명시도가 같으므로 **뒤에** 와야 이긴다 (accent 글자 + accent 배경이면
+   선택된 디렉터리 행이 안 보인다) */
+.folder-row.selected .folder-row-name,
+.folder-row.selected .folder-row-size {
+  color: inherit;
 }
 
 .folder-row-name {
@@ -548,7 +568,9 @@ body {
   color: var(--error);
 }
 
-/* 창 이동 바 — 파일이 창(512KiB)보다 클 때만 표시된다 (자동 이어읽기 없음) */
+/* 창 이동 바 — 파일이 창(512KiB)보다 클 때만 표시된다 (자동 이어읽기 없음).
+   같은 이동을 Ctrl+PageUp/PageDown·Ctrl+Home/End 로도 하고, 그 표기는 버튼
+   title 에 있다 (text-view.ts) */
 .text-bar {
   flex: 0 0 auto;
   display: flex;
@@ -584,6 +606,8 @@ body {
   background: var(--border);
 }
 
+/* 창을 실제로 옮기지 못하는 버튼(첫 창의 first/prev, 마지막 창의 next/last)은
+   잠긴다 — 판정 정본은 text-view.ts 의 windowButtonsDisabled 다 */
 .text-window-button:disabled {
   opacity: 0.4;
   cursor: default;

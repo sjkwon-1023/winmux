@@ -32,6 +32,8 @@
 // 둘 중 하나를 shown 으로 삼는다 — **shownTab = 표시 중인 탭**(터미널이든 뷰어든)
 // 이고, placeholder 는 둘 다 없을 때만 뜬다 (동시 표시 금지).
 
+import { shortcutLabel } from "./keys";
+import type { ShortcutId } from "./keys";
 import { paneUnread, sameTabButton, tabStripModel, tabStripPlan } from "./tab-strip-model";
 import type { TabButtonModel } from "./tab-strip-model";
 import type { TerminalView } from "./terminal-view";
@@ -98,6 +100,13 @@ interface TabNodes {
   dot: HTMLSpanElement;
   exited: HTMLSpanElement;
   model: TabButtonModel;
+}
+
+/** 버튼 툴팁 — "<기능> (<단축키>)". 단축키 문자열은 keys.ts 의 shortcutLabel
+ *  단일 소스에서만 받는다 (키를 바꾸면 툴팁이 따라오도록 — 표류 방지). 단축키가
+ *  없는 버튼(⤷ 류·예약 ◎)은 이 헬퍼를 쓰지 않고 기능 설명만 단다. */
+function withShortcut(label: string, id: ShortcutId): string {
+  return `${label} (${shortcutLabel(id)})`;
 }
 
 /** 값이 같으면 쓰지 않는 텍스트 대입 — textContent 재대입은 값이 같아도 자식
@@ -222,34 +231,35 @@ export class PaneView {
       idLabel,
       this.unreadEl,
       this.tabStripEl,
-      this.iconButton("+", "New terminal tab", () => ({
+      this.iconButton("+", withShortcut("New terminal tab", "newTerminalTab"), () => ({
         type: "createTab",
         pane: this.paneId,
         tab: { type: "terminal", cwd: null },
       })),
       // 폴더 탐색 탭 (21단계) — path null 이면 워크스페이스 rootPath, 그것도
       // 없으면 "/" 로 코어가 해석한다 (terminal 의 cwd 와 대칭).
-      this.iconButton("▤", "New folder browser tab", () => ({
+      this.iconButton("▤", withShortcut("New folder browser tab", "newFolderTab"), () => ({
         type: "createTab",
         pane: this.paneId,
         tab: { type: "folderBrowser", path: null },
       })),
       browser,
       // 패널 간 텍스트 전달 (17단계 D2) — "전달"과 "전달 후 실행"을 아이콘부터
-      // 분리한다 (실수 실행 방지, 계획 v2 8장).
+      // 분리한다 (실수 실행 방지, 계획 v2 8장). 단축키 미배정이라 툴팁은 기능
+      // 설명만 (대상 선택이 아직 마우스 제스처 — 키보드화는 v2 후보).
       this.actionButton("⤷", "Send selection to another pane", () => this.armSend(false)),
       this.actionButton("⤷⏎", "Send selection & run in another pane", () =>
         this.armSend(true),
       ),
       // 분할은 원자 SplitPane — 새 pane 에 terminal 탭까지 한 번에 생성한다
       // (계획 D5: 컴포지션 금지, 중간 스냅샷 1프레임 렌더 방지).
-      this.iconButton("◫", "Split left/right", () => ({
+      this.iconButton("◫", withShortcut("Split left/right", "splitLeftRight"), () => ({
         type: "splitPane",
         pane: this.paneId,
         direction: "horizontal",
         tab: { type: "terminal", cwd: null },
       })),
-      this.iconButton("⊟", "Split top/bottom", () => ({
+      this.iconButton("⊟", withShortcut("Split top/bottom", "splitTopBottom"), () => ({
         type: "splitPane",
         pane: this.paneId,
         direction: "vertical",
@@ -416,7 +426,10 @@ export class PaneView {
     close.type = "button";
     close.className = "tab-close";
     close.textContent = "×";
-    close.title = "Close tab";
+    // 단축키는 "활성 pane 의 활성 탭"을 닫는다 — 이 × 는 자기 탭을 닫으므로
+    // 활성 탭의 × 에서만 둘이 같은 대상이다. 툴팁은 그래도 모든 탭에 같은
+    // 문구를 단다 (탭마다 다른 툴팁이 더 헷갈린다).
+    close.title = withShortcut("Close tab", "closeTab");
     close.addEventListener("click", (ev) => {
       ev.stopPropagation(); // 탭 활성화 클릭과 분리
       // tab id 는 이 노드의 키라 패치로도 변하지 않는다 — 클로저로 안전하다

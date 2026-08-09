@@ -142,8 +142,10 @@ function mount(paneId = 1): Harness {
     badge: () => child(view.root, ".pane-dot"),
     placeholder: () => child(view.root, ".pane-placeholder"),
     headerButton: (title) => {
+      // 접두사 매칭 — 툴팁 뒤에 단축키 표기 "(Ctrl+Shift+…)"가 붙으므로 기능
+      // 설명 부분으로만 찾는다 (테스트가 단축키 문자열을 하드코딩하지 않게).
       const found = view.root.querySelector<HTMLButtonElement>(
-        `.pane-header button[title="${title}"]`,
+        `.pane-header button[title^="${title}"]`,
       );
       if (found === null) throw new Error(`missing header button ${title}`);
       return found;

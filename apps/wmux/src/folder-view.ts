@@ -8,12 +8,21 @@
 // 경로가 복원되고(persist), 어떤 탐색이든 revision 을 남긴다. 파일 **내용** 읽기
 // (fs_*)만 attach_terminal 류 콘텐츠 플레인 직접 invoke 다.
 //
+// 키보드만으로도 탐색이 된다 (체크포인트 2 UX): 리스트 컨테이너가 focus 를 갖고
+// 선택 행 1개를 유지하며, 방향키·Home/End·PageUp/PageDown 이 선택을 옮기고
+// Enter 가 클릭과 같은 라우팅을, Backspace 가 `..` 와 같은 상위 이동을 한다.
+// 이 keydown 은 **뷰 내부 리스너**라 전역 가로채기(keys.ts 의 window capture)와
+// 층이 다르고, 수식키 없는 키만 소비하므로 Alt+방향키(전역 pane 이동)와 겹치지
+// 않는다.
+//
 // 행 모델(folderRows)·정렬(sortEntries)·부모 경로(parentPath)·확장자 라우팅
-// (viewerTabForPath)은 DOM 무의존 순수 함수로 분리해 vitest 로 잠근다 — 이
-// 파일에서 DOM 을 만지는 부분은 그 결과를 그대로 그리는 얇은 층이다.
+// (viewerTabForPath)·선택 이동(moveSelection)·키 판정(folderKeyAction)은 DOM
+// 무의존 순수 함수로 분리해 vitest 로 잠근다 — 이 파일에서 DOM 을 만지는 부분은
+// 그 결과를 그대로 그리는 얇은 층이다.
 
 import { fsListDir } from "./backend";
 import type { DirEntry, DirListing } from "./backend";
+import type { KeySpec } from "./keys";
 import type { ViewerKind, ViewerView } from "./viewer-view";
 import type { Command, CommandOutput, NewTab, PaneId, TabId } from "./types";
 
@@ -109,6 +118,72 @@ export function formatSize(size: number | null): string {
   return `${text}${units[unit]}`;
 }
 
+/** 키보드가 만드는 선택 이동 (Enter·Backspace 는 이동이 아니라 액션이라 별도). */
+export type SelectionMove = "up" | "down" | "home" | "end" | "pageUp" | "pageDown";
+
+/** PageUp/PageDown 한 번이 건너뛰는 행 수. viewport 높이를 재지 않고 고정값을
+ *  쓴다 — 목록이 가상 스크롤이 아니라 실 DOM 이고, 행 높이·pane 크기에 따라
+ *  이동량이 달라지면 순수 함수로 잠글 수 없다. */
+export const PAGE_ROWS = 10;
+
+/** 선택 이동 (순수). 결과는 항상 `[0, count)` 로 클램프되고, 끝에서 순환하지
+ *  않는다 (목록 끝은 끝이다 — 연타로 되감기는 동작은 파일 목록에서 방향 감각을
+ *  잃게 한다). 빈 목록은 선택 없음(-1)이고, 선택 없음 상태에서의 첫 이동은
+ *  첫 행을 고른다 (End 만 마지막 행). */
+export function moveSelection(index: number, count: number, move: SelectionMove): number {
+  if (count <= 0) return -1;
+  if (index < 0) return move === "end" ? count - 1 : 0;
+  const clamp = (i: number): number => Math.min(Math.max(i, 0), count - 1);
+  const from = clamp(index);
+  switch (move) {
+    case "up":
+      return clamp(from - 1);
+    case "down":
+      return clamp(from + 1);
+    case "home":
+      return 0;
+    case "end":
+      return count - 1;
+    case "pageUp":
+      return clamp(from - PAGE_ROWS);
+    case "pageDown":
+      return clamp(from + PAGE_ROWS);
+  }
+}
+
+/** 폴더 뷰 안에서 소비하는 keydown 의 뜻. `open` 은 선택 행을 클릭한 것과 같고
+ *  (디렉터리 → 탐색, 파일 → 뷰어 탭), `parent` 는 `..` 행과 같다. */
+export type FolderKeyAction =
+  | { type: "move"; move: SelectionMove }
+  | { type: "open" }
+  | { type: "parent" };
+
+const MOVE_KEYS: Record<string, SelectionMove | undefined> = {
+  ArrowUp: "up",
+  ArrowDown: "down",
+  Home: "home",
+  End: "end",
+  PageUp: "pageUp",
+  PageDown: "pageDown",
+};
+
+/** keydown → 폴더 뷰 액션. 목록 밖 조합은 전부 null 이고, 그때 뷰는 이벤트에
+ *  손대지 않는다.
+ *
+ *  **수식키가 하나라도 붙으면 받지 않는다**: Alt+방향키는 전역 pane 이동
+ *  (keys.ts)이고 Ctrl 계열도 전역 목록 소유라, 여기서 같은 키를 소비하면 뷰어
+ *  탭에서만 전역 이동이 죽는 비일관이 생긴다. IME 조합 중의 키도 조합기 몫이다
+ *  (keys.keyAction 과 같은 규약). */
+export function folderKeyAction(spec: KeySpec): FolderKeyAction | null {
+  if (spec.isComposing) return null;
+  if (spec.ctrl || spec.alt || spec.shift) return null;
+  const move = MOVE_KEYS[spec.key];
+  if (move !== undefined) return { type: "move", move };
+  if (spec.key === "Enter") return { type: "open" };
+  if (spec.key === "Backspace") return { type: "parent" };
+  return null;
+}
+
 /** 로드 실패 payload 의 표시 문자열 — 글루는 `Result<_, String>` 이라 문자열이
  *  오지만, IPC 레벨 실패 등 계약 밖 값도 삼키지 않는다. */
 function describeError(err: unknown): string {
@@ -124,6 +199,12 @@ export class FolderView implements ViewerView {
   /** in-flight 로드 토큰 — 늦게 도착한 이전 경로의 응답이 현재 목록을 덮지
    *  않게 한다 (탐색을 빠르게 연타하면 순서가 뒤집힐 수 있다). */
   private loadToken = 0;
+  /** 지금 그려진 행 모델과 그 DOM — 인덱스가 1:1 로 대응한다 (키보드 선택이
+   *  인덱스로 오가므로 둘을 같이 들고 있는다). */
+  private rows: FolderRow[] = [];
+  private rowEls: HTMLButtonElement[] = [];
+  /** 선택 행 인덱스 — 빈 목록이면 -1. */
+  private selected = -1;
 
   constructor(
     parent: HTMLElement,
@@ -141,8 +222,6 @@ export class FolderView implements ViewerView {
 
     this.root = document.createElement("div");
     this.root.className = "folder-view";
-    // 프로그램적 focus 대상 (D7 보상 경로) — Tab 순서에는 넣지 않는다.
-    this.root.tabIndex = -1;
 
     this.bannerEl = document.createElement("div");
     this.bannerEl.className = "folder-banner";
@@ -150,6 +229,14 @@ export class FolderView implements ViewerView {
 
     this.listEl = document.createElement("div");
     this.listEl.className = "folder-list";
+    // 스크롤 컨테이너 자체를 focus 대상으로 둔다 (text/markdown 뷰어와 같은
+    // 관례) — 여기가 프로그램적 focus 대상(D7 보상 경로)이자 키보드 탐색의
+    // 주인이다. Tab 순서에는 넣지 않는다.
+    this.listEl.tabIndex = -1;
+
+    // 리스너는 root 에 둔다 — focus 가 리스트에 있든 행 버튼(마우스 클릭 직후)에
+    // 있든 같은 경로로 올라온다.
+    this.root.addEventListener("keydown", (ev) => this.onKeyDown(ev));
 
     this.root.append(this.bannerEl, this.listEl);
     parent.appendChild(this.root);
@@ -175,7 +262,7 @@ export class FolderView implements ViewerView {
   flushScroll(): void {}
 
   focus(): void {
-    this.root.focus();
+    this.listEl.focus();
   }
 
   dispose(): void {
@@ -223,11 +310,75 @@ export class FolderView implements ViewerView {
     this.bannerEl.classList.toggle("error", error);
   }
 
+  /** 목록 교체 — 선택은 **항상 첫 행으로 리셋**한다. 목록이 갈리면(탐색·재로드)
+   *  이전 인덱스는 다른 디렉터리의 엉뚱한 행을 가리키므로 보존할 의미가 없다. */
   private renderRows(rows: FolderRow[]): void {
-    this.listEl.replaceChildren(...rows.map((row) => this.rowButton(row)));
+    // 방금 지울 행 버튼이 focus 를 쥐고 있었으면(마우스로 디렉터리를 연 직후)
+    // 노드가 사라지며 focus 가 body 로 떨어져 키보드 탐색이 끊긴다 — 리스트
+    // 컨테이너로 되돌린다. 뷰 밖에 focus 가 있으면 건드리지 않는다.
+    const hadFocus = this.root.contains(document.activeElement);
+    this.rows = rows;
+    this.rowEls = rows.map((row, index) => this.rowButton(row, index));
+    this.selected = -1;
+    this.listEl.replaceChildren(...this.rowEls);
+    this.select(rows.length > 0 ? 0 : -1, false);
+    if (hadFocus) this.listEl.focus();
   }
 
-  private rowButton(row: FolderRow): HTMLButtonElement {
+  /** 선택 갱신 — 이전/현재 행만 만진다. scroll 이면 선택 행이 보이는 범위 밖으로
+   *  나가지 않을 만큼만 스크롤한다 (block: "nearest" — 목록을 매번 가운데로
+   *  튀게 하지 않는다). */
+  private select(index: number, scroll: boolean): void {
+    const prev = this.selected;
+    if (prev >= 0 && prev < this.rowEls.length) this.rowEls[prev].classList.remove("selected");
+    this.selected = index;
+    if (index < 0 || index >= this.rowEls.length) return;
+    const el = this.rowEls[index];
+    el.classList.add("selected");
+    if (scroll) el.scrollIntoView({ block: "nearest" });
+  }
+
+  /** 뷰 내부 keydown (파일 상단 계약) — 전역 가로채기와 층이 다르고, 수식키 없는
+   *  키만 folderKeyAction 이 받는다.
+   *
+   *  preventDefault 는 두 가지를 막는다: 방향키·PageUp/Down 의 컨테이너 기본
+   *  스크롤(선택의 scrollIntoView 와 이중으로 움직인다)과, 행 버튼이 focus 를
+   *  쥔 상태(마우스 클릭 직후)에서 Enter 가 네이티브 click 까지 발화시켜 같은
+   *  행을 두 번 여는 것. */
+  private onKeyDown(ev: KeyboardEvent): void {
+    const action = folderKeyAction({
+      key: ev.key,
+      ctrl: ev.ctrlKey,
+      alt: ev.altKey,
+      shift: ev.shiftKey,
+      isComposing: ev.isComposing,
+    });
+    if (action === null) return;
+    ev.preventDefault();
+    switch (action.type) {
+      case "move":
+        this.select(moveSelection(this.selected, this.rows.length, action.move), true);
+        return;
+      case "open":
+        if (this.selected >= 0 && this.selected < this.rows.length) {
+          this.openRow(this.rows[this.selected]);
+        }
+        return;
+      case "parent":
+        this.navigateParent();
+        return;
+    }
+  }
+
+  /** Backspace — `..` 행과 같은 상위 이동. 루트에서는 조용한 no-op 이다
+   *  (parentPath 가 null: 이동 계열은 에러를 띄우지 않는다). */
+  private navigateParent(): void {
+    const parent = parentPath(this.path);
+    if (parent === null) return;
+    void this.dispatch({ type: "navigateFolder", tab: this.tab, path: parent });
+  }
+
+  private rowButton(row: FolderRow, index: number): HTMLButtonElement {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = row.isDir ? "folder-row dir" : "folder-row";
@@ -242,14 +393,21 @@ export class FolderView implements ViewerView {
     size.textContent = formatSize(row.size);
 
     btn.append(name, size);
-    btn.addEventListener("click", () => this.onRowClick(row));
+    btn.addEventListener("click", () => {
+      // 클릭한 행으로 선택을 옮긴 뒤 연다 — 클릭이 하는 일은 그대로고, 뒤이은
+      // Enter 가 엉뚱한 행(직전 선택)을 열지 않게 두 입력의 "현재 행"을 하나로
+      // 맞춘다. 스크롤은 하지 않는다 (이미 눈에 보이는 행이다).
+      this.select(index, false);
+      this.openRow(row);
+    });
     return btn;
   }
 
   /** 디렉터리는 탐색(모델 경유), 파일은 같은 pane 에 뷰어 탭 생성 — 확장자로
-   *  markdownViewer / textViewer 를 고른다 (viewerTabForPath).
-   *  실패(없는 경로·kindMismatch 등)는 dispatchUI 가 상태 라인에 표면화한다. */
-  private onRowClick(row: FolderRow): void {
+   *  markdownViewer / textViewer 를 고른다 (viewerTabForPath). 클릭과 Enter 가
+   *  같은 경로다. 실패(없는 경로·kindMismatch 등)는 dispatchUI 가 상태 라인에
+   *  표면화한다. */
+  private openRow(row: FolderRow): void {
     if (row.isDir) {
       void this.dispatch({ type: "navigateFolder", tab: this.tab, path: row.path });
       return;

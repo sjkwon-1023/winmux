@@ -14,15 +14,31 @@
 //    scrollTop 을 매번 적용하면 재렌더가 사용자 스크롤과 싸우므로 **마운트 시
 //    1회(또는 경로 변경 시)만** 적용한다 — 판정은 순수 함수 shouldAdoptScroll.
 //
-// 윈도우 절삭(decodeWindow)·슬라이스 계산(visibleSlice)·에코 가드·디바운스
-// (ScrollSettle)는 DOM·IPC 무의존으로 분리해 vitest 로 잠근다. 클래스는 그
-// 결과를 DOM 에 옮기는 얇은 층이다.
+// 창 이동은 상단 바 버튼과 **뷰 내부 keydown** 둘 다로 한다 (체크포인트 2 UX):
+// Ctrl+PageUp/PageDown 이 이전/다음 창, Ctrl+Home/End 가 처음/마지막 창이다.
+// 이 keydown 은 전역 가로채기(keys.ts 의 window capture)와 층이 다르고, 전역
+// 목록에 없는 조합만 소비하므로 Ctrl+Tab·Ctrl+1~9·Alt+방향키와 겹치지 않는다.
+// 수식키 없는 PageUp/PageDown 은 창을 옮기지 않고 **행높이 배수로 정렬된 페이지
+// 스크롤**이다 — 브라우저 기본 페이지 스텝(Blink 는 viewport-40px 류)은 16px
+// 행 격자와 어긋나 최상단 행이 반쯤 잘린 채 멈춘다. Home/End·방향키·휠은 손대지
+// 않고 네이티브 스크롤 그대로 둔다.
+//
+// 재시작 복원은 저장된 offset T 를 창 **시작**이 아니라 창 **중앙 부근**에
+// 앉힌다 (windowStartForRestore): 보이는 최상단 행은 T 의 행 그대로면서 위쪽으로
+// 스크롤할 문맥이 창 안에 들어온다.
+//
+// 윈도우 절삭(decodeWindow)·슬라이스 계산(visibleSlice)·복원 창 시작
+// (windowStartForRestore)·버튼 상태(windowButtonsDisabled)·키 판정
+// (textKeyAction)·페이지 스크롤(pageScrollTop)·에코 가드·디바운스(ScrollSettle)는
+// DOM·IPC 무의존으로 분리해 vitest 로 잠근다. 클래스는 그 결과를 DOM 에 옮기는
+// 얇은 층이다.
 //
 // 리사이즈는 **자체 ResizeObserver** 로 받는다 (계획 프론트 계약): pane 의
 // observer 는 터미널 fit 전용이라 뷰어까지 겸하게 만들지 않는다.
 
 import type { TimerHost } from "./ack-batcher";
 import { fsReadChunk, fsStat } from "./backend";
+import type { KeySpec } from "./keys";
 import type { ViewerKind, ViewerView } from "./viewer-view";
 import type { Command, CommandOutput, TabId } from "./types";
 
@@ -220,6 +236,100 @@ export function nextWindowStart(
   }
 }
 
+/** 상단 바에 그리는 순서이자 버튼 상태 계산의 대상 목록. */
+const WINDOW_ACTIONS: readonly WindowAction[] = ["first", "prev", "next", "last"];
+
+/** 저장된 위치 `target` 을 복원할 때 읽을 창의 시작 offset (순수).
+ *
+ *  창 시작을 target 에 맞추면 그 행이 화면 맨 위에 붙어 **위쪽 문맥이 창 밖**이
+ *  된다 (체크포인트 2 사용자 관찰). 그래서 창의 절반만큼 앞에서 시작해 target 을
+ *  창 가운데쯤에 두고, 스크롤은 target 의 행이 뷰포트 최상단에 오도록 뒤에서
+ *  따로 앉힌다 (showWindow) — 보이는 최상단 행은 그대로면서 위로도 스크롤된다.
+ *
+ *  마지막 창보다 뒤로는 시작하지 않는다: EOF 근처에서 뒤쪽이 비는 대신 앞쪽
+ *  문맥을 더 가져오는 편이 창을 꽉 채운다. 창 시작은 행 경계가 아니어도 되고,
+ *  선두 부분행은 기존 규칙(back-read 1바이트 + decodeWindow 절삭)이 잘라낸다. */
+export function windowStartForRestore(
+  target: number,
+  size: number,
+  windowBytes: number = WINDOW_BYTES,
+): number {
+  if (target <= 0) return 0;
+  const lastStart = Math.max(0, size - windowBytes);
+  const centered = target - Math.floor(windowBytes / 2);
+  return Math.max(0, Math.min(centered, lastStart));
+}
+
+/** 창 이동 버튼 4개의 disabled 상태 (순수).
+ *
+ *  판정 기준은 "그 버튼이 창을 실제로 옮기는가" 하나다 — 목표 시작이 지금 창의
+ *  시작과 같으면 눌러도 같은 창을 다시 읽을 뿐이므로 잠근다. offset 0 에서
+ *  first/prev 가, 마지막 창에서 next/last 가 잠기는 것이 이 규칙의 결과이고,
+ *  파일이 창보다 작으면(바가 숨겨진 상태) 넷 다 잠긴다. 키보드 단축키도 같은
+ *  판정을 쓰므로 버튼과 키가 어긋나지 않는다. */
+export function windowButtonsDisabled(
+  current: { start: number; end: number },
+  size: number,
+  windowBytes: number = WINDOW_BYTES,
+): Record<WindowAction, boolean> {
+  const state = {} as Record<WindowAction, boolean>;
+  for (const action of WINDOW_ACTIONS) {
+    state[action] = nextWindowStart(action, current, size, windowBytes) === current.start;
+  }
+  return state;
+}
+
+/** 텍스트 뷰 안에서 소비하는 keydown 의 뜻. `window` 는 상단 바 버튼과 같고,
+ *  `page` 는 행 격자에 맞춘 페이지 스크롤이다. */
+export type TextKeyAction =
+  | { type: "window"; action: WindowAction }
+  | { type: "page"; delta: 1 | -1 };
+
+const CTRL_WINDOW_KEYS: Record<string, WindowAction | undefined> = {
+  PageUp: "prev",
+  PageDown: "next",
+  Home: "first",
+  End: "last",
+};
+
+/** keydown → 텍스트 뷰 액션 (순수). 목록 밖 조합은 전부 null 이고, 그때 뷰는
+ *  이벤트에 손대지 않는다 (Home/End·방향키·휠은 네이티브 스크롤 그대로).
+ *
+ *  Alt 계열은 전역 pane 이동(keys.ts)이라 받지 않고, shift 붙은 변형도 받지
+ *  않는다 (keys.ts 의 shift 규약 — 명시된 조합만 가로챈다). Ctrl+PageUp/PageDown·
+ *  Ctrl+Home/End 는 전역 가로채기 목록에 없는 조합이라 여기서만 소비된다. */
+export function textKeyAction(spec: KeySpec): TextKeyAction | null {
+  if (spec.isComposing || spec.alt || spec.shift) return null;
+  if (spec.ctrl) {
+    const action = CTRL_WINDOW_KEYS[spec.key];
+    return action === undefined ? null : { type: "window", action };
+  }
+  if (spec.key === "PageUp") return { type: "page", delta: -1 };
+  if (spec.key === "PageDown") return { type: "page", delta: 1 };
+  return null;
+}
+
+/** PageUp/PageDown 의 목표 scrollTop (순수) — **행높이의 배수**로 떨어진다.
+ *
+ *  한 행은 겹쳐 남긴다(문맥 유지). viewport 가 아직 0 이어도(레이아웃 전) 최소
+ *  한 행은 움직인다. 시작 위치가 격자에서 벗어나 있으면(드래그·End 로 바닥에
+ *  붙은 뒤 등) 가장 가까운 행으로 먼저 스냅한다. 마지막 페이지는 문서 끝에
+ *  붙어야 하므로 maxScrollTop 으로 클램프한다 — 그 값만은 행 배수가 아닐 수
+ *  있다. */
+export function pageScrollTop(
+  scrollTop: number,
+  viewportHeight: number,
+  maxScrollTop: number,
+  delta: 1 | -1,
+  lineHeight: number = LINE_HEIGHT_PX,
+): number {
+  if (lineHeight <= 0) return Math.max(0, Math.min(scrollTop, Math.max(0, maxScrollTop)));
+  const step = Math.max(1, Math.floor(Math.max(0, viewportHeight) / lineHeight) - 1);
+  const line = Math.round(Math.max(0, scrollTop) / lineHeight) + delta * step;
+  const target = Math.max(0, line) * lineHeight;
+  return Math.max(0, Math.min(target, Math.max(0, maxScrollTop)));
+}
+
 /** 세 자리 구분 (순수 — 로케일에 기대지 않는다: WebView ICU 에 따라 결과가
  *  달라지면 테스트로 고정할 수 없다). */
 function groupDigits(value: number): string {
@@ -372,12 +482,15 @@ export class TextView implements ViewerView {
     this.barEl.className = "text-bar";
     this.barEl.hidden = true;
     this.barEl.append(this.rangeEl);
-    for (const [action, title] of [
-      ["first", "First window"],
-      ["prev", "Previous window"],
-      ["next", "Next window"],
-      ["last", "Last window"],
-    ] as [WindowAction, string][]) {
+    // title 에 단축키를 같이 적는다 — 버튼이 단축키의 유일한 발견 경로다.
+    const titles: Record<WindowAction, string> = {
+      first: "First window (Ctrl+Home)",
+      prev: "Previous window (Ctrl+PageUp)",
+      next: "Next window (Ctrl+PageDown)",
+      last: "Last window (Ctrl+End)",
+    };
+    for (const action of WINDOW_ACTIONS) {
+      const title = titles[action];
       const el = document.createElement("button");
       el.type = "button";
       el.className = "text-window-button";
@@ -390,9 +503,9 @@ export class TextView implements ViewerView {
 
     this.scrollEl = document.createElement("div");
     this.scrollEl.className = "text-scroll";
-    // 실스크롤 컨테이너 자체를 focus 대상으로 둔다 — 방향키·PgUp/PgDn 스크롤이
-    // 브라우저 기본 동작으로 붙는다 (뷰어지 에디터가 아니므로 자체 키 처리 없음).
-    // Tab 순서에는 넣지 않는다 (프로그램적 focus 전용).
+    // 실스크롤 컨테이너 자체를 focus 대상으로 둔다 — 방향키·Home/End 스크롤이
+    // 브라우저 기본 동작으로 붙는다. Tab 순서에는 넣지 않는다 (프로그램적 focus
+    // 전용이지만, tabindex 가 있으므로 본문 클릭으로도 focus 가 온다).
     this.scrollEl.tabIndex = -1;
     this.scrollEl.addEventListener("scroll", this.onScroll);
 
@@ -404,6 +517,9 @@ export class TextView implements ViewerView {
     this.scrollEl.append(this.spacerEl);
 
     this.root.append(this.bannerEl, this.barEl, this.scrollEl);
+    // 창 이동 키는 뷰 전체에서 받는다 — 본문뿐 아니라 바 버튼이 focus 를 쥔
+    // 상태(클릭 직후)에서도 같은 키가 같은 뜻이라야 한다.
+    this.root.addEventListener("keydown", this.onKeyDown);
     parent.appendChild(this.root);
 
     // 자체 ResizeObserver (계획 프론트 계약) — pane 의 observer 는 터미널 fit
@@ -411,7 +527,7 @@ export class TextView implements ViewerView {
     this.resizeObserver = new ResizeObserver(() => this.renderSlice());
     this.resizeObserver.observe(this.root);
 
-    this.load(this.pendingOffset ?? 0);
+    this.load(this.pendingOffset ?? 0, true);
   }
 
   /** 스냅샷 반영. 같은 파일이면 **아무것도 하지 않는다** — 스크롤 dispatch 가
@@ -428,7 +544,7 @@ export class TextView implements ViewerView {
     this.path = kind.path;
     this.pendingOffset = kind.scrollTop;
     this.settle.markSynced(null);
-    this.load(kind.scrollTop);
+    this.load(kind.scrollTop, true);
   }
 
   /** unmount 직전 보류분 배출 (탭이 스냅샷에 남아 있을 때만 불린다 —
@@ -446,7 +562,41 @@ export class TextView implements ViewerView {
     this.settle.dispose();
     this.resizeObserver.disconnect();
     this.scrollEl.removeEventListener("scroll", this.onScroll);
+    this.root.removeEventListener("keydown", this.onKeyDown);
     this.root.remove();
+  }
+
+  /** 뷰 내부 keydown (파일 상단 계약) — 전역 가로채기와 층이 다르고, 판정은
+   *  textKeyAction 이 전부 한다.
+   *
+   *  판정된 키는 창을 옮기지 못하는 상황(이미 첫 창에서 Ctrl+Home 등)에도
+   *  preventDefault 한다: 같은 키가 어떤 때는 컨테이너 기본 스크롤로 새어 다르게
+   *  동작하는 비일관을 만들지 않기 위해서다 (main.ts installNavKeys 와 같은
+   *  규약). */
+  private readonly onKeyDown = (ev: KeyboardEvent): void => {
+    const action = textKeyAction({
+      key: ev.key,
+      ctrl: ev.ctrlKey,
+      alt: ev.altKey,
+      shift: ev.shiftKey,
+      isComposing: ev.isComposing,
+    });
+    if (action === null) return;
+    ev.preventDefault();
+    if (action.type === "window") this.moveWindow(action.action);
+    else this.pageScroll(action.delta);
+  };
+
+  /** 행 격자에 맞춘 페이지 스크롤 — 슬라이스 갱신·모델 기록은 scroll 이벤트가
+   *  기존 경로 그대로 처리한다. */
+  private pageScroll(delta: 1 | -1): void {
+    const max = this.scrollEl.scrollHeight - this.scrollEl.clientHeight;
+    this.scrollEl.scrollTop = pageScrollTop(
+      this.scrollEl.scrollTop,
+      this.scrollEl.clientHeight,
+      max,
+      delta,
+    );
   }
 
   /** 스크롤 이벤트 — 슬라이스는 즉시, 모델 기록은 settle 후. */
@@ -467,25 +617,30 @@ export class TextView implements ViewerView {
     return starts[index];
   }
 
+  /** 버튼·단축키 공통 경로. 창이 실제로 움직이지 않는 액션(첫 창에서 prev 등)은
+   *  조용히 무시한다 — 같은 창을 다시 읽으면 스크롤만 맨 위로 튄다. */
   private moveWindow(action: WindowAction): void {
+    if (windowButtonsDisabled(this.win, this.size)[action]) return;
     // 창을 옮기기 전에 지금 위치를 확정해 둔다 — 이동 후의 scroll 이벤트가
     // 이전 위치를 덮어쓰기 전에 모델에 남긴다.
     this.settle.flush();
-    this.load(nextWindowStart(action, this.win, this.size));
+    this.load(nextWindowStart(action, this.win, this.size), false);
   }
 
-  /** 목표 offset 을 담는 창을 읽어 온다. 실패는 인라인 에러로 표면화하고 탭은
-   *  유지한다 (없는·삭제된 파일도 모델에 남아 재시도가 가능해야 한다). */
-  private load(target: number): void {
+  /** 창을 읽어 온다. `restore` 면 target 은 **복원할 위치**이고 창 시작은
+   *  windowStartForRestore 가 정한다 (target 이 창 가운데쯤 오게); 아니면 target
+   *  자체가 창 시작이다 (창 이동 버튼·단축키). 실패는 인라인 에러로 표면화하고
+   *  탭은 유지한다 (없는·삭제된 파일도 모델에 남아 재시도가 가능해야 한다). */
+  private load(target: number, restore: boolean): void {
     const token = ++this.loadToken;
     this.setBanner("loading…", false);
-    this.loadWindow(target, token).catch((err: unknown) => {
+    this.loadWindow(target, restore, token).catch((err: unknown) => {
       if (this.disposed || token !== this.loadToken) return;
       this.renderError(describeError(err));
     });
   }
 
-  private async loadWindow(target: number, token: number): Promise<void> {
+  private async loadWindow(target: number, restore: boolean, token: number): Promise<void> {
     // 크기를 먼저 안다: EOF 판정(말미 부분행을 자를지)·범위 표시·창 이동 버튼이
     // 전부 전체 크기 위에 선다.
     const stat = await fsStat(this.distro, this.path);
@@ -495,24 +650,34 @@ export class TextView implements ViewerView {
       return;
     }
 
-    let start = Math.max(0, Math.min(target, stat.size));
+    // 복원은 저장된 위치를 창 가운데쯤에 두고(위쪽 문맥 확보), 창 이동은 계산된
+    // 시작을 그대로 쓴다. 전체 크기를 알아야 하는 계산이라 stat 뒤에 온다.
+    let start = restore
+      ? windowStartForRestore(target, stat.size)
+      : Math.max(0, Math.min(target, stat.size));
     // 파일이 그새 줄어 목표가 EOF 밖이면 마지막 창으로 되감는다.
     if (start >= stat.size) start = Math.max(0, stat.size - WINDOW_BYTES);
     // 목표가 행 시작이면 그 직전 바이트(개행)까지 읽어 둔다 — 선두 부분행 절삭이
-    // 목표 행 자체를 먹어치우지 않게 하는 1바이트다.
+    // 목표 행 자체를 먹어치우지 않게 하는 1바이트다. 그 1바이트는 요청 길이에
+    // **더해서** 읽는다 (리뷰 발견 버그): 안 더하면 창 커버가 [start-1, start-1+W)
+    // 로 밀려 마지막 창이 파일 끝 바이트에 닿지 못하고, 말미 절삭 탓에 파일의
+    // 마지막 행이 영영 화면에 뜨지 않는다.
     const readOffset = start > 0 ? start - 1 : 0;
+    const readLen = WINDOW_BYTES + (start - readOffset);
 
-    const buffer = await fsReadChunk(this.distro, this.path, readOffset, WINDOW_BYTES);
+    const buffer = await fsReadChunk(this.distro, this.path, readOffset, readLen);
     if (this.disposed || token !== this.loadToken) return;
     const bytes = new Uint8Array(buffer);
-    const atEof = bytes.length < WINDOW_BYTES || readOffset + bytes.length >= stat.size;
+    const atEof = bytes.length < readLen || readOffset + bytes.length >= stat.size;
 
     this.setBanner(null, false);
     this.showWindow(decodeWindow(bytes, readOffset, atEof), stat.size);
   }
 
   /** 새 창을 화면에 앉힌다 — 전체 높이·범위 표시·버튼 상태를 갱신하고, 보류된
-   *  복원 위치가 있으면 거기로, 없으면 창 맨 위로 보낸다. */
+   *  복원 위치가 있으면 **그 위치의 행이 뷰포트 최상단**에 오게, 없으면 창 맨
+   *  위로 보낸다. 복원 창은 그 위치보다 앞에서 시작하므로(windowStartForRestore)
+   *  여기서 앉히는 scrollTop 이 0 이 아니고, 그만큼 위쪽 문맥이 남는다. */
   private showWindow(win: TextWindow, size: number): void {
     this.win = win;
     this.size = size;
@@ -521,13 +686,11 @@ export class TextView implements ViewerView {
 
     const paged = win.start > 0 || win.end < size;
     this.barEl.hidden = !paged;
-    if (paged) {
-      this.rangeEl.textContent = formatByteRange(win.start, win.end, size);
-      for (const { action, el } of this.buttons) {
-        el.disabled =
-          action === "first" || action === "prev" ? win.start === 0 : win.end >= size;
-      }
-    }
+    if (paged) this.rangeEl.textContent = formatByteRange(win.start, win.end, size);
+    // 바가 숨겨져 있어도 상태는 계산해 둔다 — 단축키는 바 없이도 오고, 그때는
+    // 넷 다 잠긴 상태(창이 하나뿐)가 맞다.
+    const disabled = windowButtonsDisabled(win, size);
+    for (const { action, el } of this.buttons) el.disabled = disabled[action];
 
     const restore = this.pendingOffset;
     this.pendingOffset = null;

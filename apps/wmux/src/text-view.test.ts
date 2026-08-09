@@ -1,7 +1,8 @@
-// textViewer 뷰의 순수 계산 검증 (21단계 청크 C2) — 윈도우 절삭(부분행·UTF-8
-// 파단 바이트), 가상 스크롤 슬라이스, byte offset ↔ 행 매핑, 창 이동 계산,
-// 스크롤 에코 가드, settle 디바운스. DOM·IPC 는 이 파일의 대상이 아니다 (뷰는
-// 이 결과를 그대로 그리는 얇은 층이다).
+// textViewer 뷰의 순수 계산 검증 (21단계 청크 C2 + 체크포인트 2 UX) — 윈도우
+// 절삭(부분행·UTF-8 파단 바이트), 가상 스크롤 슬라이스, byte offset ↔ 행 매핑,
+// 창 이동 계산·버튼 상태·키 판정·페이지 스크롤, 복원 창 시작, 스크롤 에코 가드,
+// settle 디바운스. DOM·IPC 는 이 파일의 대상이 아니다 (뷰는 이 결과를 그대로
+// 그리는 얇은 층이다).
 
 import { describe, expect, it } from "vitest";
 
@@ -12,15 +13,25 @@ import {
   formatByteRange,
   lineIndexForOffset,
   nextWindowStart,
+  pageScrollTop,
   shouldAdoptScroll,
+  textKeyAction,
   visibleSlice,
+  windowButtonsDisabled,
+  windowStartForRestore,
 } from "./text-view";
 import type { TimerHost } from "./ack-batcher";
+import type { KeySpec } from "./keys";
 
 const encoder = new TextEncoder();
 
 function bytes(text: string): Uint8Array {
   return encoder.encode(text);
+}
+
+/** 수식키 없는 keydown 1개 — 붙일 수식키만 덮어쓴다. */
+function key(name: string, mods: Partial<KeySpec> = {}): KeySpec {
+  return { key: name, ctrl: false, alt: false, shift: false, isComposing: false, ...mods };
 }
 
 /** 수동 진행 가짜 타이머 — 등록된 콜백을 tick 으로 직접 발화시킨다. */
@@ -232,6 +243,184 @@ describe("nextWindowStart", () => {
     const small = { start: 0, end: 100 };
     expect(nextWindowStart("last", small, 100, 1_000)).toBe(0);
     expect(nextWindowStart("next", small, 100, 1_000)).toBe(0);
+  });
+});
+
+describe("windowStartForRestore", () => {
+  const size = 10_000;
+  const windowBytes = 1_000;
+
+  it("starts at the file head when there is nothing to restore", () => {
+    expect(windowStartForRestore(0, size, windowBytes)).toBe(0);
+    expect(windowStartForRestore(-5, size, windowBytes)).toBe(0);
+  });
+
+  it("keeps the head window when the position is inside the first half window", () => {
+    // 300 - 500 < 0 — 앞으로 더 갈 곳이 없으면 그냥 파일 시작이다.
+    expect(windowStartForRestore(300, size, windowBytes)).toBe(0);
+    expect(windowStartForRestore(500, size, windowBytes)).toBe(0);
+  });
+
+  it("centers the restored position inside the window", () => {
+    // 501 부터는 앞쪽 문맥이 창 안에 들어온다.
+    expect(windowStartForRestore(501, size, windowBytes)).toBe(1);
+    expect(windowStartForRestore(5_000, size, windowBytes)).toBe(4_500);
+  });
+
+  it("never starts past the last window near EOF", () => {
+    // 9_800 - 500 = 9_300 > lastStart(9_000) — 뒤가 비는 대신 앞을 더 가져온다.
+    expect(windowStartForRestore(9_800, size, windowBytes)).toBe(9_000);
+    expect(windowStartForRestore(9_999, size, windowBytes)).toBe(9_000);
+    // 파일이 그새 줄어 위치가 EOF 밖이어도 마지막 창을 넘지 않는다.
+    expect(windowStartForRestore(50_000, size, windowBytes)).toBe(9_000);
+  });
+
+  it("keeps the only window at 0 for a file smaller than the window", () => {
+    expect(windowStartForRestore(400, 600, windowBytes)).toBe(0);
+  });
+
+  it("puts the restored line at the viewport top with context above it", () => {
+    // 8바이트 행 100개("line000\n"…) — 복원 위치 400 은 line050 의 시작이다.
+    const file = bytes(
+      Array.from({ length: 100 }, (_, i) => `line${String(i).padStart(3, "0")}\n`).join(""),
+    );
+    const target = 400;
+    const start = windowStartForRestore(target, file.length, 200);
+    expect(start).toBe(300);
+
+    // 뷰와 같은 읽기: 창 시작 직전 1바이트부터 windowBytes 만큼.
+    const readOffset = start - 1;
+    const win = decodeWindow(file.subarray(readOffset, readOffset + 200), readOffset, false);
+    const index = lineIndexForOffset(win.lineStarts, target);
+    // 최상단 가시 행은 저장된 위치의 행 그대로다.
+    expect(win.lineStarts[index]).toBe(target);
+    // 그 위로 스크롤할 문맥이 창 안에 남는다 (이전에는 index 가 0 이었다).
+    expect(index).toBeGreaterThan(0);
+    expect(win.lines[index]).toBe("line050");
+  });
+});
+
+describe("windowButtonsDisabled", () => {
+  const size = 10_000;
+  const windowBytes = 1_000;
+
+  it("locks the head buttons on the first window", () => {
+    expect(windowButtonsDisabled({ start: 0, end: 1_000 }, size, windowBytes)).toEqual({
+      first: true,
+      prev: true,
+      next: false,
+      last: false,
+    });
+  });
+
+  it("unlocks everything in the middle of the file", () => {
+    expect(windowButtonsDisabled({ start: 2_000, end: 3_000 }, size, windowBytes)).toEqual({
+      first: false,
+      prev: false,
+      next: false,
+      last: false,
+    });
+  });
+
+  it("locks the tail buttons on the last window", () => {
+    expect(windowButtonsDisabled({ start: 9_000, end: 10_000 }, size, windowBytes)).toEqual({
+      first: false,
+      prev: false,
+      next: true,
+      last: true,
+    });
+  });
+
+  it("locks the tail buttons even when the last window ends short of EOF", () => {
+    // 말미 부분행 절삭으로 end < size 여도 더 갈 창이 없으면 잠긴다 — 판정은
+    // "그 버튼이 창을 옮기는가"이지 "EOF 에 닿았는가"가 아니다.
+    expect(windowButtonsDisabled({ start: 9_000, end: 9_900 }, size, windowBytes)).toMatchObject({
+      next: true,
+      last: true,
+    });
+  });
+
+  it("locks all four when the file fits in one window", () => {
+    expect(windowButtonsDisabled({ start: 0, end: 500 }, 500, windowBytes)).toEqual({
+      first: true,
+      prev: true,
+      next: true,
+      last: true,
+    });
+    // 로드 실패의 빈 창도 같다 (누를 곳이 없다).
+    expect(windowButtonsDisabled({ start: 0, end: 0 }, 0, windowBytes)).toEqual({
+      first: true,
+      prev: true,
+      next: true,
+      last: true,
+    });
+  });
+});
+
+describe("textKeyAction", () => {
+  it("moves the window with the Ctrl combinations", () => {
+    expect(textKeyAction(key("PageUp", { ctrl: true }))).toEqual({ type: "window", action: "prev" });
+    expect(textKeyAction(key("PageDown", { ctrl: true }))).toEqual({
+      type: "window",
+      action: "next",
+    });
+    expect(textKeyAction(key("Home", { ctrl: true }))).toEqual({ type: "window", action: "first" });
+    expect(textKeyAction(key("End", { ctrl: true }))).toEqual({ type: "window", action: "last" });
+  });
+
+  it("pages the viewport with bare PageUp/PageDown", () => {
+    expect(textKeyAction(key("PageUp"))).toEqual({ type: "page", delta: -1 });
+    expect(textKeyAction(key("PageDown"))).toEqual({ type: "page", delta: 1 });
+  });
+
+  it("leaves the remaining scroll keys to the browser", () => {
+    for (const name of ["Home", "End", "ArrowUp", "ArrowDown", "Enter", " "]) {
+      expect(textKeyAction(key(name))).toBeNull();
+    }
+  });
+
+  it("ignores the globally owned combinations", () => {
+    // Ctrl+Tab·Ctrl+1~9 는 window capture(keys.ts) 소유라 여기까지 오지 않지만,
+    // 와도 소비하지 않는다. Alt 계열은 전역 pane 이동이다.
+    expect(textKeyAction(key("Tab", { ctrl: true }))).toBeNull();
+    expect(textKeyAction(key("1", { ctrl: true }))).toBeNull();
+    expect(textKeyAction(key("PageDown", { alt: true }))).toBeNull();
+    expect(textKeyAction(key("ArrowUp", { alt: true }))).toBeNull();
+  });
+
+  it("does not take shift variants or IME composition", () => {
+    expect(textKeyAction(key("PageUp", { ctrl: true, shift: true }))).toBeNull();
+    expect(textKeyAction(key("PageDown", { shift: true }))).toBeNull();
+    expect(textKeyAction(key("PageDown", { isComposing: true }))).toBeNull();
+    expect(textKeyAction(key("PageDown", { ctrl: true, isComposing: true }))).toBeNull();
+  });
+});
+
+describe("pageScrollTop", () => {
+  // viewport 320px = 20행 — 한 행을 겹쳐 남기므로 한 페이지는 19행이다.
+  const viewport = 320;
+  const step = 19 * LINE_HEIGHT_PX;
+
+  it("moves a whole page minus one overlapping line", () => {
+    expect(pageScrollTop(0, viewport, 10_000, 1)).toBe(step);
+    expect(pageScrollTop(step, viewport, 10_000, -1)).toBe(0);
+  });
+
+  it("lands on a line boundary from a misaligned start", () => {
+    // 100px = 6.25행 → 가장 가까운 6행으로 스냅한 뒤 한 페이지.
+    expect(pageScrollTop(100, viewport, 10_000, 1)).toBe((6 + 19) * LINE_HEIGHT_PX);
+    expect(pageScrollTop(100, viewport, 10_000, 1) % LINE_HEIGHT_PX).toBe(0);
+  });
+
+  it("clamps at both ends of the document", () => {
+    expect(pageScrollTop(100, viewport, 10_000, -1)).toBe(0);
+    expect(pageScrollTop(960, viewport, 1_000, 1)).toBe(1_000);
+    // 문서가 viewport 보다 짧으면 움직일 곳이 없다.
+    expect(pageScrollTop(0, viewport, 0, 1)).toBe(0);
+  });
+
+  it("still moves one line when the pane is not laid out yet", () => {
+    expect(pageScrollTop(0, 0, 10_000, 1)).toBe(LINE_HEIGHT_PX);
   });
 });
 

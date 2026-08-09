@@ -16,6 +16,7 @@ import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
+import { initWindowVisibility } from "./window-visibility";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { Command, CommandOutput, StateSnapshot } from "./types";
 
@@ -131,6 +132,13 @@ class App {
     };
     installReloadKey();
     installActivityPing();
+    // 창 숨김(최소화) 신호 구독 — WebView2 가 주지 않는 visibility 를 글루 창
+    // 이벤트로 대체한다 (window-visibility.ts). 실패는 폴링 게이팅 신호의
+    // 유실일 뿐 UI 동작과 무관하므로(최소화 중에도 폴링이 도는 기존 동작으로
+    // 되돌아갈 뿐) 부트스트랩을 막지 않고 콘솔에만 남긴다 — 활동 핑과 같은 규율.
+    initWindowVisibility().catch((err: unknown) => {
+      console.error("window visibility listen failed", err);
+    });
     this.installNavKeys();
     this.store.subscribe((snapshot) => this.render(snapshot));
     await this.store.init();
@@ -163,13 +171,20 @@ class App {
     );
   }
 
-  /** 이동 액션 해석 — 최신 채택 스냅샷 기준. 대상이 없으면(스냅샷 미도착, 범위
-   *  밖 ordinal, 이미 활성인 워크스페이스, 인접 pane 없음, 탭 0~1개) 전부 조용한
-   *  no-op 이다: 이동 계열은 에러를 띄우지 않는다 (누른 키가 안 먹는 것 자체가
-   *  피드백). 실제 전환·포커스 보상은 dispatchUI 의 기존 경로를 그대로 탄다 —
-   *  switchWorkspace 는 사이드바 클릭과 같은 activePane 보상, focusPane/
-   *  activateTab 은 cmd 대상 보상. */
+  /** 키 액션 해석 — 최신 채택 스냅샷 기준. 대상이 없으면(스냅샷 미도착, 범위
+   *  밖 ordinal, 이미 활성인 워크스페이스, 인접 pane 없음, 탭 0~1개, 닫을 탭
+   *  없음) 전부 조용한 no-op 이다: 키보드 조작은 에러를 띄우지 않는다 (누른 키가
+   *  안 먹는 것 자체가 피드백). 실제 전환·포커스 보상은 dispatchUI 의 기존 경로를
+   *  그대로 탄다 — switchWorkspace 는 사이드바 클릭과 같은 activePane 보상,
+   *  focusPane/activateTab 은 cmd 대상 보상, createTab/splitPane 은 새 탭 보상,
+   *  closeTab 은 닫은 뒤 남는 activePane 보상. */
   private runNavAction(action: KeyAction): void {
+    // 사이드바 포커스는 dispatch 도 스냅샷도 필요 없다 — 워크스페이스가 하나도
+    // 없을 때가 이 키를 가장 필요로 하는 순간이라 스냅샷 가드보다 앞에 둔다.
+    if (action.type === "focusNewWorkspace") {
+      this.sidebar.focusNewWorkspace();
+      return;
+    }
     const snapshot = this.store.snapshot;
     if (snapshot === null) return;
     if (action.type === "switchWorkspace") {
@@ -189,9 +204,35 @@ class App {
       void this.dispatchUI({ type: "focusPane", pane: target });
       return;
     }
+    if (action.type === "newTab") {
+      // 헤더의 +/▤ 아이콘과 같은 명령 — cwd/path 는 null 로 두고 코어가
+      // 워크스페이스 rootPath 로 해석한다 (pane-view 주석 참조).
+      const tab =
+        action.kind === "terminal"
+          ? ({ type: "terminal", cwd: null } as const)
+          : ({ type: "folderBrowser", path: null } as const);
+      void this.dispatchUI({ type: "createTab", pane: ws.activePane, tab });
+      return;
+    }
+    if (action.type === "splitPane") {
+      // 헤더의 ⊟/◫ 아이콘과 같은 원자 SplitPane (새 pane + 터미널 탭 동시 생성).
+      void this.dispatchUI({
+        type: "splitPane",
+        pane: ws.activePane,
+        direction: action.direction,
+        tab: { type: "terminal", cwd: null },
+      });
+      return;
+    }
     // panes 맵 키는 문자열 숫자 (JSON object 키 제약 — types.ts 참조).
     const pane = ws.panes[String(ws.activePane)];
     if (pane === undefined) return;
+    if (action.type === "closeTab") {
+      // 탭 × 버튼과 같은 명령 — 활성 탭이 없는 빈 pane 은 조용한 no-op.
+      if (pane.activeTab === null) return;
+      void this.dispatchUI({ type: "closeTab", tab: pane.activeTab });
+      return;
+    }
     const target = nextTab(
       pane.tabs.map((t) => t.id),
       pane.activeTab,

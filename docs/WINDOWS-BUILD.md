@@ -614,6 +614,64 @@ pane**, so leaving and returning is a real unmount/remount.
     (e.g. no distro installed), the inline banner must say so loudly and name the fix
     (workspace distro or `WMUX_DISTRO`) — never a silently empty listing.
 
+### Post-checkpoint-2 fixes and keyboard-first UX — re-verification
+
+Checkpoint 2 (2026-08-09) passed except three field defects; the fixes below plus the
+keyboard-first UX batch need one focused re-verification round. Pull, run
+`npm install` (no new runtime deps, but the lockfile moved), delete
+`scripts/wsl/*.sh` and `git checkout -- scripts` once so the new `.gitattributes`
+(`*.sh text eol=lf`) re-materializes them with LF endings, then rebuild.
+
+1. **Hook tty fallback** — rewire the hooks from the updated
+   [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md)
+   (the canonical script now tries `/dev/tty` first and then walks up to 8 ancestor
+   processes for a `/dev/pts/*` fd — the approach you field-tested, formalized). Run a
+   real Claude Code session: running → needsInput → idle must route as before, with no
+   `/dev/tty: No such device or address` in the hook's stderr.
+2. **Markdown polling stops while minimized** — open a markdownViewer tab, minimize the
+   window: `fs_stat` polling must stop within one 2s cycle (verify by appending to the
+   file while minimized — no re-render happens until restore). Restore: polling resumes
+   and the change lands within ~2-4s. Also confirm **no false positives**: dragging the
+   window edge to resize and focusing another window (wmux still visible) must NOT stop
+   polling — the live-preview-while-editing-elsewhere flow depends on it. (The minimize
+   signal is a 0x0-Resized heuristic that cannot be checked on the Linux host.)
+3. **Shell scripts run directly** — `bash scripts/wsl/osc-test.sh` works without the
+   `sed 's/\r$//'` workaround after the re-checkout above.
+4. **Global shortcuts** — `Ctrl+Shift+W` (close active tab, viewer tabs included; on the
+   last empty pane it is a quiet no-op), `Ctrl+Shift+T` (new terminal tab),
+   `Ctrl+Shift+D` (split top/bottom), `Ctrl+Shift+E` (split left/right),
+   `Ctrl+Shift+B` (folder browser tab), `Ctrl+Shift+N` (focus the sidebar's new-workspace
+   name input). Each must act **and** leave nothing in the terminal. These are Chromium
+   accelerator combos (incognito/reopen-tab/bookmarks-bar/bookmark) — WebView2 usually
+   lacks those features, but if any key does nothing at all, record it: the follow-up is
+   `AreBrowserAcceleratorKeysEnabled(false)` or a rebinding.
+5. **Tooltips show shortcuts** — hovering the pane-header buttons (`+`, `▤`, split pair),
+   the tab `×`, and the sidebar's new-workspace button shows the function plus its
+   shortcut (single source: `keys.ts shortcutLabel`).
+6. **Folder browser keyboard navigation** — with the folder list focused: arrows move the
+   selection highlight, `Home`/`End` jump, `PgUp`/`PgDn` move by 10, `Enter` opens the
+   selected row (directory navigates, file opens a viewer), `Backspace` goes to the
+   parent. `Alt+arrows` must still move pane focus (the view only consumes unmodified
+   keys). Verify a mouse click moves the selection too, and that keyboard navigation
+   still works right after opening a directory by mouse.
+7. **Text viewer windows by keyboard** — with the text view focused: `Ctrl+PgUp`/
+   `Ctrl+PgDn` move one 512KiB window, `Ctrl+Home`/`Ctrl+End` jump to the first/last
+   window, plain `PgUp`/`PgDn` page by whole lines (no half-cut top line). Window buttons
+   disable at the ends (first/prev at offset 0, next/last on the last window) and their
+   tooltips name the shortcuts. **Last-line fix**: `Ctrl+End` on a large file must show
+   the file's actual last line (a read-length bug used to make it unreachable).
+8. **Window restore keeps context** — scroll mid-file in a >512KiB file, restart: the
+   same top line is visible **and** you can scroll upward within the window (the window
+   is now centered on the saved offset instead of starting at it).
+9. **Per-tab shell history** — run distinct commands in two terminal tabs, restart the
+   app: each respawned tab's `history` (and up-arrow) shows only its own tab's commands
+   (`~/.wmux/history/tab-<id>` in the distro). Then close a tab normally and restart:
+   report whether its history survived — bash writes `HISTFILE` on exit, and if the kill
+   path skips it we need a `history -a` follow-up.
+10. **Reload-while-minimized edge (known, accept)** — if the WebView reloads while the
+    window is minimized (auto-reset), polling resumes until the next minimize/restore
+    cycle. Accepted narrow window; no action needed unless it bites in practice.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
