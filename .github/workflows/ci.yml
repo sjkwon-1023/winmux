@@ -1,0 +1,113 @@
+# CI (stage 22 — 계획 v2 13장 "처음부터 x64 + ARM64 CI 빌드").
+#
+# 두 job 으로 나눈 이유는 비용이다: gates 는 ubuntu(1x 분 단가)에서 매 push/PR 마다
+# 레포의 게이트 5종 + ARM64 타입 체크를 돌리고, 실제 Windows 릴리스 빌드(x64 +
+# ARM64 아티팩트)는 2x 단가의 windows 러너라 수동 트리거(workflow_dispatch)와 태그
+# 에서만 돈다 — ARM64 실기 테스트(23단계)가 필요할 때 아티팩트를 뽑는 용도다.
+#
+# clippy 를 ubuntu 에서 Windows 두 타깃으로 돌릴 수 있는 근거: check/clippy 는
+# 링크를 하지 않아 MSVC import 라이브러리가 필요 없다 (dev 머신에서 검증된 경로).
+# 단 tauri-build 의 리소스 임베드가 llvm-rc 를 찾으므로 apt llvm 이 필요하다.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      # tauri-build 가 Windows 타깃 check 중 리소스 임베드에 llvm-rc 를 쓴다.
+      - name: Install llvm-rc
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q llvm
+          command -v llvm-rc || sudo ln -s "$(ls /usr/bin/llvm-rc-* | head -1)" /usr/local/bin/llvm-rc
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            apps/wmux/package-lock.json
+            apps/spike/package-lock.json
+
+      - name: Core tests
+        run: cargo test -p wmux-core
+
+      - name: Clippy (x64 Windows target)
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: Clippy (ARM64 Windows target)
+        run: cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
+
+      - name: wmux frontend (build + vitest)
+        working-directory: apps/wmux
+        run: |
+          npm ci
+          npm run build
+          npx vitest run
+
+      - name: spike frontend (build + vitest)
+        working-directory: apps/spike
+        run: |
+          npm ci
+          npm run build
+          npx vitest run
+
+  windows-artifacts:
+    # 2x 단가 러너 — 매 push 가 아니라 수동/태그에서만. ARM64 실기 테스트용
+    # 아티팩트 산출이 목적이다 (23단계).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/wmux/package-lock.json
+
+      - name: Build wmux (release, no bundle)
+        working-directory: apps/wmux
+        run: |
+          npm ci
+          npm run tauri build -- --target ${{ matrix.target }} --no-bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wmux-${{ matrix.target }}
+          # 워크스페이스 루트 target 디렉터리 (레포 루트가 cargo 워크스페이스다).
+          path: target/${{ matrix.target }}/release/wmux-app.exe
+          if-no-files-found: error

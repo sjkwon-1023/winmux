@@ -63,10 +63,17 @@ then distill into ADRs per ADR-0001's docs governance.
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 cargo test -p wmux-core
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
 cargo check --workspace --target x86_64-pc-windows-msvc
 cd apps/spike && npm run build && npx vitest run
 cd apps/wmux && npm run build && npx vitest run
 ```
+
+The ARM64 clippy works on the Linux dev host because check-family commands never link —
+no MSVC import libraries needed (계획 v2 section 13: x64 + ARM64 from day one). CI
+(`.github/workflows/ci.yml`) runs the same gates on every push and builds x64 + ARM64
+release artifacts on `workflow_dispatch` or a `v*` tag (kept off the per-push path —
+Windows runners bill at 2x).
 
 - `src-tauri` cannot compile for the Linux host (no webkit2gtk) — the Windows-target
   check/clippy IS the compile gate for the glue. It needs `llvm-rc` on PATH; the

@@ -699,3 +699,22 @@ ARM64 VM), since this machine cannot execute ARM64 Windows binaries. `crates/wmu
 has no target-specific code (it's checked against `x86_64-pc-windows-msvc` in the WSL-side gate
 per spike-plan.md section 5), so the ARM64-specific risk surface is `portable-pty`'s ConPTY
 backend and Tauri/WebView2, not `wmux-core`.
+
+### CI artifacts (stage 22) and device testing (stage 23)
+
+Since stage 22, `.github/workflows/ci.yml` runs the full gate set (including
+`cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc` — check-family
+commands never link, so this needs no MSVC libraries and also runs on the Linux dev host)
+on every push, and builds **release artifacts for both targets** on a manual
+`workflow_dispatch` (GitHub → Actions → CI → Run workflow) or a `v*` tag: download
+`wmux-aarch64-pc-windows-msvc` from the run's artifacts for the ARM64 device.
+
+Stage 23 (device verification) runs on the ARM64 machine, WSL2 + ARM64 Ubuntu installed:
+1. The artifact runs natively (Task Manager shows no emulation; ARM64 process).
+2. Spike-era regression spot: OSC routing (`osc-test.sh`), IME (한글), flood
+   responsiveness, copy/paste — sections 5–6 spot checks.
+3. Checkpoint-2 spot: one item each from the Stage 17/18/20/21 subsections of §10.
+4. RAM: `scripts/win/measure.ps1 -ProcessName wmux-app` with the 4-pane + viewer
+   composition from checkpoint 2 — same 100–150MB acceptance band.
+5. Claude Code inside ARM64 WSL (and Codex CLI if its Linux ARM64 binary exists — 계획
+   v2 section 13 precheck) with the hook contract wired.
