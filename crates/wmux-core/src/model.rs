@@ -79,6 +79,18 @@ impl AppState {
         id
     }
 
+    /// 앞으로 발급될 안정 ID 를 **변이 없이** 미리 읽는다 (peek). `offset` 은
+    /// 지금부터 몇 번째 발급인지 — 0 이면 다음 [`Self::alloc_id`] 가 돌려줄 값이다.
+    ///
+    /// 스폰이 id 발급보다 먼저 일어나는 spawn-first 원자성(command dispatcher) 때
+    /// 문에, 스폰 요청에 "그 탭이 받게 될 id" 를 실어야 하는 경우가 있다. 호출자는
+    /// 자기 핸들러의 할당 순서를 offset 으로 계산해 쓰고, 실제 발급 직후
+    /// `debug_assert_eq!` 로 peek 값과 일치함을 잠근다 — 할당 순서를 바꾸면 코어
+    /// 테스트가 즉시 터져 이 커플링이 드러난다.
+    pub fn peek_id(&self, offset: u64) -> u64 {
+        self.next_id + offset
+    }
+
     pub fn workspace(&self, id: WorkspaceId) -> Option<&Workspace> {
         self.workspaces.iter().find(|ws| ws.id == id)
     }

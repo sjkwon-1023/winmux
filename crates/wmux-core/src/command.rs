@@ -281,6 +281,12 @@ pub struct ShellSpawnReq {
     pub distro: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    /// 이 셸이 쓸 **탭별 명령 history** 의 키 — 이 세션이 실릴 터미널 탭의 안정
+    /// ID 다 (체크포인트 2 UX 요청). 안정 ID 는 재시작을 넘어 유지되므로 글루가
+    /// 탭마다 다른 HISTFILE 을 물려 주면 재시작 후에도 같은 탭의 history 만
+    /// 복원된다. 코어는 값을 만들어 넘기기만 하고 파일 배치는 글루 몫이다.
+    /// None 이면 셸 기본 history 파일 (히스토리 분리 없음).
+    pub history_tab: Option<u64>,
 }
 
 impl Default for ShellSpawnReq {
@@ -290,6 +296,7 @@ impl Default for ShellSpawnReq {
             distro: None,
             cols: 80,
             rows: 24,
+            history_tab: None,
         }
     }
 }
@@ -551,9 +558,9 @@ impl Dispatcher {
     ///   호출은 프로그램 결함이고, 조용한 no-op 으로 가리지 않는다 (이 경우
     ///   상태·revision 불변).
     /// - 스폰은 cwd = 탭 cwd(없으면 워크스페이스 root_path), distro = 워크스페이스
-    ///   기본값, 80×24 — [`Command::CreateTab`] 과 같은 스폰 경로를 공유한다.
-    ///   탭에 기록된 cwd 는 바꾸지 않는다 (생성 시점 값 보존 — 계획 0장 충실도
-    ///   한계 명시).
+    ///   기본값, 80×24, history_tab = 이 탭의 id — [`Command::CreateTab`] 과 같은
+    ///   스폰 경로를 공유한다. 탭에 기록된 cwd 는 바꾸지 않는다 (생성 시점 값
+    ///   보존 — 계획 0장 충실도 한계 명시).
     /// - 성공 시 `pty_session` 에 새 id 를 채우고, **스폰 실패 시 그 탭을
     ///   `Exited { code: None }` 으로 강등한다** — dispatch 의 "실패 = 상태 불변"
     ///   계약과 달리 강등 자체가 설계된 결과 상태다. 성공·강등 어느 쪽이든
@@ -569,7 +576,9 @@ impl Dispatcher {
             } => cwd.clone(),
             _ => return Err(unknown("respawnable tab", tab.0)),
         };
-        let spawned = self.spawn_terminal(wi, tab_cwd);
+        // 재스폰은 탭 id 가 이미 있으므로 peek 없이 그대로 넘긴다 — 같은 탭이면
+        // 재시작 전후로 같은 HISTFILE 을 다시 물게 되는 것이 이 기능의 요점이다.
+        let spawned = self.spawn_terminal(wi, tab_cwd, tab.0);
         let pane_ref = self.state.workspaces[wi]
             .panes
             .get_mut(&pane)
@@ -613,13 +622,24 @@ impl Dispatcher {
                 // 한 순서) — 실패 시 워크스페이스·pane·next_id·revision 전부
                 // 불변이다. 워크스페이스가 아직 상태에 없으므로 기본값
                 // (root_path·distro)을 직접 넘긴다.
+                //
+                // history_tab: 스폰이 id 발급보다 먼저이므로 이 핸들러의 할당 순서
+                // (workspace → pane → tab)를 반영해 탭이 받게 될 id 를 peek 한다.
+                let history_tab = self.state.peek_id(2);
                 let prepared = match tab {
-                    Some(spec) => Some(self.prepare_tab_with(&root_path, &distro, spec)?),
+                    Some(spec) => {
+                        Some(self.prepare_tab_with(&root_path, &distro, spec, history_tab)?)
+                    }
                     None => None,
                 };
                 let workspace = WorkspaceId(self.state.alloc_id());
                 let pane = PaneId(self.state.alloc_id());
                 let tab_id = prepared.as_ref().map(|_| TabId(self.state.alloc_id()));
+                if let Some(tab_id) = tab_id {
+                    // 할당 순서가 바뀌면 peek 이 어긋난다 — 여기서 즉시 터뜨려
+                    // 커플링을 드러낸다 (peek_id rustdoc).
+                    debug_assert_eq!(tab_id.0, history_tab, "peek 한 탭 id 와 실제 발급 불일치");
+                }
                 let session = prepared.as_ref().and_then(PreparedTab::session);
                 let mut initial = empty_pane(pane);
                 if let (Some(tab_id), Some(prepared)) = (tab_id, prepared) {
@@ -703,13 +723,20 @@ impl Dispatcher {
                 // 검증)를 **모든 상태 변이보다 먼저** 수행한다 (CreateTab 과 동일
                 // 한 순서) — 실패 시 트리·panes·next_id 가 전부 불변이라 분할만
                 // 된 중간 상태가 없다.
+                //
+                // history_tab: 이 핸들러의 할당 순서(pane → split → tab)를 반영해
+                // 탭이 받게 될 id 를 peek 한다 (CreateWorkspace 와 같은 방식).
+                let history_tab = self.state.peek_id(2);
                 let prepared = match tab {
-                    Some(spec) => Some(self.prepare_tab(wi, spec)?),
+                    Some(spec) => Some(self.prepare_tab(wi, spec, history_tab)?),
                     None => None,
                 };
                 let new_pane = PaneId(self.state.alloc_id());
                 let split_id = SplitId(self.state.alloc_id());
                 let tab_id = prepared.as_ref().map(|_| TabId(self.state.alloc_id()));
+                if let Some(tab_id) = tab_id {
+                    debug_assert_eq!(tab_id.0, history_tab, "peek 한 탭 id 와 실제 발급 불일치");
+                }
                 let session = prepared.as_ref().and_then(PreparedTab::session);
                 let ws = &mut self.state.workspaces[wi];
                 let split_ok = ws.layout.split(pane, direction, new_pane, split_id);
@@ -764,9 +791,13 @@ impl Dispatcher {
                 let wi = self.ws_index_of_pane(pane)?;
                 // 원자성: 준비 단계(spawn·경로 검증) 실패 시 상태(탭·next_id)가
                 // 변하지 않도록 준비를 먼저 마친다.
-                let prepared = self.prepare_tab(wi, tab)?;
+                //
+                // history_tab: 이 핸들러는 탭 id 만 발급하므로 peek offset 0.
+                let history_tab = self.state.peek_id(0);
+                let prepared = self.prepare_tab(wi, tab, history_tab)?;
                 let session = prepared.session();
                 let tab_id = TabId(self.state.alloc_id());
+                debug_assert_eq!(tab_id.0, history_tab, "peek 한 탭 id 와 실제 발급 불일치");
                 let pane_ref = self.state.workspaces[wi]
                     .panes
                     .get_mut(&pane)
@@ -878,24 +909,35 @@ impl Dispatcher {
 
     /// 워크스페이스 기본값(root_path·distro)을 적용한 [`Self::prepare_tab_with`]
     /// — 이미 상태에 있는 워크스페이스(CreateTab·SplitPane)용.
-    fn prepare_tab(&self, wi: usize, spec: NewTab) -> Result<PreparedTab, CommandError> {
+    fn prepare_tab(
+        &self,
+        wi: usize,
+        spec: NewTab,
+        history_tab: u64,
+    ) -> Result<PreparedTab, CommandError> {
         let ws = &self.state.workspaces[wi];
-        self.prepare_tab_with(&ws.root_path, &ws.distro, spec)
+        self.prepare_tab_with(&ws.root_path, &ws.distro, spec, history_tab)
     }
 
     /// 탭 생성의 **앞단** — terminal 은 셸 스폰, 뷰어는 경로 기본값 해석 + 형태
     /// 검증. 세 생성 지점(CreateTab·SplitPane·CreateWorkspace)이 공유하며,
     /// 호출자는 **모든 상태 변이 전에** 이걸 마쳐 실패 시 상태 불변을 보장한다
     /// (뷰어는 스폰이 없어도 InvalidPath 로 실패할 수 있다 — 계획 21단계).
+    ///
+    /// `history_tab` 은 이 탭이 **받게 될** 안정 ID 다 — 스폰이 발급보다 먼저라
+    /// 호출자가 [`AppState::peek_id`] 로 미리 읽어 넘긴다 (뷰어 탭은 스폰이 없어
+    /// 쓰지 않는다).
     fn prepare_tab_with(
         &self,
         root_path: &Option<String>,
         distro: &Option<String>,
         spec: NewTab,
+        history_tab: u64,
     ) -> Result<PreparedTab, CommandError> {
         match spec {
             NewTab::Terminal { cwd } => {
-                let (session, cwd) = self.spawn_terminal_with(root_path, distro, cwd)?;
+                let (session, cwd) =
+                    self.spawn_terminal_with(root_path, distro, cwd, history_tab)?;
                 Ok(PreparedTab::Terminal { session, cwd })
             }
             NewTab::FolderBrowser { path } => {
@@ -942,9 +984,10 @@ impl Dispatcher {
         &self,
         wi: usize,
         cwd: Option<String>,
+        history_tab: u64,
     ) -> Result<(SessionId, Option<String>), CommandError> {
         let ws = &self.state.workspaces[wi];
-        self.spawn_terminal_with(&ws.root_path, &ws.distro, cwd)
+        self.spawn_terminal_with(&ws.root_path, &ws.distro, cwd, history_tab)
     }
 
     /// [`Self::spawn_terminal`] 의 기본값 명시 버전 — CreateWorkspace(tab 포함)는
@@ -955,11 +998,13 @@ impl Dispatcher {
         root_path: &Option<String>,
         distro: &Option<String>,
         cwd: Option<String>,
+        history_tab: u64,
     ) -> Result<(SessionId, Option<String>), CommandError> {
         let cwd = cwd.or_else(|| root_path.clone());
         let req = ShellSpawnReq {
             cwd: cwd.clone(),
             distro: distro.clone(),
+            history_tab: Some(history_tab),
             ..ShellSpawnReq::default()
         };
         let session = self
@@ -1819,6 +1864,8 @@ mod tests {
                 distro: Some("Ubuntu".into()),
                 cols: 80,
                 rows: 24,
+                // 워크스페이스(1)·pane(2) 다음 발급이므로 첫 탭은 3.
+                history_tab: Some(3),
             }
         );
         assert_eq!(spawns[1].cwd, Some("/elsewhere".into()));
@@ -1829,6 +1876,55 @@ mod tests {
             panic!("terminal 탭이 아님");
         };
         assert_eq!(cwd.as_deref(), Some("/proj"));
+    }
+
+    /// 탭별 명령 history 계약 (체크포인트 2 UX): 스폰 3경로 전부에서 호스트가
+    /// 받은 `history_tab` 이 **그 스폰으로 생긴 탭의 안정 ID** 와 같아야 한다.
+    /// 스폰이 id 발급보다 먼저라 peek 으로 계산하는 값이므로, 할당 순서가 바뀌면
+    /// 핸들러의 debug_assert 와 이 테스트가 함께 터진다.
+    #[test]
+    fn spawn_carries_history_tab_of_the_created_tab() {
+        let (mut d, host) = dispatcher();
+        // 1) CreateWorkspace(tab 동반) — 발급 순서 workspace → pane → tab.
+        let out = d
+            .dispatch(Command::CreateWorkspace {
+                name: "ws".into(),
+                root_path: None,
+                distro: None,
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap();
+        let CommandOutput::WorkspaceCreated {
+            pane,
+            tab: Some(ws_tab),
+            ..
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+        // 2) CreateTab — 탭 id 만 발급.
+        let (created_tab, _session) = create_terminal_tab(&mut d, pane);
+        // 3) SplitPane(tab 동반) — 발급 순서 pane → split → tab.
+        let out = d
+            .dispatch(Command::SplitPane {
+                pane,
+                direction: SplitDirection::Vertical,
+                tab: Some(NewTab::Terminal { cwd: None }),
+            })
+            .unwrap();
+        let CommandOutput::PaneCreated {
+            tab: Some(split_tab),
+            ..
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+
+        let history: Vec<Option<u64>> = host.spawns().iter().map(|r| r.history_tab).collect();
+        assert_eq!(
+            history,
+            vec![Some(ws_tab.0), Some(created_tab.0), Some(split_tab.0)]
+        );
     }
 
     #[test]
@@ -3026,7 +3122,8 @@ mod tests {
         // 회당 revision += 1 (스냅샷 전파) — adopted revision 3 에서 시작.
         assert_eq!(d.state().revision, 5);
 
-        // 스폰 파라미터: cwd = 탭 cwd(없으면 root_path), distro = ws 기본, 80×24.
+        // 스폰 파라미터: cwd = 탭 cwd(없으면 root_path), distro = ws 기본, 80×24,
+        // history_tab = 재스폰 대상 탭의 id (재시작 전과 같은 history 파일).
         let spawns = host.spawns();
         assert_eq!(
             spawns[0],
@@ -3035,6 +3132,7 @@ mod tests {
                 distro: Some("Ubuntu".into()),
                 cols: 80,
                 rows: 24,
+                history_tab: Some(5),
             }
         );
         assert_eq!(spawns[1].cwd.as_deref(), Some("/custom"));
@@ -3044,6 +3142,17 @@ mod tests {
             panic!("terminal 탭이어야 함");
         };
         assert_eq!(*cwd, None);
+    }
+
+    /// 재스폰은 탭 id 를 그대로 history 키로 쓴다 — 재시작 후에도 같은 탭이 같은
+    /// history 파일을 물게 하는 것이 탭별 history 의 요점이다 (체크포인트 2 UX).
+    #[test]
+    fn respawn_carries_history_tab_of_the_same_tab() {
+        let (mut d, host) = adopted_dispatcher();
+        d.respawn_tab(TabId(5)).unwrap();
+        d.respawn_tab(TabId(6)).unwrap();
+        let history: Vec<Option<u64>> = host.spawns().iter().map(|r| r.history_tab).collect();
+        assert_eq!(history, vec![Some(TabId(5).0), Some(TabId(6).0)]);
     }
 
     #[test]
