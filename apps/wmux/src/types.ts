@@ -43,6 +43,10 @@ export interface Workspace {
   activePane: PaneId;
   agentStatus: AgentStatus;
   lastAgentMessage: string | null;
+  /** agentStatus 를 마지막으로 기록한 탭 (18단계 needsInput 우선 규칙의 주체).
+   *  코어가 `skip_serializing_if = "Option::is_none"` 이라 None 이면 JSON 에서
+   *  키 자체가 빠진다 — 그래서 `| null` 이 아니라 optional 이다 (fixture 무변경). */
+  agentStatusSource?: TabId;
 }
 
 export type AgentStatus = "running" | "needsInput" | "idle";

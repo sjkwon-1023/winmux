@@ -20,8 +20,13 @@
 // FocusPane 대신 대상 확정(resolve) 경로로 분기한다 — 이때만 예외적으로
 // preventDefault + stopPropagation 한다 (제스처가 순수한 대상 지정이므로 xterm
 // 포커스·선택 개입을 막는다). 소스 캡처는 헤더의 ⤷/⤷⏎ 아이콘이 담당한다.
+//
+// 탭바 렌더(18단계 B-7): tabStripPlan 판정대로 skip(DOM 무접촉) / patch(탭 버튼
+// 노드를 유지한 채 제목·dot·클래스만 갱신) / rebuild(멤버십·순서 변화 → 재조립)
+// 셋으로 갈린다 — renderTabStrip 주석 참조. 헤더에는 pane 층 집계 배지(●)가
+// 붙는다 (계획 v2 9장: 탭 → pane → 워크스페이스 3층).
 
-import { tabStripModel } from "./tab-strip-model";
+import { paneUnread, sameTabButton, tabStripModel, tabStripPlan } from "./tab-strip-model";
 import type { TabButtonModel } from "./tab-strip-model";
 import type { TerminalView } from "./terminal-view";
 import type { VisibleView } from "./view-reconcile";
@@ -67,6 +72,23 @@ export interface SendController {
   flashError(message: string): void;
 }
 
+/** 탭 버튼 1개의 DOM 노드 묶음 — in-place 패치 대상. model 은 이 버튼이 지금
+ *  그리고 있는 모델로, 클릭 핸들러가 stale 클로저 대신 여기서 최신 값을 읽는다
+ *  (패치로 active 가 바뀌므로 클로저에 굳으면 활성 탭이 ActivateTab 을 재발행한다). */
+interface TabNodes {
+  root: HTMLElement;
+  title: HTMLSpanElement;
+  dot: HTMLSpanElement;
+  exited: HTMLSpanElement;
+  model: TabButtonModel;
+}
+
+/** 값이 같으면 쓰지 않는 텍스트 대입 — textContent 재대입은 값이 같아도 자식
+ *  텍스트 노드를 갈아치우므로, 무변경 갱신이 DOM 을 흔들지 않게 한다. */
+function setText(el: HTMLElement, text: string): void {
+  if (el.textContent !== text) el.textContent = text;
+}
+
 /** 콘텐츠 placeholder 텍스트 (터미널 뷰가 없는 경우 — 영어 UI 텍스트). */
 function placeholderText(tab: Tab | null): string {
   if (tab === null) return "no tabs — press + to open a new terminal tab";
@@ -88,6 +110,7 @@ export class PaneView {
   readonly root: HTMLDivElement;
   private readonly contentEl: HTMLDivElement;
   private readonly tabStripEl: HTMLDivElement;
+  private readonly unreadEl: HTMLSpanElement;
   private readonly placeholderEl: HTMLDivElement;
   private readonly resizeObserver: ResizeObserver;
   private isActive = false;
@@ -113,6 +136,15 @@ export class PaneView {
 
     this.tabStripEl = document.createElement("div");
     this.tabStripEl.className = "pane-tabs";
+
+    // pane 층 집계 배지 (18단계 B-7) — 값에 따라 있다 없다 하지만 노드는 상주
+    // 시키고 hidden 만 토글한다 (헤더 자식이 들락날락하지 않게).
+    this.unreadEl = document.createElement("span");
+    this.unreadEl.className = "pane-dot";
+    this.unreadEl.textContent = "●";
+    this.unreadEl.title = "Unread notification in this pane";
+    this.unreadEl.hidden = true;
+
     this.root.append(this.buildHeader(), this.contentEl);
 
     this.root.addEventListener(
@@ -163,6 +195,7 @@ export class PaneView {
 
     header.append(
       idLabel,
+      this.unreadEl,
       this.tabStripEl,
       this.iconButton("+", "New terminal tab", () => ({
         type: "createTab",
@@ -276,47 +309,61 @@ export class PaneView {
     }
   }
 
-  /** 직전 렌더의 탭 모델 직렬화 키 — 무변경 시 DOM 재조립을 건너뛰기 위한 캐시. */
-  private lastStripKey = "";
+  /** 직전 렌더의 탭 버튼 모델 (첫 렌더 전 null) — tabStripPlan 의 좌변. */
+  private lastStrip: TabButtonModel[] | null = null;
+  /** 현재 스트립에 붙어 있는 탭 버튼 노드 — tab id 키잉, patch 판정의 대상. */
+  private readonly tabNodes = new Map<TabId, TabNodes>();
 
-  /** 탭 모델이 변했을 때만 strip DOM 을 재조립한다. 클릭 진행 중(mousedown~click
-   *  사이)에 무관 스냅샷 렌더가 눌린 탭 엘리먼트를 갈아치우면 브라우저가 click 을
-   *  발화하지 않아 "비활성 pane 탭은 두 번 클릭해야 먹는" 버그가 된다 (리뷰 high
-   *  finding). FocusPane 스냅샷은 이 pane 의 탭 모델을 바꾸지 않으므로 이 스킵이
-   *  유실 창을 닫는다. */
+  /** 탭바 갱신 (18단계 B-7) — tabStripPlan 판정대로 skip/patch/rebuild.
+   *
+   *  클릭 진행 중(mousedown~click 사이)에 렌더가 눌린 탭 엘리먼트를 갈아치우면
+   *  브라우저가 click 을 발화하지 않아 "비활성 pane 탭은 두 번 클릭해야 먹는"
+   *  버그가 된다 (ADR-0003 결정 7). 12단계의 "모델 직렬화 키가 같으면 스킵" 가드로
+   *  그 창을 닫아 뒀지만, 18단계에서 제목(OSC 0/2)과 unread 가 동적 필드가 되면서
+   *  무관한 알림 하나로도 키가 달라져 가드가 상시로 뚫린다 — 그래서 스킵은 skip
+   *  판정으로만 남기고, 값이 변한 경우의 기본 경로를 in-place 패치로 바꾼다. */
   private renderTabStrip(pane: Pane): void {
     const model = tabStripModel(pane);
-    const key = JSON.stringify(model);
-    if (key === this.lastStripKey) return;
-    this.lastStripKey = key;
-    this.tabStripEl.replaceChildren(...model.map((m) => this.tabButton(m)));
+    const prev = this.lastStrip;
+    const plan = tabStripPlan(prev, model);
+    if (plan === "skip") return;
+    if (plan === "rebuild") {
+      this.tabNodes.clear();
+      const nodes = model.map((m) => this.tabButton(m));
+      for (const n of nodes) this.tabNodes.set(n.model.tab, n);
+      this.tabStripEl.replaceChildren(...nodes.map((n) => n.root));
+    } else {
+      // 멤버십·순서가 같음이 판정으로 보장된다 — 변한 탭만 in-place 갱신.
+      model.forEach((next, i) => {
+        const before = prev?.[i];
+        if (before !== undefined && sameTabButton(before, next)) return;
+        const nodes = this.tabNodes.get(next.tab);
+        if (nodes !== undefined) this.applyTab(nodes, next);
+      });
+    }
+    this.lastStrip = model;
+    // skip 이면 unread 도 불변이라 여기까지 오지 않는다 — 배지도 무접촉.
+    this.unreadEl.hidden = !paneUnread(model);
   }
 
-  private tabButton(model: TabButtonModel): HTMLElement {
+  private tabButton(model: TabButtonModel): TabNodes {
     // 컨테이너는 div — X 가 <button> 이라 버튼 중첩을 피한다.
     const el = document.createElement("div");
     el.className = "tab";
-    if (model.active) el.classList.add("active");
-    if (model.exited) el.classList.add("exited");
-    el.title = model.title; // 잘린 제목의 툴팁
 
     const title = document.createElement("span");
     title.className = "tab-title";
-    title.textContent = model.title;
-    el.append(title);
 
-    if (model.notification) {
-      const dot = document.createElement("span");
-      dot.className = "tab-dot";
-      dot.textContent = "●";
-      el.append(dot);
-    }
-    if (model.exited) {
-      const badge = document.createElement("span");
-      badge.className = "tab-exited";
-      badge.textContent = "exited";
-      el.append(badge);
-    }
+    // dot·exited 배지는 값에 따라 있다 없다 하지만 노드는 항상 만들고 hidden
+    // 으로만 토글한다 — 자식이 들락날락하면 in-place 패치의 의미가 없어진다.
+    const dot = document.createElement("span");
+    dot.className = "tab-dot";
+    dot.textContent = "●";
+    dot.title = "Unread notification";
+
+    const exited = document.createElement("span");
+    exited.className = "tab-exited";
+    exited.textContent = "exited";
 
     const close = document.createElement("button");
     close.type = "button";
@@ -325,12 +372,30 @@ export class PaneView {
     close.title = "Close tab";
     close.addEventListener("click", (ev) => {
       ev.stopPropagation(); // 탭 활성화 클릭과 분리
+      // tab id 는 이 노드의 키라 패치로도 변하지 않는다 — 클로저로 안전하다
+      // (active 처럼 변하는 필드만 nodes.model 에서 다시 읽는다).
       void this.dispatch({ type: "closeTab", tab: model.tab });
     });
-    el.append(close);
 
-    el.addEventListener("click", () => this.onTabClick(model));
-    return el;
+    el.append(title, dot, exited, close);
+
+    const nodes: TabNodes = { root: el, title, dot, exited, model };
+    this.applyTab(nodes, model);
+
+    el.addEventListener("click", () => this.onTabClick(nodes.model));
+    return nodes;
+  }
+
+  /** 탭 모델을 기존 노드에 반영 — 조립 직후와 in-place 패치가 같은 경로를 탄다. */
+  private applyTab(nodes: TabNodes, model: TabButtonModel): void {
+    nodes.model = model;
+    nodes.root.classList.toggle("active", model.active);
+    nodes.root.classList.toggle("exited", model.exited);
+    nodes.root.title = model.title; // 잘린 제목의 툴팁
+
+    setText(nodes.title, model.title);
+    nodes.dot.hidden = !model.notification;
+    nodes.exited.hidden = !model.exited;
   }
 
   /** 탭 클릭 처리. 비활성 pane 의 FocusPane 은 root 의 mousedown capture 가

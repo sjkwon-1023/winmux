@@ -2,9 +2,13 @@
 //
 // Workspace 배열 + activeWorkspace 를 렌더 가능한 카드 모델 배열로 사영한다.
 // DOM 조립(sidebar.ts)과 판정 로직을 분리해 상태 매핑·경로 축약·null 생략을
-// 순수 테스트로 잠근다 (tab-strip-model 과 같은 구도). agentStatus 는 18단계
-// 전까지 코어가 idle 고정값을 주고, gitBranch/gitDirty 는 19단계 전까지 null 이라
-// message·branch 는 당분간 생략 렌더가 기본이다 — 매핑 자체는 지금 잠근다.
+// 순수 테스트로 잠근다 (tab-strip-model 과 같은 구도). 18단계부터 agentStatus·
+// message·unread 는 OSC 라우팅으로 실제 값이 들어오는 동적 필드다 — gitBranch/
+// gitDirty 만 19단계 전까지 null 이라 branch 는 생략 렌더가 기본이다.
+//
+// 여기에 렌더 판정(reconcilePlan)까지 두는 이유: DOM 재조립 여부는 카드 모델의
+// id 멤버십·필드 동일성만으로 결정되는 순수 판정이라, DOM 없는 vitest 로 잠글 수
+// 있어야 한다 (view-reconcile 이 뷰 수명에 대해 하는 일과 같은 구도).
 
 import type { AgentStatus, Workspace, WorkspaceId } from "./types";
 
@@ -17,8 +21,13 @@ export interface WorkspaceCardModel {
   status: AgentStatus;
   /** 상태 아이콘 — running ⚡ / needsInput 🔔 / idle · (계획 v2 6장). */
   statusIcon: string;
-  /** lastAgentMessage 의 첫 줄 — null·공백뿐이면 null (카드에서 생략). */
+  /** lastAgentMessage 의 첫 줄 미리보기 — null·공백뿐이면 null (카드에서 생략). */
   message: string | null;
+  /** 워크스페이스 집계 unread dot — 어느 pane 의 어느 탭이든 미확인 알림이 있으면
+   *  true. agentStatus 와 별개인 이유: 토큰 불일치 777·OSC 9 같은 **상태 중립**
+   *  알림은 agent_status 를 바꾸지 않으므로(18단계 규약), 집계 dot 이 없으면
+   *  백그라운드 워크스페이스에서 그 알림이 어디에도 안 보인다 (3층 중 워크스페이스 층). */
+  unread: boolean;
   /** "main*" 형식 (dirty 면 * 접미) — gitBranch null 이면 null. */
   branch: string | null;
   /** rootPath 축약 (~/ 치환 + 뒤 2세그먼트 유지) — null 이면 null. */
@@ -86,6 +95,7 @@ export function sidebarModel(
       status: ws.agentStatus,
       statusIcon: STATUS_ICONS[ws.agentStatus],
       message: firstLine(ws.lastAgentMessage),
+      unread: panes.some((pane) => pane.tabs.some((tab) => tab.notification === "unread")),
       // gitDirty 는 boolean|null — null(값 미도입, 19단계 전)은 clean 취급.
       branch: ws.gitBranch === null ? null : `${ws.gitBranch}${ws.gitDirty === true ? "*" : ""}`,
       path: abbreviatePath(ws.rootPath),
@@ -95,4 +105,54 @@ export function sidebarModel(
       },
     };
   });
+}
+
+/** 카드 리스트 렌더 판정 (18단계 B-6).
+ *  - `skip`: 모델이 완전히 동일 — DOM 을 건드리지 않는다.
+ *  - `patch`: 카드 id 배열의 멤버십·순서가 같고 필드만 변함 — 기존 카드 노드를
+ *    유지한 채 텍스트·클래스만 갱신한다.
+ *  - `rebuild`: 카드가 추가·삭제·재정렬됨(또는 첫 렌더) — 리스트를 재조립한다. */
+export type CardReconcile = "skip" | "patch" | "rebuild";
+
+/** 카드 모델 1개의 전 필드 동일성 — 이 카드의 DOM 을 건드릴지 판정한다. */
+export function sameCard(a: WorkspaceCardModel, b: WorkspaceCardModel): boolean {
+  return (
+    a.workspace === b.workspace &&
+    a.name === b.name &&
+    a.active === b.active &&
+    a.status === b.status &&
+    a.statusIcon === b.statusIcon &&
+    a.message === b.message &&
+    a.unread === b.unread &&
+    a.branch === b.branch &&
+    a.path === b.path &&
+    a.counts.panes === b.counts.panes &&
+    a.counts.tabs === b.counts.tabs
+  );
+}
+
+/** 직전 렌더 모델(첫 렌더면 null) × 이번 모델 → 렌더 판정. 순수 함수 —
+ *  실행(재조립·패치)은 sidebar.ts 몫이다.
+ *
+ *  판정을 id 멤버십·순서와 필드 동일성으로 쪼개는 것이 이 단계의 핵심이다:
+ *  18단계부터 status·message·unread 가 매 OSC 마다 변하는 동적 필드가 되어
+ *  "모델 전체 직렬화 키가 같을 때만 스킵"하던 기존 가드가 상시로 뚫린다.
+ *  그때 리스트를 통째로 재조립하면 눌린 카드 엘리먼트가 mousedown~click 사이에
+ *  갈아치워져 클릭이 유실된다 (ADR-0003 결정 7 의 탭바 스왈로와 같은 결함). */
+export function reconcilePlan(
+  prev: WorkspaceCardModel[] | null,
+  next: WorkspaceCardModel[],
+): CardReconcile {
+  if (prev === null || prev.length !== next.length) return "rebuild";
+  for (let i = 0; i < next.length; i += 1) {
+    const before = prev[i];
+    const after = next[i];
+    if (before === undefined || after === undefined) return "rebuild";
+    if (before.workspace !== after.workspace) return "rebuild";
+  }
+  const changed = next.some((after, i) => {
+    const before = prev[i];
+    return before === undefined || !sameCard(before, after);
+  });
+  return changed ? "patch" : "skip";
 }

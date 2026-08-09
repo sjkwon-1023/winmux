@@ -1,8 +1,10 @@
-// tab-strip-model 검증 — active·exited·notification 조합과 탭 순서 보존.
+// tab-strip-model 검증 — active·exited·notification 조합과 탭 순서 보존,
+// 그리고 18단계 B-7 의 렌더 판정(tabStripPlan)·pane 배지 판정(paneUnread).
 
 import { describe, expect, it } from "vitest";
 
-import { tabStripModel } from "./tab-strip-model";
+import { paneUnread, sameTabButton, tabStripModel, tabStripPlan } from "./tab-strip-model";
+import type { TabButtonModel } from "./tab-strip-model";
 import type { NotificationState, Pane, Tab, TerminalStatus } from "./types";
 
 function terminalTab(
@@ -87,5 +89,85 @@ describe("tabStripModel", () => {
     expect(tabStripModel(p)).toEqual([
       { tab: 10, title: "tab 10", active: true, exited: true, notification: true },
     ]);
+  });
+});
+
+/** 판정 테스트용 버튼 모델 — 기본은 평범한 비활성 탭. */
+function button(tab: number, over: Partial<TabButtonModel> = {}): TabButtonModel {
+  return {
+    tab,
+    title: `tab ${tab}`,
+    active: false,
+    exited: false,
+    notification: false,
+    ...over,
+  };
+}
+
+describe("tabStripPlan", () => {
+  it("rebuilds on the first render (no previous model)", () => {
+    expect(tabStripPlan(null, [button(10)])).toBe("rebuild");
+  });
+
+  it("skips when every field is identical", () => {
+    const prev = [button(10, { active: true }), button(11)];
+    const next = [button(10, { active: true }), button(11)];
+    expect(tabStripPlan(prev, next)).toBe("skip");
+  });
+
+  it("patches when only a title changes (OSC 0/2 제목 갱신)", () => {
+    const prev = [button(10), button(11)];
+    const next = [button(10), button(11, { title: "claude — wmux" })];
+    expect(tabStripPlan(prev, next)).toBe("patch");
+  });
+
+  it("patches when unread or active flips", () => {
+    const prev = [button(10, { active: true }), button(11)];
+    expect(tabStripPlan(prev, [button(10, { active: true }), button(11, { notification: true })])).toBe(
+      "patch",
+    );
+    expect(tabStripPlan(prev, [button(10), button(11, { active: true })])).toBe("patch");
+    expect(tabStripPlan(prev, [button(10, { active: true, exited: true }), button(11)])).toBe(
+      "patch",
+    );
+  });
+
+  it("rebuilds when a tab is added or removed", () => {
+    const prev = [button(10), button(11)];
+    expect(tabStripPlan(prev, [button(10), button(11), button(12)])).toBe("rebuild");
+    expect(tabStripPlan(prev, [button(10)])).toBe("rebuild");
+  });
+
+  it("rebuilds when the same tabs are reordered", () => {
+    expect(tabStripPlan([button(10), button(11)], [button(11), button(10)])).toBe("rebuild");
+  });
+
+  it("rebuilds when a tab id is swapped in at the same index", () => {
+    // 길이는 같지만 id 가 다르다 — 키잉 대상이 바뀌었으므로 패치 불가.
+    expect(tabStripPlan([button(10), button(11)], [button(10), button(12)])).toBe("rebuild");
+  });
+});
+
+describe("sameTabButton", () => {
+  it("is true only when every rendered field matches", () => {
+    expect(sameTabButton(button(10), button(10))).toBe(true);
+    expect(sameTabButton(button(10), button(10, { title: "x" }))).toBe(false);
+    expect(sameTabButton(button(10), button(10, { active: true }))).toBe(false);
+    expect(sameTabButton(button(10), button(10, { exited: true }))).toBe(false);
+    expect(sameTabButton(button(10), button(10, { notification: true }))).toBe(false);
+  });
+});
+
+describe("paneUnread", () => {
+  it("is false for an empty pane and for all-read tabs", () => {
+    expect(paneUnread([])).toBe(false);
+    expect(paneUnread([button(10, { active: true }), button(11)])).toBe(false);
+  });
+
+  it("is true when any tab is unread, including a hidden one", () => {
+    expect(paneUnread([button(10, { active: true }), button(11, { notification: true })])).toBe(
+      true,
+    );
+    expect(paneUnread([button(10, { active: true, notification: true })])).toBe(true);
   });
 });

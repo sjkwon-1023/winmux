@@ -1,16 +1,22 @@
-// sidebar-model 검증 — 상태 매핑·경로 축약 경계·null 생략·counts 집계.
+// sidebar-model 검증 — 상태 매핑·경로 축약 경계·null 생략·counts 집계·집계 unread,
+// 그리고 렌더 판정(reconcilePlan)의 skip/patch/rebuild 3분기.
 
 import { describe, expect, it } from "vitest";
 
-import { abbreviatePath, hasRunningTerminals, sidebarModel } from "./sidebar-model";
-import type { AgentStatus, Pane, Tab, Workspace } from "./types";
+import {
+  abbreviatePath,
+  hasRunningTerminals,
+  reconcilePlan,
+  sidebarModel,
+} from "./sidebar-model";
+import type { AgentStatus, NotificationState, Pane, Tab, Workspace } from "./types";
 
-function terminalTab(id: number): Tab {
+function terminalTab(id: number, notification: NotificationState = "none"): Tab {
   return {
     id,
     title: `tab ${id}`,
     kind: { type: "terminal", ptySession: id * 100, status: { type: "running" }, cwd: null },
-    notification: "none",
+    notification,
     lastActivityMs: null,
   };
 }
@@ -117,6 +123,38 @@ describe("sidebarModel", () => {
     expect(models.map((m) => m.branch)).toEqual(["main*", "main", "feat/x"]);
   });
 
+  it("aggregates unread across every pane and tab of the workspace", () => {
+    const models = sidebarModel(
+      [
+        // 백그라운드 pane 의 탭 하나만 unread — 상태 중립 알림의 표면화 경로.
+        ws(1, {
+          panes: {
+            "1": pane(1, [terminalTab(10), terminalTab(11)]),
+            "2": pane(2, [terminalTab(12, "unread")]),
+          },
+        }),
+        ws(2, { panes: { "1": pane(1, [terminalTab(20), terminalTab(21)]) } }),
+        ws(3, { panes: { "1": pane(1, []) } }),
+      ],
+      1,
+    );
+    expect(models.map((m) => m.unread)).toEqual([true, false, false]);
+  });
+
+  it("keeps unread independent of agentStatus (idle workspace can still have a dot)", () => {
+    const m = sidebarModel(
+      [
+        ws(1, {
+          agentStatus: "idle",
+          panes: { "1": pane(1, [terminalTab(10, "unread")]) },
+        }),
+      ],
+      1,
+    )[0];
+    expect(m?.status).toBe("idle");
+    expect(m?.unread).toBe(true);
+  });
+
   it("counts panes and sums tabs across panes", () => {
     const m = sidebarModel(
       [
@@ -182,5 +220,43 @@ describe("hasRunningTerminals", () => {
     const exited = terminalTab(12);
     if (exited.kind.type === "terminal") exited.kind.status = { type: "exited", code: 0 };
     expect(hasRunningTerminals(ws(3, { panes: { "1": pane(1, [exited]) } }))).toBe(false);
+  });
+});
+
+describe("reconcilePlan", () => {
+  const three = () => sidebarModel([ws(1), ws(2), ws(3)], 1);
+
+  it("rebuilds on the first render (no previous model)", () => {
+    expect(reconcilePlan(null, three())).toBe("rebuild");
+  });
+
+  it("skips when the model is unchanged", () => {
+    expect(reconcilePlan(three(), three())).toBe("skip");
+  });
+
+  it("patches when only dynamic fields change (status, message, unread)", () => {
+    const next = sidebarModel(
+      [
+        ws(1, { agentStatus: "needsInput", lastAgentMessage: "continue?" }),
+        ws(2, { panes: { "1": pane(1, [terminalTab(10, "unread")]) } }),
+        ws(3),
+      ],
+      1,
+    );
+    expect(reconcilePlan(three(), next)).toBe("patch");
+  });
+
+  it("patches when the active workspace moves between existing cards", () => {
+    expect(reconcilePlan(three(), sidebarModel([ws(1), ws(2), ws(3)], 2))).toBe("patch");
+  });
+
+  it("rebuilds when a card is added or removed", () => {
+    expect(reconcilePlan(three(), sidebarModel([ws(1), ws(2), ws(3), ws(4)], 1))).toBe("rebuild");
+    expect(reconcilePlan(three(), sidebarModel([ws(1), ws(3)], 1))).toBe("rebuild");
+    expect(reconcilePlan(three(), [])).toBe("rebuild");
+  });
+
+  it("rebuilds when the cards are reordered (same membership)", () => {
+    expect(reconcilePlan(three(), sidebarModel([ws(2), ws(1), ws(3)], 1))).toBe("rebuild");
   });
 });

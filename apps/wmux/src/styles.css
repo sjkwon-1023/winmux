@@ -124,6 +124,14 @@ body {
   font-weight: 600;
 }
 
+/* 워크스페이스 집계 unread dot — 안의 어느 탭이든 미확인 알림이 있으면 표시.
+   display 를 지정하지 않아 hidden 속성만으로 감춰진다 (in-place 패치 대상) */
+.ws-card-dot {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 7px;
+}
+
 .ws-card-close {
   flex: 0 0 auto;
   width: 16px;
@@ -456,4 +464,14 @@ body {
   padding: 0 4px;
   align-self: center;
   flex: 0 0 auto;
+}
+
+/* pane 집계 unread 배지 (18단계) — 이 pane 의 어느 탭이든 미확인 알림이 있으면
+   #id 라벨 옆에 뜬다. 탭바가 넘쳐 잘린 탭의 dot 을 pane 층에서 대신 보여주는
+   자리다. display 를 지정하지 않아 hidden 속성만으로 감춰진다 (패치 대상) */
+.pane-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--accent);
+  font-size: 7px;
 }

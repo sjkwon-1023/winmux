@@ -436,6 +436,62 @@ mousedown on a pane delivers.
    shell, the full pasted text always lands **before** the single CR (the command that
    runs is the complete pasted text, never a truncated prefix).
 
+### Stage 18 — OSC notification routing + coalescing + keyed reconcile (계획 v2 section 9; contract in [`docs/plans/mvp-stage18-plan.md`](plans/mvp-stage18-plan.md) and [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md))
+
+OSC 777/9 agent notifications and OSC 0 (alias "2")/7 are now routed into the Rust model
+through a 100ms-trailing-window coalescer (`OscRouter`), surfacing on three layers: the
+tab's unread dot, the pane header's aggregate badge (`●`), and the workspace sidebar card
+(status icon, message preview, aggregate unread dot). The frontend applies snapshot
+updates with keyed in-place reconcile (sidebar cards and tab-strip entries patch by id
+instead of rebuilding the DOM) — this is what guards the ADR-0003 d7 mid-click swallow
+regression once the model fields are dynamic.
+
+1. **Synthetic OSC routing (`osc-test.sh`)** — with a background tab (not the pane's
+   shown terminal, in a non-active workspace), run
+   [`scripts/wsl/osc-test.sh`](../scripts/wsl/osc-test.sh)'s OSC 777 cases (7–8) and OSC 9
+   cases (5–6) against it: the tab gets an unread dot, the pane header's `●` badge lights,
+   and the workspace's sidebar card shows the aggregate unread dot (OSC 9 / a
+   token-mismatched 777 are status-neutral — `agentStatus` on the card must **not**
+   change). Repeat while that tab is the pane's **shown** terminal: no dot appears at all
+   (visible-tab suppression happens at apply time, not just on next activation).
+2. **Real Claude Code + hook 3-tuple** — run Claude Code in a wmux tab with the
+   `UserPromptSubmit`/`Notification`/`Stop` hooks from `claude-hook-example.md` wired up:
+   submitting a prompt shows `running` (no dot), a permission prompt shows `needsInput`
+   with the sidebar preview populated from the hook's message (dot set), and finishing a
+   turn shows `idle` (dot set, preview persists — an empty body never clears the previous
+   message). Activating the tab clears its dot immediately.
+3. **needsInput priority across tabs** — with one tab's session at `needsInput`, trigger
+   `wmux:running` on a **different** tab (e.g. via `osc-test.sh` or another hook run): the
+   workspace's sidebar status stays `needsInput` — only the same tab that raised it
+   (`agentStatusSource`) can demote it, which happens naturally once its own
+   `UserPromptSubmit` fires `running`.
+4. **Click during a live title update (d7 regression guard)** — with a tab emitting OSC
+   0/2 titles on a fast loop (or repeated `osc-test.sh` case 1/2 runs) so the tab strip is
+   patching in place, click that tab repeatedly: activation must land every time, never
+   swallowed by a re-render replacing the clicked element underneath the pointer.
+5. **[conditional] cwd restore across restart** — `cd` to a distinct directory in a tab
+   (letting the `~/.bashrc` `PROMPT_COMMAND` snippet from `claude-hook-example.md` emit
+   OSC 7), quit and restart the app → the respawned shell's `pwd` matches that directory.
+   ConPTY's real-world OSC 7 emission is an **unverified precondition** (plan risk,
+   [`docs/plans/mvp-stage18-plan.md`](plans/mvp-stage18-plan.md) risks section) — if this
+   fails it is **not a stage blocker**: fall back to the reduced scope (title/cwd routing
+   stays landed, only the restart-respawn behavior is unverified) and revisit the
+   file/socket cwd-passing alternative from 계획 v2 section 2 separately; it is independent
+   of the notification path covered by items 1–4 and 6–8.
+6. **OSC flood** — run [`scripts/wsl/flood.sh`](../scripts/wsl/flood.sh) in a tab: the UI
+   stays responsive throughout (coalescing keeps model updates at the 100ms flush cadence
+   regardless of OSC volume — `WMUX_OSC_FLUSH_MS`), the persistence Saver's debounce cadence
+   is undisturbed, and RAM stays stable (no unbounded growth from the flood).
+7. **Closing a needsInput tab returns the sidebar to idle** — with a tab at `needsInput`,
+   close it via **CloseTab**, then repeat and close via **ClosePane** instead: in both
+   cases, if that tab was the workspace's `agentStatusSource`, the sidebar reverts to
+   `idle` with no lingering dot.
+8. **Restart clears notifications and status (sanitize)** — with a tab left at
+   `needsInput`/`idle` with an unread dot and a sidebar preview message, restart the app:
+   every workspace's `agentStatus` is `idle` with no `agentStatusSource` or
+   `lastAgentMessage`, and every tab's `notification` is cleared — same guarantee as the
+   existing `pty_session` reset, extended to the new notification fields.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
