@@ -8,12 +8,12 @@ wmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and cod
 Spike executed and verified on Windows (2026-08-08); **candidate A adopted** — see
 ADR-0001. The paste bug from ADR-0001 "Known issues" is resolved (Windows Terminal
 copy/paste convention; interception list in `apps/spike/src/terminal-tile.ts`).
-MVP stages 10–12 are **implemented**: stage 10 (data model + command dispatcher + stable
-IDs — ADR-0002) and stages 11–12 (split/tab UI: SplitId addressing, atomic
-SplitPane{tab}, splitter drag, keep-alive tab views, CloseTab auto-collapse, self-healing
-detach — see `docs/plans/mvp-stage11-12-plan.md`). Stages close after the Windows manual
-checklists pass (`docs/WINDOWS-BUILD.md` sections 6 and 7); ADR distillation of the
-11–12 decisions follows that verification. Next: stage 13 (workspace sidebar).
+MVP stages 10–12 are **done and Windows-verified** (2026-08-09): stage 10 (data model +
+command dispatcher + stable IDs — ADR-0002) and stages 11–12 (split/tab UI — ADR-0003:
+SplitId addressing, atomic SplitPane{tab}, splitter drag, keep-alive tab views, CloseTab
+auto-collapse, self-healing detach, Ctrl+Shift+R reload). The Windows checklists in
+`docs/WINDOWS-BUILD.md` sections 6–7 stay as regression references. Next: stage 13
+(workspace sidebar), then 14 (teardown latency + reset triggers).
 
 ## Layout
 
@@ -22,7 +22,7 @@ checklists pass (`docs/WINDOWS-BUILD.md` sections 6 and 7); ADR distillation of 
   where unit/integration tests live.
 - `apps/wmux` — the MVP app (계획 v2 section 17, stage 10 onward): Tauri v2 + vanilla TS
   frontend driving the `wmux-core` `Dispatcher` over a single serializable `Command` bus.
-  Module contracts: `docs/plans/mvp-stage10-plan.md`.
+  Architecture: ADR-0002 (state/bus/attach), ADR-0003 (split/tab UI).
 - `apps/spike` — **frozen as the measurement harness** (ADR-0001 reproduction rig):
   feature work stops here, only compiling is maintained going forward. Its checklist and
   scripts keep serving as the MVP-era regression check (`docs/plans/spike-plan.md`

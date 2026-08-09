@@ -97,7 +97,8 @@ wmux-spike`, matching `productName` in `src-tauri/tauri.conf.json`).
 `apps/wmux` is the MVP app (계획 v2 section 17, stage 10 onward) — same Tauri v2 +
 Node/npm toolchain as `apps/spike` above, but its Rust glue drives the `wmux-core`
 `Dispatcher` over the single `Command` bus instead of spike's thin per-call commands.
-Module contracts: [`docs/plans/mvp-stage10-plan.md`](plans/mvp-stage10-plan.md).
+Architecture: [`docs/adr/0002`](adr/0002-stage10-architecture.md) and
+[`docs/adr/0003`](adr/0003-split-tab-ui-architecture.md).
 
 From the repo root on Windows:
 
@@ -185,11 +186,10 @@ Scripts referenced by that checklist:
 
 ## 6. Stage 10 manual verification checklist
 
-Run this against `apps/wmux` (section 3) after chunk C of
-[`docs/plans/mvp-stage10-plan.md`](plans/mvp-stage10-plan.md) lands — it's that plan's
-completion gate for stage 10 (plan section 4), on top of the automated gates in
-`CLAUDE.md`. Anything that fails gets a follow-up commit; stage 10 isn't closed until all
-four pass.
+This was stage 10's completion gate on top of the automated gates in `CLAUDE.md`; it
+**passed on Windows** (decisions distilled into
+[`docs/adr/0002`](adr/0002-stage10-architecture.md)) and remains here as a regression
+checklist for later work on the attach protocol and dispatcher.
 
 1. **Boot** — launching the app auto-creates a workspace and a terminal tab (the
    dispatcher issues `CreateWorkspace` + `CreateTab` from Tauri `setup`, dogfooding the
@@ -225,9 +225,11 @@ four pass.
 
 ## 7. Stage 11–12 manual verification checklist
 
-Run against `apps/wmux` after the stage 11/12 chunks land — this is the completion gate
-for stages 11–12 (`docs/plans/mvp-stage11-12-plan.md` section 2), on top of the automated
-gates. All UI here is mouse-driven; the dev hook is only needed where noted.
+This was stages 11–12's completion gate on top of the automated gates; it **passed on
+Windows 2026-08-09** (decisions distilled into
+[`docs/adr/0003`](adr/0003-split-tab-ui-architecture.md)) and remains here as a
+regression checklist for split/tab UI work. All UI is mouse-driven; the dev hook is only
+needed where noted.
 
 1. **Splits render and nest** — use the pane-header icons to split left/right and
    top/bottom, then split one of the halves again. Layout must match the icon direction

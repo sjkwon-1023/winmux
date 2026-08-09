@@ -86,7 +86,7 @@ impl SessionSink for ChannelSink {
                 // [측정 재현성 각주] 종전 spike 는 send 실패에도 계정을 유지해
                 // webview 소멸 후 "paused 휴면"으로 갔다 — 이제는 "읽고 버림"으로
                 // 거동이 달라지므로 spike-plan §6 측정 재현 시 이 차이를 감안할 것
-                // (mvp-stage10-plan 0-8). 실패 자체는 삼키지 않고 stderr 에 남긴다.
+                // (ADR-0002 시기의 변경). 실패 자체는 삼키지 않고 stderr 에 남긴다.
                 eprintln!(
                     "[wmux-spike] raw output channel send failed (id={}): {err}",
                     self.id
