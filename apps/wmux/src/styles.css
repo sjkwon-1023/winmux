@@ -433,3 +433,12 @@ body {
 .term-host .xterm {
   height: 100%;
 }
+
+/* 진단용 pane id 라벨 (체크포인트 1 버그 3) — 헤더 소속 pane 을 화면에서 판별 */
+.pane-id {
+  font-size: 10px;
+  color: var(--fg-muted);
+  padding: 0 4px;
+  align-self: center;
+  flex: 0 0 auto;
+}

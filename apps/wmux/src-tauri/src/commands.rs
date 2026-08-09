@@ -73,7 +73,7 @@ pub async fn dispatch(
     // 성공한 dispatch 는 실제 사용자 활동이다 (UI·dev 훅 발) — 계획 16단계 C-2.
     // SwitchWorkspace 성공은 추가로 pending 워치독의 "안전한 순간" 신호.
     if result.is_ok() {
-        state.reset.user_input();
+        state.reset.user_input("dispatch");
         if is_workspace_switch {
             state.reset.workspace_switch();
         }
@@ -97,9 +97,16 @@ pub async fn get_state(state: State<'_, AppState>) -> Result<serde_json::Value, 
     .map_err(|err| format!("get_state task join failed: {err}"))
 }
 
-/// 터미널 출력 스트림 접속(재접속). raw body `[u64 LE end_offset][replay bytes]`
-/// 를 돌려주고, 이후 출력은 `on_output` 채널로 `[u64 LE offset][bytes]` 프레임이
-/// 흐른다. Dispatcher lock 불필요 (핫패스).
+/// 터미널 출력 스트림 접속(재접속). raw body
+/// `[u64 LE end_offset][u8 first_attach][replay bytes]` 를 돌려주고, 이후 출력은
+/// `on_output` 채널로 `[u64 LE offset][bytes]` 프레임이 흐른다. Dispatcher lock
+/// 불필요 (핫패스).
+///
+/// `first_attach` (1 = 이 세션의 최초 attach): 프론트가 replay 속 단말 질의에
+/// 대한 xterm 자동 응답을 허용할지 판정한다 — 최초 attach 의 질의는 아직 응답이
+/// 안 간 라이브 질의(억제 시 conhost 가 CPR 대기로 셸이 멈춤), 재-attach 의
+/// 질의는 이미 응답된 낡은 질의(재응답 시 stray `R`)다. `TerminalSink::mark_attached`
+/// rustdoc 참조.
 ///
 /// **순서 불변식**: 채널을 sink 슬롯에 먼저 장착하고 그 다음 `reattach()` —
 /// 순서를 바꾸면 그 사이 출력이 스냅샷에도 채널에도 없는 유실 창이 생긴다
@@ -116,12 +123,14 @@ pub fn attach_terminal(
         .get(session)
         .ok_or_else(|| format!("unknown session id: {session}"))?;
     let handle = self::session(&state, session)?;
+    let first_attach = !sink.mark_attached();
     // 1) 채널 먼저 장착 —
     sink.attach(on_output);
     // 2) — 그 다음 reattach (flow 리셋 + 일관 스냅샷).
     let (end_offset, replay) = handle.reattach();
-    let mut body = Vec::with_capacity(8 + replay.len());
+    let mut body = Vec::with_capacity(9 + replay.len());
     body.extend_from_slice(&end_offset.to_le_bytes());
+    body.push(u8::from(first_attach));
     body.extend_from_slice(&replay);
     Ok(Response::new(body))
 }
@@ -217,7 +226,7 @@ pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
         // visible=true 동기화는 idle 을 재무장해 30초 주기 재발화 루프가 된다.
         // 최소화 클릭 같은 실제 제스처는 그 직전의 mousedown 핑이 이미 잡는다.
         Some(visible) => state.reset.visibility(visible),
-        None => state.reset.user_input(),
+        None => state.reset.user_input("ping"),
     }
 }
 

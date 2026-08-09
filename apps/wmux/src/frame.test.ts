@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { FRAME_HEADER_BYTES, parseFrame } from "./frame";
+import { FRAME_HEADER_BYTES, parseAttachBody, parseFrame } from "./frame";
 
 /** offset 헤더 + body 로 프레임 바이트열을 만든다. */
 function buildFrame(offset: bigint, body: number[]): Uint8Array {
@@ -69,5 +69,27 @@ describe("parseFrame", () => {
   it("rejects offsets beyond Number.MAX_SAFE_INTEGER", () => {
     const beyond = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
     expect(() => parseFrame(buildFrame(beyond, [1]))).toThrow(/MAX_SAFE_INTEGER/);
+  });
+});
+
+describe("parseAttachBody", () => {
+  function body(endOffset: number, first: boolean, replay: number[]): Uint8Array {
+    const out = new Uint8Array(9 + replay.length);
+    new DataView(out.buffer).setBigUint64(0, BigInt(endOffset), true);
+    out[8] = first ? 1 : 0;
+    out.set(replay, 9);
+    return out;
+  }
+
+  it("parses end offset, first-attach flag and replay bytes", () => {
+    const parsed = parseAttachBody(body(1234, true, [27, 91, 54, 110]));
+    expect(parsed.endOffset).toBe(1234);
+    expect(parsed.firstAttach).toBe(true);
+    expect(Array.from(parsed.replay)).toEqual([27, 91, 54, 110]);
+    expect(parseAttachBody(body(0, false, [])).firstAttach).toBe(false);
+  });
+
+  it("rejects short bodies", () => {
+    expect(() => parseAttachBody(new Uint8Array(8))).toThrow(/too short/);
   });
 });

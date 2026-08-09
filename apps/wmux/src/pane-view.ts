@@ -81,6 +81,9 @@ export class PaneView {
   ) {
     this.root = document.createElement("div");
     this.root.className = "pane";
+    // 진단 (체크포인트 1 버그 3): DOM 상 어느 슬롯에 어느 pane 의 뷰가 앉았는지
+    // devtools·rebuild 로그에서 즉시 판별할 수 있게 id 를 데이터 속성으로 남긴다.
+    this.root.dataset.paneId = String(paneId);
 
     this.contentEl = document.createElement("div");
     this.contentEl.className = "pane-content";
@@ -123,7 +126,14 @@ export class PaneView {
     const browser = this.iconButton("◎", "Browser tab (v2)", null);
     browser.disabled = true;
 
+    // 진단 (체크포인트 1 버그 3): 헤더가 어느 pane 소속인지 화면에서 바로 보이게
+    // id 를 표시한다 — "클릭한 헤더 ≠ 의도한 pane" 재현 시 즉시 판별된다.
+    const idLabel = document.createElement("span");
+    idLabel.className = "pane-id";
+    idLabel.textContent = `#${this.paneId}`;
+
     header.append(
+      idLabel,
       this.tabStripEl,
       this.iconButton("+", "New terminal tab", () => ({
         type: "createTab",

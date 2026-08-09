@@ -176,33 +176,40 @@ impl ResetSupervisor {
         Self { shared }
     }
 
-    /// 실제 사용자 입력 신호 — write_stdin·send_raw·dispatch 성공·activity 핑.
-    /// attach/resize/ack 은 부르지 않는다 (리셋 후 자동 동작의 자기루프 차단 —
-    /// 계획 0장).
-    pub fn user_input(&self) {
+    /// 실제 사용자 입력 신호 — dispatch 성공·activity 핑. attach/resize/ack/
+    /// stdin 은 부르지 않는다 (리셋 후 자동 동작·단말 자동 응답의 자기루프 차단).
+    /// `source` 는 진단 로그용 출처 태그 — 체크포인트 1 에서 idle 이 무입력에도
+    /// 재발화한 원인을 실기에서 판별하기 위해, 재무장 순간을 출처와 함께
+    /// stderr 에 남긴다 (dispatch 는 클릭당·핑은 10초당 1회라 저빈도).
+    pub fn user_input(&self, source: &'static str) {
         let now = self.shared.now_ms();
         let mut g = self.shared.guarded.lock().unwrap();
         g.policy.on_user_input(now);
         g.last_input_at = now;
         drop(g);
+        eprintln!("[wmux] reset: activity source={source} (idle/hidden re-armed)");
         self.shared.cond.notify_all();
     }
 
-    /// 창 포커스 변화 (`WindowEvent::Focused`).
+    /// 창 포커스 변화 (`WindowEvent::Focused`) — hidden OR 판정 신호.
     pub fn focus(&self, focused: bool) {
         let now = self.shared.now_ms();
         let mut g = self.shared.guarded.lock().unwrap();
         g.policy.on_focus(focused, now);
         drop(g);
+        // 진단: 실기에서 최소화·포커스아웃 시 어떤 신호가 실제로 도착하는지 판별.
+        eprintln!("[wmux] reset: signal focused={focused}");
         self.shared.cond.notify_all();
     }
 
-    /// 프론트 visibility 보조 신호 (`document.visibilitychange` → user_activity).
+    /// 프론트 visibility 보조 신호 (`document.visibilitychange` → user_activity)
+    /// — hidden OR 판정 신호.
     pub fn visibility(&self, visible: bool) {
         let now = self.shared.now_ms();
         let mut g = self.shared.guarded.lock().unwrap();
         g.policy.on_visibility(visible, now);
         drop(g);
+        eprintln!("[wmux] reset: signal visible={visible}");
         self.shared.cond.notify_all();
     }
 

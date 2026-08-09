@@ -40,7 +40,7 @@ import { AttachGate } from "./attach-gate";
 import type { GateResult } from "./attach-gate";
 import { ackOutput, attachTerminal, detachTerminal, resizeTerminal, writeStdin } from "./backend";
 import type { OutputChunk } from "./backend";
-import { parseFrame } from "./frame";
+import { parseAttachBody, parseFrame } from "./frame";
 import type { SessionId } from "./types";
 
 export class TerminalView {
@@ -149,10 +149,15 @@ export class TerminalView {
       writeStdin(this.session, data).catch((err) => console.error("write_stdin failed", err));
     });
 
-    // 2) attach → raw body [u64 LE end_offset][replay bytes] 파싱.
+    // 2) attach → raw body [u64 LE end_offset][u8 first_attach][replay] 파싱.
     const body = await attachTerminal(this.session, channel);
     if (this.disposed) return; // attach 중 뷰가 해제됐으면 여기서 끝 (세션은 유지)
-    const { offset: endOffset, bytes: replay } = parseFrame(body);
+    const { endOffset, firstAttach, replay } = parseAttachBody(body);
+    // 최초 attach 의 replay 질의는 라이브 질의 — 응답을 억제하면 conhost 가 CPR
+    // 을 기다리며 셸이 멈춘다 (체크포인트 1 재시작 빈 화면: bytes_out=4 =
+    // ESC[6n 만 출력된 채 정지, ESC[1;1R 수동 주입으로 해소된 실기 증거).
+    // 재-attach 의 질의만 낡은 것이므로 그때만 replayDone 게이트로 억제한다.
+    if (firstAttach) this.replayDone = true;
     const traceDone = this.onTraceReplayDone;
     if (replay.byteLength > 0) {
       const bytes = replay.byteLength;

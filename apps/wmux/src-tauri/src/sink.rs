@@ -69,6 +69,13 @@ pub struct TerminalSink {
     /// 프론트 출력 채널 슬롯. attach 시 장착되고, send 실패(webview 소멸 등)
     /// 시 해제된다 — 이후 출력은 Dropped(detach 모드)로 흐른다.
     channel: Mutex<Option<Channel<InvokeResponseBody>>>,
+    /// 이 세션에 채널이 장착된 적이 있는가 — attach_terminal 이 "최초 attach"
+    /// 판정에 쓴다. 최초 attach 의 replay 에 담긴 단말 질의(ConPTY 의 ESC[6n 등)
+    /// 는 아직 아무도 응답하지 않은 **라이브 질의**라 xterm 이 응답해야 하고
+    /// (미응답 시 conhost 가 CPR 을 기다리며 셸이 멈춘다 — 체크포인트 1 재시작
+    /// 빈 화면 버그), 재-attach 의 replay 질의는 이전 프론트가 이미 응답한 낡은
+    /// 질의라 응답을 억제해야 한다 (stray `R` 버그).
+    attached_once: std::sync::atomic::AtomicBool,
 }
 
 impl TerminalSink {
@@ -77,7 +84,14 @@ impl TerminalSink {
             session,
             app,
             channel: Mutex::new(None),
+            attached_once: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// attach 이력을 기록하고 **이전 값**(이미 attach 된 적 있었는지)을 돌려준다.
+    pub fn mark_attached(&self) -> bool {
+        self.attached_once
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 새 출력 채널을 슬롯에 장착한다 (기존 채널은 대체·폐기).
