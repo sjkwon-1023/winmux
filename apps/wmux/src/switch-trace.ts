@@ -51,6 +51,8 @@ interface TabTrace {
 
 interface ActiveTrace {
   workspace: WorkspaceId;
+  /** begin 발급 토큰 — discard 가 자기 trace 만 폐기하게 하는 식별자. */
+  seq: number;
   t0: number;
   snapshotAt: number | null;
   /** 전환 스냅샷 렌더가 끝났다 — 이후 새 attach 는 받지 않고 완주만 기다린다. */
@@ -60,6 +62,7 @@ interface ActiveTrace {
 
 export class SwitchTracer {
   private trace: ActiveTrace | null = null;
+  private seq = 0;
 
   constructor(private readonly onReport: (report: SwitchReport) => void) {}
 
@@ -68,15 +71,27 @@ export class SwitchTracer {
     return this.trace !== null;
   }
 
-  /** 전환 계측 시작 — t0 은 switchWorkspace dispatch 시각. 미완 trace 는 폐기. */
-  begin(workspace: WorkspaceId, t0: number): void {
-    this.trace = { workspace, t0, snapshotAt: null, sealed: false, tabs: new Map() };
+  /** 전환 계측 시작 — t0 은 switchWorkspace dispatch 시각. 미완 trace 는 폐기.
+   *  반환 토큰을 discard 에 넘긴다 — 워크스페이스 id 기반 폐기는 같은 워크스페이스
+   *  연타에서 뒤의 유효 trace 를 앞 dispatch 실패가 죽이는 구멍이 있었다
+   *  (리뷰 finding). */
+  begin(workspace: WorkspaceId, t0: number): number {
+    this.seq += 1;
+    this.trace = {
+      workspace,
+      seq: this.seq,
+      t0,
+      snapshotAt: null,
+      sealed: false,
+      tabs: new Map(),
+    };
+    return this.seq;
   }
 
-  /** 해당 워크스페이스 대상 trace 폐기 — dispatch 실패 시 호출한다. 그새 다른
-   *  전환의 begin 이 덮어썼으면 그쪽 trace 는 건드리지 않는다. */
-  discard(workspace: WorkspaceId): void {
-    if (this.trace !== null && this.trace.workspace === workspace) this.trace = null;
+  /** 토큰의 trace 폐기 — dispatch 실패 시 호출한다. 그새 다른 begin 이 덮어썼으면
+   *  (토큰 불일치) 그쪽 trace 는 건드리지 않는다. */
+  discard(token: number): void {
+    if (this.trace !== null && this.trace.seq === token) this.trace = null;
   }
 
   /** 전환 스냅샷 렌더 도착 시각. 활성 워크스페이스가 trace 대상과 다른 렌더는

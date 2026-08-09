@@ -79,6 +79,20 @@ export function getStats(): Promise<SessionStats[]> {
   return invoke<SessionStats[]>("get_stats");
 }
 
+/** 활동 핑 (16단계 C-3) — throttled 사용자 입력 신호. `visible` 은
+ *  visibilitychange 보조 신호(즉시), 순수 활동 핑은 null. 백엔드 자동 리셋
+ *  정책의 idle·hidden 타이머를 재무장한다. */
+export function userActivity(visible: boolean | null): Promise<void> {
+  return invoke<void>("user_activity", { visible });
+}
+
+/** 수동 WebView 리셋 — dev 훅(window.__wmux.resetUi) 전용, UI 버튼 금지
+ *  (계획 v2 12장). 백엔드가 WebView 를 reload 한다 — location.reload() 와 달리
+ *  자동 리셋과 같은 경로(perform_reset)를 검증할 수 있다. */
+export function resetUi(): Promise<void> {
+  return invoke<void>("reset_ui");
+}
+
 /** state-changed 구독 헬퍼 — 변이마다 전체 스냅샷(revision 포함)이 온다.
  *  stale 판정(revision 가드)은 store 몫이다. */
 export function onStateChanged(

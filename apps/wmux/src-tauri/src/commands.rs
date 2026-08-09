@@ -52,11 +52,13 @@ pub async fn dispatch(
     state: State<'_, AppState>,
     cmd: Command,
 ) -> Result<CommandOutput, CommandError> {
+    // 활동 신호용 판별 — cmd 는 아래 클로저로 move 되므로 먼저 본다.
+    let is_workspace_switch = matches!(cmd, Command::SwitchWorkspace { .. });
     // 전체를 spawn_blocking 에서: CreateTab 의 셸 스폰(프로세스 생성 — 수십 ms
     // 블로킹)이 Dispatcher lock 아래에서 일어난다 (계획 0-3 — 핫패스와 무간섭
     // 이라 수용). 메인(이벤트 루프) 스레드는 잡지 않는다.
     let dispatcher = Arc::clone(&state.dispatcher);
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let mut d = dispatcher.lock().unwrap();
         let out = d.dispatch(cmd)?;
         // emit + 저장 예약은 lock 안에서 — revision 과 상태가 일관된 스냅샷만
@@ -67,7 +69,16 @@ pub async fn dispatch(
     .await
     // join 실패 = 위 클로저의 패닉(락 poison 등 프로그램 결함) — 가려서 ok 로
     // 만들지 않고 그대로 크게 터뜨린다.
-    .expect("dispatch task panicked")
+    .expect("dispatch task panicked");
+    // 성공한 dispatch 는 실제 사용자 활동이다 (UI·dev 훅 발) — 계획 16단계 C-2.
+    // SwitchWorkspace 성공은 추가로 pending 워치독의 "안전한 순간" 신호.
+    if result.is_ok() {
+        state.reset.user_input();
+        if is_workspace_switch {
+            state.reset.workspace_switch();
+        }
+    }
+    result
 }
 
 /// 현재 상태 스냅샷 (`{ revision, state }`) — 부팅·재동기화용.
@@ -145,7 +156,10 @@ pub async fn write_stdin(
     tauri::async_runtime::spawn_blocking(move || session.write(data.as_bytes()))
         .await
         .map_err(|err| format!("write task join failed (id={id}): {err}"))?
-        .map_err(|err| format!("write_stdin failed (id={id}): {err:#}"))
+        .map_err(|err| format!("write_stdin failed (id={id}): {err:#}"))?;
+    // 성공한 stdin 기록 = 실제 사용자 입력 (자동 리셋 활동 신호 — 계획 C-2).
+    state.reset.user_input();
+    Ok(())
 }
 
 #[tauri::command]
@@ -158,7 +172,10 @@ pub async fn send_raw(
     tauri::async_runtime::spawn_blocking(move || session.write(&bytes))
         .await
         .map_err(|err| format!("write task join failed (id={id}): {err}"))?
-        .map_err(|err| format!("send_raw failed (id={id}): {err:#}"))
+        .map_err(|err| format!("send_raw failed (id={id}): {err:#}"))?;
+    // write_stdin 과 동일 — 성공한 raw 전송도 실제 사용자 입력이다.
+    state.reset.user_input();
+    Ok(())
 }
 
 #[tauri::command]
@@ -183,6 +200,29 @@ pub fn ack_output(state: State<'_, AppState>, id: SessionId, n: usize) -> Result
     let session = session(&state, id)?;
     session.ack(n);
     Ok(())
+}
+
+/// 프론트 활동 핑 (계획 16단계 C-2/C-3) — throttled 사용자 입력 신호
+/// (wheel/mousedown/keydown, 10초당 1회) + `document.visibilitychange` 보조 신호.
+/// `visible` 이 Some 이면 visibility 전이도 함께 반영한다. 순수 열람(스크롤백
+/// wheel)도 여기로 잡혀 "활성 사용 중 절대 리셋 금지"가 성립한다 (계획 0장).
+#[tauri::command]
+pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
+    // visibility 먼저 — 같은 now 로 이어지는 user_input 이 새 숨김 구간 기준으로
+    // 재무장하게 한다 (같은 틱이라 순서는 로그 가독성 문제일 뿐 의미론 동일).
+    if let Some(visible) = visible {
+        state.reset.visibility(visible);
+    }
+    state.reset.user_input();
+}
+
+/// 수동 WebView 리셋 — **dev 훅(`window.__wmux.resetUi`)·향후 MCP 전용이며 UI
+/// 버튼으로 노출하지 않는다** (계획 v2 12장 원칙). 코어 Command bus 는 구조 변이
+/// 전용(ADR-0002)이고 리셋은 상태 무변이·Tauri 의존 동작이라 글루 커맨드로 둔다
+/// (계획 0장의 의도적 이탈 — ADR 증류 시 기록).
+#[tauri::command]
+pub fn reset_ui(state: State<'_, AppState>) {
+    state.reset.reset_now();
 }
 
 #[tauri::command]

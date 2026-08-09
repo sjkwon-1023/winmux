@@ -104,12 +104,21 @@ describe("SwitchTracer", () => {
     expect(reports[0]?.perTab).toEqual([{ tab: 1, attachMs: 19, replayBytes: 7 }]);
   });
 
-  it("discard(workspace) drops only the matching trace", () => {
-    const { reports, tracer } = setup();
-    tracer.begin(4, 0);
-    tracer.discard(3); // 다른 워크스페이스 대상 — 유지
+
+  it("a stale token cannot kill a newer trace for the same workspace", () => {
+    const { tracer } = setup();
+    const first = tracer.begin(4, 0);
+    tracer.begin(4, 50); // 같은 워크스페이스 연타 — 새 trace 가 덮는다
+    tracer.discard(first); // 앞 dispatch 실패의 늦은 폐기 — 뒤 trace 는 유지돼야 한다
     expect(tracer.tracing).toBe(true);
-    tracer.discard(4); // dispatch 실패 경로 — 폐기
+  });
+
+  it("discard(token) drops only the matching trace", () => {
+    const { reports, tracer } = setup();
+    const token = tracer.begin(4, 0);
+    tracer.discard(token + 1); // 다른 토큰 — 유지
+    expect(tracer.tracing).toBe(true);
+    tracer.discard(token); // dispatch 실패 경로 — 폐기
     expect(tracer.tracing).toBe(false);
     tracer.markSnapshot(4, 10);
     tracer.settle();

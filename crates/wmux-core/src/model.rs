@@ -131,6 +131,9 @@ impl Workspace {
         if split_list.len() != split_set.len() {
             return Err(format!("workspace {:?}: layout 에 중복 split id", self.id));
         }
+        self.layout
+            .validate_ratios()
+            .map_err(|e| format!("workspace {:?}: {e}", self.id))?;
         let key_set: std::collections::BTreeSet<PaneId> = self.panes.keys().copied().collect();
         if leaf_set != key_set {
             return Err(format!(
@@ -310,6 +313,28 @@ impl SplitTree {
         }
     }
 
+    /// ratio 가 finite·개구간 (0,1) 인지 재귀 검증한다 — persistence 복원 경로용.
+    /// 커맨드 경로는 ResizeSplit 검증이 막지만, JSON 은 5.0·음수 같은 범위 밖
+    /// 값을 실을 수 있어 디스크 입력에는 별도 검증이 필요하다 (14~15 리뷰 finding).
+    pub fn validate_ratios(&self) -> Result<(), String> {
+        match self {
+            SplitTree::Leaf { .. } => Ok(()),
+            SplitTree::Split {
+                id,
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                if !ratio.is_finite() || *ratio <= 0.0 || *ratio >= 1.0 {
+                    return Err(format!("split {id:?} ratio {ratio} 가 개구간 (0,1) 밖"));
+                }
+                first.validate_ratios()?;
+                second.validate_ratios()
+            }
+        }
+    }
+
     /// split 노드 id 들을 전위(pre-order) 순으로 나열한다 (불변식 검사용).
     pub fn split_ids(&self) -> Vec<SplitId> {
         let mut out = Vec::new();
@@ -405,6 +430,23 @@ mod tests {
 
     fn leaf(id: u64) -> SplitTree {
         SplitTree::Leaf { pane: PaneId(id) }
+    }
+
+    #[test]
+    fn validate_ratios_rejects_out_of_range() {
+        let mut tree = SplitTree::Split {
+            id: SplitId(9),
+            direction: SplitDirection::Horizontal,
+            ratio: 5.0,
+            first: Box::new(leaf(1)),
+            second: Box::new(leaf(2)),
+        };
+        assert!(tree.validate_ratios().is_err());
+        if let SplitTree::Split { ratio, .. } = &mut tree {
+            *ratio = 0.5;
+        }
+        assert!(tree.validate_ratios().is_ok());
+        assert!(leaf(1).validate_ratios().is_ok());
     }
 
     fn split(id: u64, direction: SplitDirection, first: SplitTree, second: SplitTree) -> SplitTree {

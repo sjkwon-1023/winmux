@@ -81,6 +81,7 @@ pub enum FreshReason {
 /// 존재 확인) → sanitize (모듈 rustdoc 참조). 구조 검증 실패는 손상(Corrupt)으로
 /// 취급한다.
 pub fn load(path: &Path) -> LoadOutcome {
+    sweep_stale_tmp(path);
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -157,8 +158,50 @@ fn backup_corrupt(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// 앱 수준 구조 검증 — 각 워크스페이스의 불변식 + `active_workspace` 존재.
+/// 이전 크래시 런이 남긴 stale tmp(`<파일명>.tmp-<다른 pid>`)를 best-effort 로
+/// 청소한다 — pid 가 런마다 달라 저절로 누적되기 때문 (리뷰 finding). 삭제 실패는
+/// 무시한다 (진단 증거보다 누적 방지가 목적이고, 다음 부팅이 재시도한다).
+fn sweep_stale_tmp(path: &Path) {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    let prefix = format!("{name}.tmp-");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        if entry_name.to_str().is_some_and(|n| n.starts_with(&prefix)) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// 앱 수준 구조 검증 — 각 워크스페이스의 불변식 + `active_workspace` 존재 +
+/// **안정 id 전역 유일성**. id 는 단일 카운터 발급이라 종류 불문 전역에서 겹칠 수
+/// 없다 — 디스크는 신뢰 경계(수기 편집·손상)이므로 중복을 통과시키면 by-id
+/// dispatch 의 표적(`locate_*` 첫 매치)이 모호해진다 (14~15 리뷰 finding).
 fn validate_app(state: &AppState) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut claim = |id: u64, what: &str| -> Result<(), String> {
+        if !seen.insert(id) {
+            return Err(format!("stable id {id} 가 전역에서 중복 ({what})"));
+        }
+        Ok(())
+    };
+    for ws in &state.workspaces {
+        claim(ws.id.0, "workspace")?;
+        for split_id in ws.layout.split_ids() {
+            claim(split_id.0, "split")?;
+        }
+        for (pane_id, pane) in &ws.panes {
+            claim(pane_id.0, "pane")?;
+            for tab in &pane.tabs {
+                claim(tab.id.0, "tab")?;
+            }
+        }
+    }
     for ws in &state.workspaces {
         ws.validate()?;
     }
@@ -219,8 +262,9 @@ fn max_used_id(state: &AppState) -> u64 {
 /// tmp 를 같은 디렉터리에 두는 이유: Windows 의 rename 원자성(기존 파일 교체 포함)
 /// 은 **동일 볼륨** 전제라, 시스템 temp 디렉터리를 쓰면 볼륨 경계를 넘는 복사로
 /// 강등되어 부분 쓰기가 관측될 수 있다. 부모 디렉터리가 없으면 만든다. 실패 시
-/// tmp 파일은 진단 증거로 남을 수 있다 (다음 성공 저장과 무관 — 파일명이 pid 로
-/// 고정이라 누적되지 않는다).
+/// tmp 파일은 진단 증거로 남을 수 있다 — 같은 프로세스 안에서는 파일명이 pid 로
+/// 고정이라 누적되지 않지만, **크래시 런마다 pid 가 달라 stale tmp 가 쌓일 수
+/// 있으므로** 다음 부팅의 [`load`] 가 best-effort 로 청소한다 (리뷰 finding).
 pub fn save_atomic(path: &Path, state: &AppState) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -462,6 +506,49 @@ mod tests {
                     .is_some_and(|n| n.contains(".corrupt-"))
             })
             .collect()
+    }
+
+    #[test]
+    fn duplicate_stable_ids_are_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let mut state = sample_state(None, 9);
+        // 두 번째 워크스페이스가 첫 번째와 id 전부를 공유 — 전역 유일성 위반.
+        let dup = state.workspaces[0].clone();
+        state.workspaces.push(dup);
+        save_atomic(&path, &state).unwrap();
+        match load(&path) {
+            LoadOutcome::Fresh(FreshReason::Corrupt { .. }) => {}
+            other => panic!("전역 id 중복은 Corrupt 여야 함: {other:?}"),
+        }
+        assert_eq!(corrupt_backups(&dir).len(), 1);
+    }
+
+    #[test]
+    fn out_of_range_ratio_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let mut state = sample_state(None, 9);
+        if let SplitTree::Split { ratio, .. } = &mut state.workspaces[0].layout {
+            *ratio = 5.0;
+        }
+        save_atomic(&path, &state).unwrap();
+        match load(&path) {
+            LoadOutcome::Fresh(FreshReason::Corrupt { .. }) => {}
+            other => panic!("범위 밖 ratio 는 Corrupt 여야 함: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_sweeps_stale_tmp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        save_atomic(&path, &sample_state(None, 7)).unwrap();
+        // 크래시 런이 남긴 다른 pid 의 stale tmp 를 흉내낸다.
+        let stale = dir.path().join("state.json.tmp-99999");
+        fs::write(&stale, b"partial").unwrap();
+        assert!(matches!(load(&path), LoadOutcome::Restored { .. }));
+        assert!(!stale.exists(), "load 가 stale tmp 를 청소해야 함");
     }
 
     #[test]

@@ -22,6 +22,7 @@ use wmux_core::command::Dispatcher;
 use wmux_core::persist::Saver;
 use wmux_core::session::{SessionId, SessionManager};
 
+use crate::reset_supervisor::ResetSupervisor;
 use crate::sink::TerminalSink;
 
 /// 세션별 출력 sink 레지스트리 — `attach_terminal` 이 채널을 장착할 대상을
@@ -58,6 +59,9 @@ pub struct AppState {
     /// debounce 저장기 (계획 15단계 B) — [`publish_state`] 가 emit 후 최신 상태를
     /// schedule 한다. `Arc` 는 setup(생성 시점)과 관리 상태가 공유하기 위함.
     pub saver: Arc<Saver>,
+    /// 자동 UI 리셋 supervisor (계획 16단계 C-2) — 커맨드의 활동 신호와 창
+    /// 이벤트(Focused)가 여기로 모인다. 내부가 Arc 공유라 별도 Arc 불필요.
+    pub reset: ResetSupervisor,
 }
 
 /// 현재 스냅샷을 `state-changed` 이벤트로 emit 하고 저장을 예약한다 (emit +

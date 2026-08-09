@@ -10,4 +10,5 @@ pub mod model;
 pub mod osc;
 pub mod persist;
 pub mod replay;
+pub mod reset;
 pub mod session;

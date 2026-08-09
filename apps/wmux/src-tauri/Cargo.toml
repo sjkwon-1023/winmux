@@ -15,3 +15,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 wmux-core = { path = "../../../crates/wmux-core" }
+
+# 메모리 워치독 (계획 16단계 C-2) — Toolhelp 자손 스캔 + PrivateUsage 조회.
+# 직접 의존 + features 명시 (계획 0장 — Cargo.lock 전이 의존은 feature 활성이
+# 아니다). Win32_System_Threading 은 OpenProcess/PROCESS_QUERY_LIMITED_INFORMATION
+# 의 실제 위치라 계획의 3종에 추가로 필요하다.
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

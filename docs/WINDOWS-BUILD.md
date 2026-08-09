@@ -41,7 +41,7 @@ Build Tools — not the full Visual Studio IDE.
    selected:
    - **x64**: `MSVC v143 - VS 2022 C++ x64/x86 build tools` (this dev machine's target)
    - **ARM64**: `MSVC v143 - VS 2022 C++ ARM64 build tools` (only needed if you'll build for
-     ARM64 — see section 9)
+     ARM64 — see section 10)
 4. Also confirm a **Windows 10/11 SDK** component is selected (the installer usually pulls one
    in automatically with the C++ workload).
 
@@ -309,7 +309,78 @@ interactions are mouse-driven in the sidebar; the dev hook is only needed where 
    the card list, active workspace, and all ids are unchanged (state lives in Rust,
    the WebView is just a view).
 
-## 9. ARM64 cross-build notes
+## 9. Stage 14–16 / Checkpoint 1 manual verification
+
+This is **checkpoint 1** (roadmap decision in `CLAUDE.md`): the batched manual Windows
+verification for stages 13–16 — workspace sidebar (section 8 doubles as its checklist),
+replay trim + switch latency tracer (stage 14), persistence (stage 15), and the automatic
+UI reset safety net (stage 16, 계획 v2 section 12). Design decisions are in
+[`docs/plans/mvp-stage14-16-plan.md`](plans/mvp-stage14-16-plan.md) until they are
+distilled into an ADR.
+
+### Auto-reset environment variables
+
+The reset supervisor reads six environment variables at app start (set them in the
+PowerShell session before `npm run tauri dev`, e.g. `$env:WMUX_RESET_IDLE_SECS = "30"`).
+`0` disables the trigger it belongs to; invalid values fall back to the default with a
+loud stderr warning. The effective config is printed to stderr on boot
+(`[wmux] reset: config ...`).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WMUX_RESET_IDLE_SECS` | `1800` | Idle reset: fire once this many seconds after the last real user input (`0` = off). Re-arms only on the next real input. |
+| `WMUX_RESET_HIDDEN_SECS` | `600` | Hidden reset: fire after the window stays unfocused **and** invisible for this long continuously (`0` = off). Once per hidden stretch. |
+| `WMUX_RESET_MEM_MB` | `1536` | Memory watchdog: when the WebView2 process tree's private memory exceeds this many MB, schedule a reset for the next safe moment (`0` = off). |
+| `WMUX_RESET_MEM_POLL_SECS` | `60` | Watchdog sampling period. `0` is rejected (would busy-loop) — default + warning. |
+| `WMUX_RESET_SAFE_IDLE_SECS` | `60` | Seconds since the last input for a pending watchdog reset to count as "safe" (`0` = immediately safe). |
+| `WMUX_RESET_COOLDOWN_SECS` | `300` | Suppression window after any reset fires (`0` = no cooldown). |
+
+Reset activity is stderr-only by design (no UI): look for `[wmux] reset: reloading
+webview (trigger=...)` lines. A manual reset is available from the dev console as
+`window.__wmux.resetUi()` (dev hook / future MCP only — there is deliberately no UI
+button, 계획 v2 section 12).
+
+### Checklist
+
+1. **Persistence round-trip** — build 2 workspaces with splits, tabs, and an adjusted
+   splitter ratio → quit and restart the app → the full structure (workspaces, panes,
+   tabs, ratios, active selections, ids) is restored, and every terminal tab runs a
+   **fresh shell** (session content is not persisted — only structure).
+2. **Exited tabs stay exited** — exit a shell (`exit`) so the tab shows the exited badge,
+   restart the app → the tab is still Exited with empty content (no respawn), and the app
+   is otherwise fully functional.
+3. **Corrupt state recovers loudly** — corrupt `state.json` (e.g. truncate it) in the app
+   data dir, restart → the app starts fresh, keeps the original as
+   `state.json.corrupt-<epoch>`, and logs the reason to stderr.
+4. **Switch latency readout** — build a 4-pane workspace plus a second workspace, switch
+   back and forth → read `window.__wmux.lastSwitch` in the dev console: total should be
+   in the ~100ms class, with per-tab replay timings populated.
+5. **Replay trim keeps lines whole** — flood 1MB+ of colored output (e.g.
+   `bash ~/code/wmux/scripts/wsl/flood.sh`), switch away and back → the top of the
+   restored buffer starts at a line boundary with no broken escape sequences /
+   half-colored garbage.
+6. **Idle reset fires once, invisibly** — set `WMUX_RESET_IDLE_SECS=30` (and
+   `WMUX_RESET_COOLDOWN_SECS=0` for this item), leave the app alone for 30s → exactly one
+   reset fires (stderr `trigger=idle`); sessions and terminal text survive and the reload
+   is visually seamless. Keep waiting another 30s **without touching anything**: no
+   second reset — the post-reset automatic attach/resize/ack must **not** re-arm the idle
+   timer (only real input does).
+7. **Hidden reset, and never while typing** — set `WMUX_RESET_HIDDEN_SECS=30`, minimize
+   or fully cover + unfocus the window for 30s → reset fires. Then keep the window
+   focused and type continuously for well past 30s → **no** reset ever fires (guards
+   against a spurious `Focused(false)` misdetection — real input re-arms the hidden
+   countdown too).
+8. **Mem watchdog waits for a safe moment** — set `WMUX_RESET_MEM_MB=100` (trivially
+   exceeded) → while typing/scrolling nothing fires; stop touching the app for
+   `WMUX_RESET_SAFE_IDLE_SECS` (or switch workspaces) → the pending reset fires
+   (`trigger=memWatchdog` with the sampled bytes in stderr).
+9. **Scrollback reading is activity** — with `WMUX_RESET_IDLE_SECS=30`, read scrollback
+   using **wheel only** (no keys) for over 30s → no reset fires (the throttled activity
+   ping counts pure viewing as activity).
+10. **Kill survives** — force-kill the app from Task Manager, restart → state is restored
+    except at most the last ≤500ms of structural mutations (save debounce window).
+
+## 10. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
 (터미널-계획-v2.md section 13) is ARM64. Cross-compiling *from* this x64 Windows machine *for*
