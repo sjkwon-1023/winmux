@@ -22,10 +22,11 @@ mod sink;
 mod state;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use wmux_core::command::{Command, Dispatcher, NewTab};
 use wmux_core::persist::{self, FreshReason, LoadOutcome, Saver};
 use wmux_core::session::SessionManager;
@@ -33,6 +34,10 @@ use wmux_core::session::SessionManager;
 /// Saver debounce 창 — 연속 변이를 1회 기록으로 합친다. 크래시 시 마지막 기록
 /// 이후 ≤500ms 의 변이 유실은 MVP 수용 (계획 B-1).
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// 창 최소화 신호 이벤트 이름 — 프론트 `window-visibility.ts` 의
+/// `WINDOW_HIDDEN_EVENT` 와 짝이다 (payload: bool, true = 최소화됨).
+const WINDOW_HIDDEN_EVENT: &str = "window-hidden";
 
 /// corrupt 백업 결과를 로그용 문자열로 — rename 실패도 가리지 않고 원인 그대로.
 fn backup_label(backup: &Result<PathBuf, String>) -> String {
@@ -43,6 +48,12 @@ fn backup_label(backup: &Result<PathBuf, String>) -> String {
 }
 
 fn main() {
+    // 최소화 판정의 중복 emit 억제 플래그 (체크포인트 2 실기 결함 후속) — 전이
+    // (false↔true)에서만 프론트에 알린다. Resized 는 드래그 리사이즈 중 연속으로
+    // 오므로 매번 emit 하면 IPC 잡음이 된다. on_window_event 핸들러는
+    // `Fn + Send + Sync + 'static` 이라 내부 가변성(AtomicBool)으로 든다.
+    let window_hidden = AtomicBool::new(false);
+
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
@@ -152,12 +163,15 @@ fn main() {
             saver.schedule(dispatcher.lock().unwrap().state().clone());
             Ok(())
         })
+        // 창 이벤트 두 갈래 — 포커스 전이는 리셋 정책 신호, 크기 전이는 프론트
+        // 폴링 게이팅 신호다 (아래 각 분기 참조. 서로 독립이고 섞이지 않는다).
+        //
         // 창 포커스 전이 → 리셋 정책의 hidden 판정 신호 (계획 C-2). 설정창은
         // setup 완료 후 생성되므로 이 시점엔 항상 manage 되어 있다 — 아니라면
         // 신호가 새고 있는 프로그램 결함이라 숨기지 않는다 (publish_state 와
         // 같은 규율).
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Focused(focused) = event {
+        .on_window_event(move |window, event| match event {
+            tauri::WindowEvent::Focused(focused) => {
                 match window.app_handle().try_state::<state::AppState>() {
                     Some(managed) => managed.reset.focus(*focused),
                     None => eprintln!(
@@ -165,6 +179,30 @@ fn main() {
                     ),
                 }
             }
+            // 최소화 → 프론트 폴링 정지 신호 (체크포인트 2 실기 결함: WebView2
+            // 실환경에서 최소화·Alt+Tab 어느 쪽도 visibilitychange 도
+            // document.hidden 도 주지 않아 마크다운 뷰어의 fs_stat 이 계속 나갔다).
+            // Windows 에서 tao 는 최소화를 **클라이언트 영역 0x0 의 Resized** 로
+            // 보고하므로 그것을 최소화 판정으로 쓴다. 비포커스-가시 상태는 숨김이
+            // **아니다** — 다른 창에서 .md 를 편집하며 미리보기를 보는 것이 핵심
+            // 사용례라, blur 로 폴링을 멈추면 그 사용례가 죽는다. 그래서 이 신호는
+            // 리셋 정책(hidden = unfocused OR invisible)과 별개 경로다.
+            //
+            // **재검증 항목**: 0x0 Resized = 최소화 휴리스틱은 Linux 게이트로
+            // 실검증할 수 없다 (src-tauri 는 Linux 호스트에서 컴파일되지 않는다).
+            // Windows 실기에서 ① 최소화 시 hidden=true, ② 복원 시 hidden=false,
+            // ③ 일반 리사이즈·다른 창 포커스에서 오탐 없음을 확인해야 한다.
+            tauri::WindowEvent::Resized(size) => {
+                let hidden = size.width == 0 || size.height == 0;
+                if window_hidden.swap(hidden, Ordering::Relaxed) != hidden {
+                    // emit 실패는 프론트가 폴링을 계속하는 것(=기존 동작)일 뿐이라
+                    // 치명적이지 않다 — 가리지 않고 기록만 남긴다.
+                    if let Err(err) = window.emit(WINDOW_HIDDEN_EVENT, hidden) {
+                        eprintln!("[wmux] window-hidden emit failed (hidden={hidden}): {err}");
+                    }
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::dispatch,

@@ -6,7 +6,7 @@
 
 ```
 Claude Code hook (UserPromptSubmit / Notification / Stop)
-  → 현재 TTY에 OSC 777 출력
+  → 해석한 TTY(/dev/tty 또는 조상 프로세스의 pts)에 OSC 777 출력
   → Rust PTY 리더(wmux-core::osc::OscScanner)가 감지
   → 100ms flush 창으로 배치(글루 OscRouter)
   → 탭 unread dot / pane 배지 / 워크스페이스 사이드바 상태 갱신
@@ -49,18 +49,35 @@ wmux 가 해석하는 시퀀스는 네 종류다.
 - 재시작하면 알림·상태는 전부 초기화된다 (죽은 세션의 needsInput 이 재시작을 넘지
   않는다 — 계획 v2 11장).
 
-## 왜 `> /dev/tty` 리다이렉트가 필요한가
+## tty 해석 규율 — 직접 `/dev/tty` → 조상 pts fallback
 
 Claude Code hook의 **stdout은 Claude Code 자신이 소비한다** (hook 실행 결과로 처리되어
 UI/로그에 쓰이거나 버려지며, 그대로 터미널 화면에 바이트가 흘러가지 않는다). hook 스크립트가
 그냥 `echo`나 `printf`로 OSC 시퀀스를 표준출력에 쓰면 그 바이트는 실제 PTY 스트림에
 도달하지 못하고, Rust PTY 리더는 아무것도 감지하지 못한다.
 
-따라서 hook 스크립트는 OSC 시퀀스를 **표준출력이 아니라 `/dev/tty`에 직접** 써야 한다.
-`/dev/tty`는 그 프로세스가 붙어 있는 실제 터미널 장치 파일이므로, Claude Code의 stdout
-캡처를 우회해 PTY 스트림에 바로 실려 wmux의 Rust PTY 리더까지 도달한다.
+따라서 hook 스크립트는 OSC 시퀀스를 **표준출력이 아니라 터미널 장치에 직접** 써야 한다.
+문제는 그 장치를 어떻게 찾느냐인데, `> /dev/tty` 한 방으로는 부족하다.
 
-(아래 셸 프롬프트 스니펫은 반대다 — 셸의 stdout이 곧 PTY라 리다이렉트가 필요 없다.)
+**실측(Claude Code 2.1.226, 체크포인트 2):** hook 프로세스에는 **controlling TTY 가 없어**
+`> /dev/tty` 가 `No such device or address`(ENXIO)로 실패한다. 반면 **Claude Code 본체
+프로세스는 wmux 가 띄운 `/dev/pts/N` 에 그대로 붙어 있다** — 장치는 살아 있는데 hook 쪽에만
+거기로 가는 손잡이가 없는 상태다. 그래서 아래 예시의 `wmux_emit` 은 tty 를 두 단계로 해석한다.
+
+1. **직접 `/dev/tty`** — controlling TTY 가 있으면(손으로 돌려 보는 경우, hook 을 다른
+   경로로 띄우는 경우, 이 전제가 바뀐 미래 버전) 이게 정답이고 한 번에 끝난다.
+2. **조상 pts fallback** — 1이 실패하면 자기 자신부터 `/proc/<pid>/stat` 의 PPID 를 따라
+   최대 8칸까지 거슬러 올라가며, 각 프로세스 fd 0/1/2 의 `readlink` 가 `/dev/pts/*` 를
+   가리키면 거기에 쓴다. **가장 가까운 조상이 이긴다** — 터미널이 중첩돼 있어도 바깥
+   터미널이 아니라 자기 pane 의 pts 를 집는다.
+
+둘 다 실패하면(조상 체인에 pts 가 없는 경우 — 예: hook 이 init 으로 reparent 된 뒤 도는
+경우) **조용히 포기하고 `exit 0` 한다.** 알림 하나를 놓치는 것보다 알림 전달 실패가 Claude
+세션을 깨는 쪽이 나쁘다. 깊이 상한 8과 `/dev/pts/*` 화이트리스트는 이 탐색이 오래 끌거나
+엉뚱한 대상(로그 파일·파이프)에 OSC 바이트를 흘리지 않게 막는 경계다.
+
+(아래 셸 프롬프트 스니펫은 이 문제와 무관하다 — 셸은 자기 tty 를 가지고 있고 그 stdout이
+곧 PTY라 리다이렉트도 fallback도 필요 없다.)
 
 ## hook 스크립트 예시
 
@@ -68,13 +85,51 @@ UI/로그에 쓰이거나 버려지며, 그대로 터미널 화면에 바이트�
 
 ```bash
 #!/usr/bin/env bash
-# Claude Code hook에서 호출되어 wmux 상태 토큰을 OSC 777로 /dev/tty에 방출한다.
+# Claude Code hook에서 호출되어 wmux 상태 토큰을 OSC 777로 실제 터미널 장치에 방출한다.
 # 인자: $1 = 상태 토큰(wmux:running | wmux:needsInput | wmux:idle)
 #       $2 = 본문(선택). Notification 이벤트는 stdin JSON의 .message를 우선한다.
 set -euo pipefail
 
 STATUS="${1:?usage: wmux-notify.sh <wmux:running|wmux:needsInput|wmux:idle> [body]}"
 BODY="${2:-}"
+
+# OSC 바이트를 실제 터미널 장치에 쓴다. 위 "tty 해석 규율"의 2단계를 그대로 구현한다.
+#   1) /dev/tty — controlling TTY 가 있으면 이게 정답이다.
+#   2) /proc 조상 체인 — Claude Code 2.1.226 의 hook 프로세스에는 controlling TTY 가
+#      없어 1)이 ENXIO("No such device or address")로 실패한다. 이때는 자신부터 부모로
+#      거슬러 올라가며 각 프로세스 fd 0/1/2 가 가리키는 /dev/pts/* 를 찾아 거기에 쓴다.
+#      Claude Code 본체가 wmux 의 pts 에 붙어 있으므로 몇 칸 위에서 잡힌다.
+# 어느 쪽도 안 되면 조용히 포기한다 — 알림 실패가 Claude 세션을 깨면 안 된다.
+wmux_emit() {
+  local payload="$1"
+
+  if { printf '%s' "$payload" > /dev/tty; } 2>/dev/null; then
+    return 0
+  fi
+
+  local pid=$$ depth=0 fd target stat ppid
+  while [[ "$pid" -gt 1 && "$depth" -lt 8 ]]; do
+    for fd in 0 1 2; do
+      target="$(readlink "/proc/$pid/fd/$fd" 2>/dev/null || true)"
+      [[ "$target" == /dev/pts/* ]] || continue
+      if { printf '%s' "$payload" > "$target"; } 2>/dev/null; then
+        return 0
+      fi
+    done
+    # /proc/<pid>/stat 은 "<pid> (<comm>) <state> <ppid> ..." 형식이다. comm 에 공백·
+    # 괄호가 들어갈 수 있어 마지막 ')' 뒤부터 잘라 state 다음의 ppid 를 읽는다.
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    [[ -n "$stat" ]] || break
+    stat="${stat##*) }"
+    ppid="${stat#* }"
+    ppid="${ppid%% *}"
+    [[ "$ppid" =~ ^[0-9]+$ ]] || break
+    pid="$ppid"
+    depth=$((depth + 1))
+  done
+
+  return 1
+}
 
 # Claude Code는 hook 실행 시 이벤트 정보를 stdin으로 JSON을 전달한다.
 # Notification 이벤트는 .message 필드에 사람이 읽을 알림 문구가 들어 있다.
@@ -93,7 +148,10 @@ fi
 BODY="${BODY//;/,}"
 
 # OSC 777 형식: ESC ] 777 ; notify ; title ; body BEL
-printf '\033]777;notify;%s;%s\007' "$STATUS" "$BODY" > /dev/tty
+wmux_emit "$(printf '\033]777;notify;%s;%s\007' "$STATUS" "$BODY")" || true
+
+# 방출에 실패해도 hook 은 성공으로 끝낸다(알림을 놓칠지언정 세션은 깨지 않는다).
+exit 0
 ```
 
 ## settings.json 예시
@@ -190,15 +248,25 @@ PROMPT_COMMAND="__wmux_osc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 ## 검증
 
 1. `scripts/wsl/osc-test.sh` 로 "/dev/tty로 쓴 OSC 가 wmux 앱까지 도달하는가"를 먼저
-   확인한다 (OSC 777 은 7·8·9번 케이스).
+   확인한다 (OSC 777 은 7·8·9번 케이스). 이 스크립트는 셸에서 직접 돌아 tty 를 가지므로
+   1단계 경로만 탄다 — 전달 경로 자체가 살아 있는지 보는 용도다.
 2. 그다음 Claude Code를 wmux 터미널 안에서 실행해 hook 3종이 실제로 탭 dot·pane
    배지·사이드바 상태/미리보기를 갱신하는지 확인한다
    (`docs/WINDOWS-BUILD.md` 10장 체크포인트 2).
+3. hook 이 조용하면 fallback 이 어디서 끊겼는지부터 본다. wmux 터미널 안에서
+   `setsid -w bash -c 'printf "" > /dev/tty' ; echo $?` 로 tty 없는 맥락을 재현하고,
+   `for p in $(pgrep -f 'claude'); do readlink /proc/$p/fd/1; done` 로 Claude 본체가
+   `/dev/pts/*` 에 붙어 있는지 확인한다. 조상 체인이 8칸 안에 있는지도 같이 본다.
 
 ## 참고
 
 - BEL(`\007`)만 완료 신호로 의존하지 않는다(계획 v2 9장) — wmux의 `OscScanner`는 BEL과
   ST(`ESC \`) 둘 다 종결자로 인식한다.
+- "hook 에 controlling TTY 가 없다"는 것은 Claude Code **2.1.226 에서 실측한 사실**이지
+  보장된 계약이 아니다. 예시 스크립트가 1단계를 남겨 둔 이유가 이것이다 — 나중 버전이
+  hook 에 tty 를 물려 주면 fallback 을 타지 않고 그대로 동작한다. 반대로 Claude Code 가
+  pts 가 아닌 곳(파이프 전용 데몬 등)에서 돌게 되면 2단계도 대상을 못 찾으므로, 그때는
+  파일/소켓 감시 대안으로 넘어가야 한다.
 - ConPTY가 OSC 777을 잘라먹는 것으로 확인되면(spike-plan.md 6장 체크리스트 1번), 이
   hook 경로는 파일/소켓 감시 대안으로 교체해야 한다(계획 v2 2장 "단일 실패점" 참고).
   이 문서의 예시는 OSC passthrough가 살아있다는 전제 위에 있다. OSC 0/7 의 실전

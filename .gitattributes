@@ -1,0 +1,4 @@
+# WSL 안에서 실행되는 셸 스크립트는 Windows 클론(core.autocrlf=true)에서도 LF 로
+# 체크아웃되어야 한다 — CRLF 면 bash 가 '\r' 를 토큰 일부로 읽어 실패한다
+# (체크포인트 2 실측: osc-test.sh/flood.sh 직접 실행 불가).
+*.sh text eol=lf

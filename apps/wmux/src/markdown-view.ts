@@ -17,10 +17,15 @@
 //    (메모리 상주 = 창 1개)이 성립하지 않기 때문이다.
 // 3. **폴링 수명 = 뷰 수명** (계획 21단계). 뷰어 뷰는 활성 탭일 때만 마운트되므로
 //    (viewer-view.ts) 폴링 자체가 활성 탭 한정이고, 별도 게이팅이 필요 없다.
-//    대신 dispose 에서 타이머를 반드시 정리해야 하며(누수 금지), `document.hidden`
-//    동안은 아예 무장하지 않는다 (숨은 창의 9P 왕복 0). 상태기계는 DOM 무의존
-//    클래스 MtimePoller 로 분리해 주입 타이머로 테스트한다 (ack-batcher 전례 —
-//    이 레포에 setInterval 은 없다).
+//    대신 dispose 에서 타이머·리스너·구독을 반드시 정리해야 하며(누수 금지),
+//    창이 숨은 동안은 아예 무장하지 않는다 (숨은 창의 9P 왕복 0). 숨김 판정은
+//    `document.hidden` **또는** 창 최소화(window-visibility.ts)다 — 체크포인트 2
+//    실기에서 WebView2 가 최소화·Alt+Tab 에 visibilitychange 도 document.hidden 도
+//    주지 않아 fs_stat 이 계속 나갔기 때문이다. 최소화만 숨김으로 치고 비포커스-
+//    가시 상태는 폴링을 유지한다 (다른 창에서 .md 를 편집하며 미리보기를 보는 것이
+//    핵심 사용례 — 근거는 window-visibility.ts). 상태기계는 DOM 무의존 클래스
+//    MtimePoller 로 분리해 주입 타이머로 테스트한다 (ack-batcher 전례 — 이 레포에
+//    setInterval 은 없다).
 //
 // 스크롤 왕복은 textViewer 의 인프라(ScrollSettle·shouldAdoptScroll)를 그대로
 // 재사용한다. 단위만 다르다: textViewer 는 전역 byte offset, markdownViewer 는
@@ -31,6 +36,7 @@ import { Marked } from "marked";
 import type { TimerHost } from "./ack-batcher";
 import { fsReadChunk, fsStat } from "./backend";
 import { ScrollSettle, SCROLL_SETTLE_MS, shouldAdoptScroll } from "./text-view";
+import { isWindowHidden, onWindowHiddenChange } from "./window-visibility";
 import type { ViewerKind, ViewerView } from "./viewer-view";
 import type { Command, CommandOutput, PaneId, TabId } from "./types";
 
@@ -218,6 +224,8 @@ export class MarkdownView implements ViewerView {
   private readonly bodyEl: HTMLDivElement;
   private readonly settle: ScrollSettle;
   private readonly poller: MtimePoller;
+  /** 창 숨김 전이 구독 해제 — dispose 에서 반드시 부른다 (구독자 수명 = 뷰 수명). */
+  private readonly unsubscribeWindow: () => void;
 
   private path: string;
   private disposed = false;
@@ -282,9 +290,18 @@ export class MarkdownView implements ViewerView {
     this.poller = new MtimePoller(
       async () => (await fsStat(this.distro, this.path)).mtime_ms,
       () => this.load(true),
-      { intervalMs: options.pollMs ?? RELOAD_POLL_MS, timers },
+      {
+        intervalMs: options.pollMs ?? RELOAD_POLL_MS,
+        timers,
+        // 두 신호의 OR — WebView2 는 최소화에 visibilitychange 를 주지 않고,
+        // 창 신호는 탭 숨김 같은 문서 레벨 사건을 모른다 (파일 상단 계약 3).
+        isHidden: () => document.hidden || isWindowHidden(),
+      },
     );
+    // 두 신호 모두 재개 트리거다 — sync() 가 현재 isHidden 을 다시 읽어 무장/
+    // 해제를 정한다. 창 구독 해제 함수는 dispose 까지 들고 있는다 (누수 금지).
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    this.unsubscribeWindow = onWindowHiddenChange(this.onWindowHidden);
 
     this.load(false);
   }
@@ -321,6 +338,7 @@ export class MarkdownView implements ViewerView {
     // 폴링 수명 = 뷰 수명 (파일 상단 계약 3) — 타이머·리스너를 전부 끊는다.
     this.poller.dispose();
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.unsubscribeWindow();
     this.settle.dispose();
     this.scrollEl.removeEventListener("scroll", this.onScroll);
     this.bodyEl.removeEventListener("click", this.onBodyClick);
@@ -338,6 +356,13 @@ export class MarkdownView implements ViewerView {
   };
 
   private readonly onVisibilityChange = (): void => {
+    this.poller.sync();
+  };
+
+  /** 창 최소화/복원 전이 — visibilitychange 와 같은 처리다 (sync 가 두 신호의
+   *  OR 를 다시 읽는다). 최소화 중에 파일이 바뀌었다면 복원 직후 첫 주기에서
+   *  잡힌다. */
+  private readonly onWindowHidden = (): void => {
     this.poller.sync();
   };
 
