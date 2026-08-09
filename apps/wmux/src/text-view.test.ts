@@ -331,10 +331,14 @@ describe("windowButtonsDisabled", () => {
     });
   });
 
-  it("locks the tail buttons even when the last window ends short of EOF", () => {
-    // 말미 부분행 절삭으로 end < size 여도 더 갈 창이 없으면 잠긴다 — 판정은
-    // "그 버튼이 창을 옮기는가"이지 "EOF 에 닿았는가"가 아니다.
-    expect(windowButtonsDisabled({ start: 9_000, end: 9_900 }, size, windowBytes)).toMatchObject({
+  it("locks the tail buttons on a leading-trimmed last window (start past size−W)", () => {
+    // 실제 마지막 창은 요청 시작(size−W)이 행 경계가 아니라 선두 절삭으로
+    // win.start 가 size−W 보다 커진다. "창이 움직이는가" 판정은 이 창에서
+    // next/last 를 영영 못 잠갔다 (리뷰 finding — 누르면 같은 창 재로드 +
+    // 스크롤 덮어쓰기). 커버 범위 판정(end >= size)은 정확히 잠근다.
+    expect(windowButtonsDisabled({ start: 9_003, end: 10_000 }, size, windowBytes)).toEqual({
+      first: false,
+      prev: false,
       next: true,
       last: true,
     });

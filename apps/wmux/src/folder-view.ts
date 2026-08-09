@@ -321,7 +321,11 @@ export class FolderView implements ViewerView {
     this.rowEls = rows.map((row, index) => this.rowButton(row, index));
     this.selected = -1;
     this.listEl.replaceChildren(...this.rowEls);
-    this.select(rows.length > 0 ? 0 : -1, false);
+    // 초기 선택은 `..` 를 건너뛴 첫 실제 행이다 (리뷰 finding): `..` 를 집으면
+    // "Enter 로 진입 → 곧바로 Enter" 가 하위 탐색이 아니라 부모로 되튀는 동작이
+    // 된다. 실제 행이 없으면(빈 디렉터리) `..` 라도 집는다 — 나갈 길은 남긴다.
+    const firstReal = rows.findIndex((row) => !row.parent);
+    this.select(firstReal >= 0 ? firstReal : rows.length > 0 ? 0 : -1, false);
     if (hadFocus) this.listEl.focus();
   }
 

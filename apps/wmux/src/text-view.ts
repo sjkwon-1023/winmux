@@ -262,21 +262,22 @@ export function windowStartForRestore(
 
 /** 창 이동 버튼 4개의 disabled 상태 (순수).
  *
- *  판정 기준은 "그 버튼이 창을 실제로 옮기는가" 하나다 — 목표 시작이 지금 창의
- *  시작과 같으면 눌러도 같은 창을 다시 읽을 뿐이므로 잠근다. offset 0 에서
- *  first/prev 가, 마지막 창에서 next/last 가 잠기는 것이 이 규칙의 결과이고,
- *  파일이 창보다 작으면(바가 숨겨진 상태) 넷 다 잠긴다. 키보드 단축키도 같은
- *  판정을 쓰므로 버튼과 키가 어긋나지 않는다. */
+ *  경계 판정은 창의 **커버 범위**로 한다: `start <= 0` 이면 first/prev,
+ *  `end >= size` 면 next/last 가 잠긴다. "목표 시작이 지금과 같은가" 류의 이동
+ *  판정은 쓰지 않는다 (18단계 후속 리뷰 finding) — 실제 마지막 창은 선두 부분행
+ *  절삭 때문에 `win.start` 가 요청 시작(size−W)보다 커서, 이동 판정으로는
+ *  next/last 가 영영 잠기지 않고 누를 때마다 같은 창을 재로드하며 스크롤 위치를
+ *  덮는다. 파일이 창보다 작으면(start 0 + end=size) 넷 다 잠긴다. 키보드
+ *  단축키(moveWindow 가드)도 같은 판정을 쓰므로 버튼과 키가 어긋나지 않는다. */
 export function windowButtonsDisabled(
   current: { start: number; end: number },
   size: number,
-  windowBytes: number = WINDOW_BYTES,
+  // 커버 범위 판정에는 창 폭이 불필요하다 — 시그니처 호환용으로만 남긴다.
+  _windowBytes: number = WINDOW_BYTES,
 ): Record<WindowAction, boolean> {
-  const state = {} as Record<WindowAction, boolean>;
-  for (const action of WINDOW_ACTIONS) {
-    state[action] = nextWindowStart(action, current, size, windowBytes) === current.start;
-  }
-  return state;
+  const atStart = current.start <= 0;
+  const atEnd = current.end >= size;
+  return { first: atStart, prev: atStart, next: atEnd, last: atEnd };
 }
 
 /** 텍스트 뷰 안에서 소비하는 keydown 의 뜻. `window` 는 상단 바 버튼과 같고,
