@@ -364,7 +364,11 @@ button, 계획 v2 section 12).
    reset fires (stderr `trigger=idle`); sessions and terminal text survive and the reload
    is visually seamless. Keep waiting another 30s **without touching anything**: no
    second reset — the post-reset automatic attach/resize/ack must **not** re-arm the idle
-   timer (only real input does).
+   timer (only real input does). **Repeat the whole item with `vim` (or Claude Code)
+   running in a tab**: TUI apps emit terminal queries (DA/DSR/color) that xterm
+   auto-answers after the replay, and those synthetic writes must not re-arm idle either
+   (review finding — stdin writes deliberately don't count as activity; only the
+   frontend's real-gesture ping does).
 7. **Hidden reset, and never while typing** — set `WMUX_RESET_HIDDEN_SECS=30`, minimize
    or fully cover + unfocus the window for 30s → reset fires. Then keep the window
    focused and type continuously for well past 30s → **no** reset ever fires (guards

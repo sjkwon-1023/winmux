@@ -156,10 +156,13 @@ pub async fn write_stdin(
     tauri::async_runtime::spawn_blocking(move || session.write(data.as_bytes()))
         .await
         .map_err(|err| format!("write task join failed (id={id}): {err}"))?
-        .map_err(|err| format!("write_stdin failed (id={id}): {err:#}"))?;
-    // 성공한 stdin 기록 = 실제 사용자 입력 (자동 리셋 활동 신호 — 계획 C-2).
-    state.reset.user_input();
-    Ok(())
+        .map_err(|err| format!("write_stdin failed (id={id}): {err:#}"))
+    // 주의: stdin 기록은 활동 신호로 치지 **않는다** (16단계 리뷰 finding).
+    // xterm 의 onData 는 사용자 타이핑뿐 아니라 단말 질의(DA·DSR·OSC 색상 질의)에
+    // 대한 **자동 응답**에도 발화하고, 그 질의는 replay 에 보존돼 리셋 후 재생된다
+    // — 여기서 활동으로 집계하면 리셋 → replay → 자동 응답 → idle 재무장의
+    // 자기루프가 된다. 실제 타이핑은 프론트 활동 핑(window capture keydown)이
+    // 이미 잡으므로 유실도 없다.
 }
 
 #[tauri::command]
@@ -172,10 +175,9 @@ pub async fn send_raw(
     tauri::async_runtime::spawn_blocking(move || session.write(&bytes))
         .await
         .map_err(|err| format!("write task join failed (id={id}): {err}"))?
-        .map_err(|err| format!("send_raw failed (id={id}): {err:#}"))?;
-    // write_stdin 과 동일 — 성공한 raw 전송도 실제 사용자 입력이다.
-    state.reset.user_input();
-    Ok(())
+        .map_err(|err| format!("send_raw failed (id={id}): {err:#}"))
+    // write_stdin 과 동일하게 활동 신호로 치지 않는다 (자동 응답 자기루프 —
+    // write_stdin 의 주석 참조).
 }
 
 #[tauri::command]

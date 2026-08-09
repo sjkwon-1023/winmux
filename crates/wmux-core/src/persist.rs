@@ -161,6 +161,9 @@ fn backup_corrupt(path: &Path) -> Result<PathBuf, String> {
 /// 이전 크래시 런이 남긴 stale tmp(`<파일명>.tmp-<다른 pid>`)를 best-effort 로
 /// 청소한다 — pid 가 런마다 달라 저절로 누적되기 때문 (리뷰 finding). 삭제 실패는
 /// 무시한다 (진단 증거보다 누적 방지가 목적이고, 다음 부팅이 재시도한다).
+/// 동시 실행 중인 다른 인스턴스가 쓰는 중인 tmp 를 지울 수도 있다 — 그쪽 rename
+/// 이 loud 실패 후 다음 저장에서 자연 재시도되므로 무해 (두 인스턴스 동시 실행은
+/// MVP 수용 — 계획 0장).
 fn sweep_stale_tmp(path: &Path) {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
     else {

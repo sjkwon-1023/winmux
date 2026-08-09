@@ -15,6 +15,10 @@
 //! 워치독 on 이면 샘플 주기마다 깨어나는데, 이는 12장이 명시한 워치독 샘플링
 //! 자체다).
 //!
+//! 스레드는 **detach 로 수용한다** — JoinHandle 을 보관하지 않고 종료 경로도
+//! 없으며, 프로세스 종료가 수거한다. 앱 teardown 중 창이 닫힌 뒤 리로드를
+//! 시도하면 실패하는데, 그 경우 loud 로그로 끝나 무해하다 (의도적 수용 — 리뷰).
+//!
 //! # 시각
 //!
 //! 정책의 u64 ms 틱은 [`Instant`] 기준 단조 시계다 — supervisor 생성 시점이
@@ -372,7 +376,9 @@ fn worker(shared: &Shared) {
 mod mem {
     use std::collections::{HashMap, HashSet};
 
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -399,6 +405,9 @@ mod mem {
         let procs = snapshot_processes()?;
         // ppid → 자식 인접 리스트로 자손 집합을 만든다. PID 재사용으로 인한
         // 겉보기 순환은 insert 성공 시에만 스택에 넣어 차단한다.
+        // 한계(리뷰): 죽은 부모의 PID 를 우리 자손이 재사용하면 무관한 프로세스가
+        // stale th32ParentProcessID 체인으로 트리에 붙어 합산이 부풀 수 있다 —
+        // 발생 확률이 낮고 오탐 방향(허위 pending)이라 수용한다.
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         for (pid, ppid, _) in &procs {
             children.entry(*ppid).or_default().push(*pid);
@@ -447,6 +456,19 @@ mod mem {
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         // SAFETY: 유효한 스냅샷 핸들과 dwSize 초기화된 entry.
         let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
+        if ok == 0 {
+            // 첫 호출 실패 — 빈 목록(ERROR_NO_MORE_FILES)과 실제 열거 에러를
+            // 구분한다. 구분 없이 빈 Ok 를 돌려주면 호출측이 "자손 0개(공유
+            // 브라우저 프로세스 케이스)"로 오진단한다 (리뷰 finding).
+            // SAFETY: 실패 직후의 스레드-로컬 에러 코드 조회.
+            let err = unsafe { GetLastError() };
+            // SAFETY: 위에서 연 스냅샷 핸들.
+            unsafe { CloseHandle(snapshot) };
+            if err == ERROR_NO_MORE_FILES {
+                return Ok(Vec::new());
+            }
+            return Err(format!("Process32FirstW failed (err={err})"));
+        }
         while ok != 0 {
             procs.push((
                 entry.th32ProcessID,
