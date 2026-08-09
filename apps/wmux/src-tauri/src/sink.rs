@@ -3,7 +3,9 @@
 //! - 터미널 출력: `tauri::ipc::Channel` 에 `[u64 LE offset][bytes]` 프레임을
 //!   `InvokeResponseBody::Raw` 로 전송한다 (JSON 직렬화 금지 — 계획 v2 2·12장).
 //!   프론트는 offset 으로 replay 스냅샷과의 겹침을 dedup 한다 (계획 2장).
-//! - exit: Dispatcher 에 `SessionExited` 를 반영하고 `state-changed` 를 emit 한다.
+//! - exit: Dispatcher 에 `SessionExited` 를 반영하고 `publish_state` 로
+//!   `state-changed` emit + 저장 예약한다 (dispatch 와 함께 상태 변이의 유일한
+//!   두 경로 — 계획 15단계 B-2 저장 훅).
 //! - OSC: 10단계에서는 상태 반영 없이 `osc-event` emit 만 남긴다 (18단계 대비,
 //!   JSON 이지만 저빈도라 수용).
 
@@ -15,7 +17,7 @@ use wmux_core::command::SessionEvent;
 use wmux_core::osc::OscEvent;
 use wmux_core::session::{Delivery, SessionId, SessionSink};
 
-use crate::state::{emit_state_changed, AppState};
+use crate::state::{publish_state, AppState};
 
 /// `osc-event` payload — spike 프론트 계약과 동일 형태:
 /// `{ id, kind: "777"|"9"|"7"|"0", title, body }` (비는 칸은 빈 문자열).
@@ -156,6 +158,6 @@ impl SessionSink for SinkHandle {
             session: self.0.session,
             code,
         });
-        emit_state_changed(&self.0.app, &dispatcher);
+        publish_state(&self.0.app, &dispatcher);
     }
 }

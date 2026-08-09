@@ -17,8 +17,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use wmux_core::command::Dispatcher;
+use wmux_core::persist::Saver;
 use wmux_core::session::{SessionId, SessionManager};
 
 use crate::sink::TerminalSink;
@@ -54,13 +55,22 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     /// 세션별 출력 sink — 핫패스 전용, Dispatcher lock 밖.
     pub sinks: Arc<SinkRegistry>,
+    /// debounce 저장기 (계획 15단계 B) — [`publish_state`] 가 emit 후 최신 상태를
+    /// schedule 한다. `Arc` 는 setup(생성 시점)과 관리 상태가 공유하기 위함.
+    pub saver: Arc<Saver>,
 }
 
-/// 현재 스냅샷을 `state-changed` 이벤트로 emit 한다. 호출자가 Dispatcher lock 을
-/// 쥔 채 부른다 — lock 안에서 직렬화까지 마쳐 revision 과 상태가 일관된 스냅샷만
-/// 나간다. emit 실패는 삼키지 않고 stderr 에 남긴다 (프론트는 get_state 재동기화
-/// 경로가 있어 치명적이지 않다).
-pub fn emit_state_changed(app: &AppHandle, dispatcher: &Dispatcher) {
+/// 현재 스냅샷을 `state-changed` 이벤트로 emit 하고 저장을 예약한다 (emit +
+/// `saver.schedule` — 계획 B-2 저장 훅). 호출자가 Dispatcher lock 을 쥔 채
+/// 부른다 — lock 안에서 직렬화까지 마쳐 revision 과 상태가 일관된 스냅샷만
+/// 나간다. emit 실패는 삼키지 않고 stderr 에 남긴다 (프론트는 get_state
+/// 재동기화 경로가 있어 치명적이지 않다).
+///
+/// 저장 훅이 여기 한 곳인 근거: 상태 변이의 두 경로(dispatch 성공·sink on_exit)
+/// 모두 이 함수를 유일하게 경유한다 (계획 B-2 검증). state clone 은 lock 안에서
+/// 일어나지만 코어 AppState 는 구조 메타(워크스페이스·pane·탭)뿐인 작은 값이라
+/// 수용한다 — 실제 디스크 IO 는 Saver worker 스레드가 lock 밖에서 한다.
+pub fn publish_state(app: &AppHandle, dispatcher: &Dispatcher) {
     match serde_json::to_value(dispatcher.snapshot()) {
         Ok(payload) => {
             if let Err(err) = app.emit("state-changed", payload) {
@@ -68,5 +78,11 @@ pub fn emit_state_changed(app: &AppHandle, dispatcher: &Dispatcher) {
             }
         }
         Err(err) => eprintln!("[wmux] state snapshot serialize failed: {err}"),
+    }
+    match app.try_state::<AppState>() {
+        Some(managed) => managed.saver.schedule(dispatcher.state().clone()),
+        // manage-first 부팅 계약상 이 함수는 manage 후에만 불린다 — 아니라면
+        // 저장이 누락되고 있는 프로그램 결함이므로 숨기지 않는다.
+        None => eprintln!("[wmux] publish_state: managed state unavailable; save skipped"),
     }
 }

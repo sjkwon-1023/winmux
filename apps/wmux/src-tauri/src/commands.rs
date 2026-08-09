@@ -17,7 +17,7 @@ use tauri::{AppHandle, State};
 use wmux_core::command::{Command, CommandError, CommandOutput};
 use wmux_core::session::{PtySession, SessionId};
 
-use crate::state::{emit_state_changed, AppState};
+use crate::state::{publish_state, AppState};
 
 /// `get_stats` 직렬화형 (spike 이식). 코어 `SessionStats` 는 serde 의존이 없어
 /// 글루 DTO 로 내보낸다. `id` 는 레지스트리 발급 `SessionId` — 커맨드·이벤트의
@@ -43,8 +43,9 @@ fn session(state: &AppState, id: SessionId) -> Result<Arc<PtySession>, String> {
 }
 
 /// 구조 변이 단일 진입점 — 커맨드 bus. 성공 시 `state-changed` 로 새 스냅샷을
-/// emit 하고 `CommandOutput` 을 돌려준다 (dev 훅·MCP 가 생성 id 를 후속 조작에
-/// 쓴다). 실패(`CommandError`)는 상태 불변이 보장되므로 emit 하지 않는다.
+/// emit + 저장 예약하고(`publish_state`) `CommandOutput` 을 돌려준다 (dev 훅·
+/// MCP 가 생성 id 를 후속 조작에 쓴다). 실패(`CommandError`)는 상태 불변이
+/// 보장되므로 emit 도 저장도 하지 않는다.
 #[tauri::command]
 pub async fn dispatch(
     app: AppHandle,
@@ -58,8 +59,9 @@ pub async fn dispatch(
     tauri::async_runtime::spawn_blocking(move || {
         let mut d = dispatcher.lock().unwrap();
         let out = d.dispatch(cmd)?;
-        // emit 은 lock 안에서 — revision 과 상태가 일관된 스냅샷만 나간다.
-        emit_state_changed(&app, &d);
+        // emit + 저장 예약은 lock 안에서 — revision 과 상태가 일관된 스냅샷만
+        // 나가고, 같은 상태가 디스크 저장으로도 예약된다.
+        publish_state(&app, &d);
         Ok(out)
     })
     .await

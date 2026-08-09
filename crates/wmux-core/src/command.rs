@@ -259,6 +259,20 @@ impl Dispatcher {
         }
     }
 
+    /// 복원(sanitize 완료)된 상태를 **스폰 없이** 채택한다 — manage-first 부팅
+    /// (계획 15단계 B-2)의 코어 절반. 글루는 이 dispatcher 를 즉시 manage 한 뒤
+    /// [`Self::running_terminal_tabs`] 로 대상을 뽑아 탭별로 [`Self::respawn_tab`]
+    /// 을 호출해 재스폰한다. adopt 시점에는 살아 있는 PTY 가 없다 — persist
+    /// sanitize 가 전 터미널 탭의 `pty_session` 을 소거한 상태를 전제한다.
+    pub fn adopt(state: AppState, host: Box<dyn SessionHost>) -> Self {
+        // persist::load 가 릴리즈에서도 validate 를 마쳤지만, 다른 호출자(테스트
+        // 등)의 실수는 debug 에서 즉시 드러낸다.
+        for ws in &state.workspaces {
+            ws.debug_assert_invariants();
+        }
+        Self { state, host }
+    }
+
     /// 테스트·글루용 상태 접근자.
     pub fn state(&self) -> &AppState {
         &self.state
@@ -313,6 +327,89 @@ impl Dispatcher {
                 }
             }
         }
+    }
+
+    /// respawn 대상 열거 — **Running 터미널 탭 중 `pty_session` 이 None** 인 탭
+    /// (= adopt 직후의 재스폰 대상). Exited 로 저장된 탭은 재스폰하지 않는 상태
+    /// 충실 복원 결정(계획 B-2 — 재시작 후 빈 내용 + exited 배지)에 따라 열거에서
+    /// 도 제외된다.
+    pub fn running_terminal_tabs(&self) -> Vec<TabId> {
+        let mut tabs = Vec::new();
+        for ws in &self.state.workspaces {
+            for pane in ws.panes.values() {
+                for tab in &pane.tabs {
+                    if matches!(
+                        tab.kind,
+                        TabKind::Terminal {
+                            pty_session: None,
+                            status: TerminalStatus::Running,
+                            ..
+                        }
+                    ) {
+                        tabs.push(tab.id);
+                    }
+                }
+            }
+        }
+        tabs
+    }
+
+    /// adopt 된 상태의 터미널 탭 하나에 새 셸을 재스폰한다 — manage-first 부팅의
+    /// 탭별 단계 (글루가 회당 lock 으로 호출, 계획 0장).
+    ///
+    /// - 대상은 **Running 터미널 탭이면서 `pty_session` 이 None** 인 탭뿐이다.
+    ///   그 외(미지 id·Exited·이미 세션 있음)는 [`CommandError::UnknownTarget`] —
+    ///   글루가 [`Self::running_terminal_tabs`] 스냅샷에서 대상을 뽑으므로 부적합
+    ///   호출은 프로그램 결함이고, 조용한 no-op 으로 가리지 않는다 (이 경우
+    ///   상태·revision 불변).
+    /// - 스폰은 cwd = 탭 cwd(없으면 워크스페이스 root_path), distro = 워크스페이스
+    ///   기본값, 80×24 — [`Command::CreateTab`] 과 같은 스폰 경로를 공유한다.
+    ///   탭에 기록된 cwd 는 바꾸지 않는다 (생성 시점 값 보존 — 계획 0장 충실도
+    ///   한계 명시).
+    /// - 성공 시 `pty_session` 에 새 id 를 채우고, **스폰 실패 시 그 탭을
+    ///   `Exited { code: None }` 으로 강등한다** — dispatch 의 "실패 = 상태 불변"
+    ///   계약과 달리 강등 자체가 설계된 결과 상태다. 성공·강등 어느 쪽이든
+    ///   `revision += 1` 로 스냅샷에 전파된다.
+    pub fn respawn_tab(&mut self, tab: TabId) -> Result<SessionId, CommandError> {
+        let (wi, pane, ti) = self.locate_tab(tab)?;
+        // 적격성 검사 — 통과 못 하면 상태·revision 불변으로 에러.
+        let tab_cwd = match &self.state.workspaces[wi].panes[&pane].tabs[ti].kind {
+            TabKind::Terminal {
+                pty_session: None,
+                status: TerminalStatus::Running,
+                cwd,
+            } => cwd.clone(),
+            _ => return Err(unknown("respawnable tab", tab.0)),
+        };
+        let spawned = self.spawn_terminal(wi, tab_cwd);
+        let pane_ref = self.state.workspaces[wi]
+            .panes
+            .get_mut(&pane)
+            .expect("locate_tab 이 존재를 보장");
+        let TabKind::Terminal {
+            pty_session,
+            status,
+            ..
+        } = &mut pane_ref.tabs[ti].kind
+        else {
+            unreachable!("적격성 검사를 통과한 terminal 탭");
+        };
+        let result = match spawned {
+            Ok((session, _effective_cwd)) => {
+                *pty_session = Some(session);
+                Ok(session)
+            }
+            Err(err) => {
+                // 스폰 실패 강등 — pty_session 은 None 그대로 (배지만 Exited).
+                *status = TerminalStatus::Exited { code: None };
+                Err(err)
+            }
+        };
+        self.state.revision += 1;
+        for ws in &self.state.workspaces {
+            ws.debug_assert_invariants();
+        }
+        result
     }
 
     fn execute(&mut self, cmd: Command) -> Result<CommandOutput, CommandError> {
@@ -1429,5 +1526,211 @@ mod tests {
         create_terminal_tab(&mut d, pane);
         assert_eq!(d.state().revision, 2);
         assert_eq!(d.snapshot().revision, 2);
+    }
+
+    /// pty_session 없는 터미널 탭 값 — persist sanitize 직후 형태.
+    fn sessionless_tab(id: u64, status: TerminalStatus, cwd: Option<&str>) -> Tab {
+        Tab {
+            id: TabId(id),
+            title: format!("tab-{id}"),
+            kind: TabKind::Terminal {
+                pty_session: None,
+                status,
+                cwd: cwd.map(String::from),
+            },
+            notification: NotificationState::None,
+            last_activity_ms: None,
+        }
+    }
+
+    /// 복원 직후(sanitize 완료) 모양의 상태 — ws 1, split 4 아래 pane 2·3.
+    /// pane 2: tab 5 (Running, cwd 없음 → root_path 상속 대상).
+    /// pane 3: tab 6 (Running, cwd /custom), tab 7 (Exited — 재스폰 비대상).
+    /// next_id 8, revision 3.
+    fn adopted_state() -> AppState {
+        AppState {
+            workspaces: vec![Workspace {
+                id: WorkspaceId(1),
+                name: "restored".into(),
+                root_path: Some("/root".into()),
+                distro: Some("Ubuntu".into()),
+                git_branch: None,
+                git_dirty: None,
+                layout: SplitTree::Split {
+                    id: SplitId(4),
+                    direction: SplitDirection::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(SplitTree::Leaf { pane: PaneId(2) }),
+                    second: Box::new(SplitTree::Leaf { pane: PaneId(3) }),
+                },
+                panes: [
+                    (
+                        PaneId(2),
+                        Pane {
+                            id: PaneId(2),
+                            tabs: vec![sessionless_tab(5, TerminalStatus::Running, None)],
+                            active_tab: Some(TabId(5)),
+                        },
+                    ),
+                    (
+                        PaneId(3),
+                        Pane {
+                            id: PaneId(3),
+                            tabs: vec![
+                                sessionless_tab(6, TerminalStatus::Running, Some("/custom")),
+                                sessionless_tab(7, TerminalStatus::Exited { code: Some(1) }, None),
+                            ],
+                            active_tab: Some(TabId(6)),
+                        },
+                    ),
+                ]
+                .into(),
+                active_pane: PaneId(2),
+                agent_status: AgentStatus::Idle,
+                last_agent_message: None,
+            }],
+            active_workspace: Some(WorkspaceId(1)),
+            next_id: 8,
+            revision: 3,
+        }
+    }
+
+    fn adopted_dispatcher() -> (Dispatcher, FakeSessionHost) {
+        let host = FakeSessionHost::default();
+        (
+            Dispatcher::adopt(adopted_state(), Box::new(host.clone())),
+            host,
+        )
+    }
+
+    /// `tab.kind` 의 (pty_session, status) 를 읽는 관측 헬퍼.
+    fn terminal_kind(
+        d: &Dispatcher,
+        pane: PaneId,
+        ti: usize,
+    ) -> (Option<SessionId>, TerminalStatus) {
+        let TabKind::Terminal {
+            pty_session,
+            status,
+            ..
+        } = &d.state().workspaces[0].panes[&pane].tabs[ti].kind
+        else {
+            panic!("terminal 탭이어야 함");
+        };
+        (*pty_session, *status)
+    }
+
+    #[test]
+    fn adopt_takes_state_without_spawning() {
+        let (d, host) = adopted_dispatcher();
+        // 채택만 — 스폰·kill 부수효과 전혀 없음, 상태 원본 그대로.
+        assert!(host.spawns().is_empty());
+        assert!(host.kills().is_empty());
+        assert_eq!(*d.state(), adopted_state());
+    }
+
+    #[test]
+    fn running_terminal_tabs_lists_only_sessionless_running() {
+        let (mut d, _host) = adopted_dispatcher();
+        // Exited 탭(7)은 제외 — Running·pty_session None 인 5·6 만.
+        assert_eq!(d.running_terminal_tabs(), vec![TabId(5), TabId(6)]);
+        // 재스폰돼 세션이 채워진 탭은 열거에서 빠진다.
+        d.respawn_tab(TabId(5)).unwrap();
+        assert_eq!(d.running_terminal_tabs(), vec![TabId(6)]);
+    }
+
+    #[test]
+    fn respawn_fills_session_and_bumps_revision() {
+        let (mut d, host) = adopted_dispatcher();
+        let s5 = d.respawn_tab(TabId(5)).unwrap();
+        let s6 = d.respawn_tab(TabId(6)).unwrap();
+        assert_eq!((s5, s6), (1, 2));
+        assert_eq!(
+            terminal_kind(&d, PaneId(2), 0),
+            (Some(s5), TerminalStatus::Running)
+        );
+        assert_eq!(
+            terminal_kind(&d, PaneId(3), 0),
+            (Some(s6), TerminalStatus::Running)
+        );
+        // 회당 revision += 1 (스냅샷 전파) — adopted revision 3 에서 시작.
+        assert_eq!(d.state().revision, 5);
+
+        // 스폰 파라미터: cwd = 탭 cwd(없으면 root_path), distro = ws 기본, 80×24.
+        let spawns = host.spawns();
+        assert_eq!(
+            spawns[0],
+            ShellSpawnReq {
+                cwd: Some("/root".into()),
+                distro: Some("Ubuntu".into()),
+                cols: 80,
+                rows: 24,
+            }
+        );
+        assert_eq!(spawns[1].cwd.as_deref(), Some("/custom"));
+        // 탭에 기록된 cwd 는 재스폰이 바꾸지 않는다 (생성 시점 값 보존).
+        let TabKind::Terminal { cwd, .. } = &d.state().workspaces[0].panes[&PaneId(2)].tabs[0].kind
+        else {
+            panic!("terminal 탭이어야 함");
+        };
+        assert_eq!(*cwd, None);
+    }
+
+    #[test]
+    fn respawn_failure_demotes_tab_to_exited() {
+        let (mut d, host) = adopted_dispatcher();
+        host.set_fail_spawn(true);
+        let err = d.respawn_tab(TabId(5)).unwrap_err();
+        assert!(matches!(err, CommandError::SpawnFailed { .. }), "{err:?}");
+        // 강등이 설계된 결과 상태 — pty_session 은 None 유지, revision 반영.
+        assert_eq!(
+            terminal_kind(&d, PaneId(2), 0),
+            (None, TerminalStatus::Exited { code: None })
+        );
+        assert_eq!(d.state().revision, 4);
+        // 강등된 탭은 이후 재스폰 대상이 아니다 (부적합 = UnknownTarget).
+        host.set_fail_spawn(false);
+        let err = d.respawn_tab(TabId(5)).unwrap_err();
+        assert!(matches!(err, CommandError::UnknownTarget { .. }), "{err:?}");
+        assert_eq!(d.running_terminal_tabs(), vec![TabId(6)]);
+    }
+
+    #[test]
+    fn respawn_rejects_ineligible_targets_without_state_change() {
+        let (mut d, host) = adopted_dispatcher();
+        let s5 = d.respawn_tab(TabId(5)).unwrap();
+        let before = serde_json::to_value(d.state()).unwrap();
+        // 부적합 3종: Exited 저장 탭 / 이미 세션 있는 탭 / 미지 id — 전부
+        // UnknownTarget 에러이고 상태·revision 불변 (부적합 호출 = 프로그램 결함).
+        for tab in [TabId(7), TabId(5), TabId(99)] {
+            let err = d.respawn_tab(tab).unwrap_err();
+            assert!(
+                matches!(err, CommandError::UnknownTarget { .. }),
+                "tab {tab:?} → {err:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(d.state()).unwrap(),
+                before,
+                "tab {tab:?} 가 상태를 바꿈"
+            );
+        }
+        // 성공한 첫 재스폰 외에 스폰이 더 일어나지 않았다.
+        assert_eq!(host.spawns().len(), 1);
+        assert_eq!(
+            terminal_kind(&d, PaneId(2), 0),
+            (Some(s5), TerminalStatus::Running)
+        );
+    }
+
+    #[test]
+    fn adopt_preserves_id_continuity_for_later_dispatch() {
+        let (mut d, _host) = adopted_dispatcher();
+        d.respawn_tab(TabId(5)).unwrap();
+        d.respawn_tab(TabId(6)).unwrap();
+        // adopt 된 next_id(8)에서 발급이 이어진다 — 복원 후 생성이 기존 id 와
+        // 충돌하지 않는다 (dispatch 가 debug 불변식 검사도 수행).
+        let (tab, _session) = create_terminal_tab(&mut d, PaneId(2));
+        assert_eq!(tab, TabId(8));
+        assert_eq!(d.state().next_id, 9);
     }
 }

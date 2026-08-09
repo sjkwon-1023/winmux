@@ -111,54 +111,58 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// 상태 불변식 검사 (debug 빌드 전용).
+    /// 상태 불변식 검사 — Result 판. persistence 복원(15단계) 등 릴리즈 빌드에서도
+    /// 신뢰할 수 없는 입력(디스크의 state.json)을 검증해야 하는 경로가 쓴다.
     ///
     /// - layout 의 leaf 집합 == `panes` 키 집합 (중복 leaf 도 불허)
     /// - layout 의 split id 는 트리 전체에서 유일
     /// - `active_pane` 은 `panes` 에 존재
     /// - 각 pane 의 `active_tab` 은 그 pane 의 `tabs` 에 존재
-    pub fn debug_assert_invariants(&self) {
-        #[cfg(debug_assertions)]
-        {
-            let leaf_list = self.layout.leaves();
-            let leaf_set: std::collections::BTreeSet<PaneId> = leaf_list.iter().copied().collect();
-            debug_assert_eq!(
-                leaf_list.len(),
-                leaf_set.len(),
-                "workspace {:?}: layout 에 중복 leaf",
-                self.id
-            );
-            let split_list = self.layout.split_ids();
-            let split_set: std::collections::BTreeSet<SplitId> =
-                split_list.iter().copied().collect();
-            debug_assert_eq!(
-                split_list.len(),
-                split_set.len(),
-                "workspace {:?}: layout 에 중복 split id",
-                self.id
-            );
-            let key_set: std::collections::BTreeSet<PaneId> = self.panes.keys().copied().collect();
-            debug_assert_eq!(
-                leaf_set, key_set,
-                "workspace {:?}: layout leaf 집합 != panes 키 집합",
-                self.id
-            );
-            debug_assert!(
-                self.panes.contains_key(&self.active_pane),
+    ///
+    /// 첫 위반에서 사람이 읽을 사유 문자열로 실패한다.
+    pub fn validate(&self) -> Result<(), String> {
+        let leaf_list = self.layout.leaves();
+        let leaf_set: std::collections::BTreeSet<PaneId> = leaf_list.iter().copied().collect();
+        if leaf_list.len() != leaf_set.len() {
+            return Err(format!("workspace {:?}: layout 에 중복 leaf", self.id));
+        }
+        let split_list = self.layout.split_ids();
+        let split_set: std::collections::BTreeSet<SplitId> = split_list.iter().copied().collect();
+        if split_list.len() != split_set.len() {
+            return Err(format!("workspace {:?}: layout 에 중복 split id", self.id));
+        }
+        let key_set: std::collections::BTreeSet<PaneId> = self.panes.keys().copied().collect();
+        if leaf_set != key_set {
+            return Err(format!(
+                "workspace {:?}: layout leaf 집합 {:?} != panes 키 집합 {:?}",
+                self.id, leaf_set, key_set
+            ));
+        }
+        if !self.panes.contains_key(&self.active_pane) {
+            return Err(format!(
                 "workspace {:?}: active_pane {:?} 이 panes 에 없음",
-                self.id,
-                self.active_pane
-            );
-            for pane in self.panes.values() {
-                if let Some(tab) = pane.active_tab {
-                    debug_assert!(
-                        pane.tabs.iter().any(|t| t.id == tab),
+                self.id, self.active_pane
+            ));
+        }
+        for pane in self.panes.values() {
+            if let Some(tab) = pane.active_tab {
+                if !pane.tabs.iter().any(|t| t.id == tab) {
+                    return Err(format!(
                         "pane {:?}: active_tab {:?} 이 tabs 에 없음",
-                        pane.id,
-                        tab
-                    );
+                        pane.id, tab
+                    ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// 상태 불변식 검사 (debug 빌드 전용) — [`Workspace::validate`] 의 assert 래퍼.
+    /// 커맨드 변이 직후처럼 "위반 = 코어 버그"인 내부 경로에서 쓴다.
+    pub fn debug_assert_invariants(&self) {
+        #[cfg(debug_assertions)]
+        if let Err(msg) = self.validate() {
+            panic!("불변식 위반: {msg}");
         }
     }
 }
@@ -544,14 +548,16 @@ mod tests {
         assert!(!tree.contains(PaneId(3)));
     }
 
-    #[test]
-    fn workspace_invariants_hold_for_consistent_state() {
-        let pane = |id: u64| Pane {
+    fn test_pane(id: u64) -> Pane {
+        Pane {
             id: PaneId(id),
             tabs: Vec::new(),
             active_tab: None,
-        };
-        let ws = Workspace {
+        }
+    }
+
+    fn test_workspace() -> Workspace {
+        Workspace {
             id: WorkspaceId(1),
             name: "test".into(),
             root_path: None,
@@ -559,11 +565,51 @@ mod tests {
             git_branch: None,
             git_dirty: None,
             layout: split(4, SplitDirection::Horizontal, leaf(2), leaf(3)),
-            panes: [(PaneId(2), pane(2)), (PaneId(3), pane(3))].into(),
+            panes: [(PaneId(2), test_pane(2)), (PaneId(3), test_pane(3))].into(),
             active_pane: PaneId(2),
             agent_status: AgentStatus::Idle,
             last_agent_message: None,
-        };
+        }
+    }
+
+    #[test]
+    fn workspace_invariants_hold_for_consistent_state() {
+        let ws = test_workspace();
+        assert_eq!(ws.validate(), Ok(()));
         ws.debug_assert_invariants();
+    }
+
+    #[test]
+    fn validate_rejects_each_invariant_violation() {
+        // leaf 집합 != panes 키 집합 (pane 3 누락).
+        let mut ws = test_workspace();
+        ws.panes.remove(&PaneId(3));
+        assert!(ws.validate().unwrap_err().contains("panes 키 집합"));
+
+        // 중복 leaf.
+        let mut ws = test_workspace();
+        ws.layout = split(4, SplitDirection::Horizontal, leaf(2), leaf(2));
+        assert!(ws.validate().unwrap_err().contains("중복 leaf"));
+
+        // 중복 split id.
+        let mut ws = test_workspace();
+        ws.layout = split(
+            4,
+            SplitDirection::Horizontal,
+            split(4, SplitDirection::Vertical, leaf(2), leaf(5)),
+            leaf(3),
+        );
+        ws.panes.insert(PaneId(5), test_pane(5));
+        assert!(ws.validate().unwrap_err().contains("중복 split id"));
+
+        // active_pane 이 panes 에 없음.
+        let mut ws = test_workspace();
+        ws.active_pane = PaneId(99);
+        assert!(ws.validate().unwrap_err().contains("active_pane"));
+
+        // active_tab 이 tabs 에 없음.
+        let mut ws = test_workspace();
+        ws.panes.get_mut(&PaneId(2)).unwrap().active_tab = Some(TabId(42));
+        assert!(ws.validate().unwrap_err().contains("active_tab"));
     }
 }
