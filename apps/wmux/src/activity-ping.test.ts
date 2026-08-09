@@ -37,15 +37,16 @@ describe("ActivityPing", () => {
     expect(send.mock.calls).toEqual([[null], [false], [true]]);
   });
 
-  it("visibility 전송이 침묵 창을 리셋한다 (직후 활동 핑은 중복이라 억제)", () => {
+  it("visibility 전송은 침묵 창을 건드리지 않는다 (활동이 아님 — 버그 4·5 수정)", () => {
     const send = vi.fn();
     const ping = new ActivityPing(send);
     ping.visibility(true, 5_000);
-    // 백엔드는 visibility 전송도 활동으로 쳤으므로 5초 뒤 활동은 창 안 — 억제.
-    ping.activity(9_999);
-    expect(send).toHaveBeenCalledTimes(1);
-    ping.activity(15_000);
+    // visibility 는 백엔드에서 활동으로 치지 않으므로, 직후의 실제 활동 핑은
+    // 억제되면 안 된다 (재무장이 늦으면 안 됨).
+    ping.activity(5_100);
     expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenNthCalledWith(1, true);
+    expect(send).toHaveBeenNthCalledWith(2, null);
   });
 
   it("windowMs 를 좁히면 그 주기로 통과한다", () => {

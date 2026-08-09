@@ -58,6 +58,9 @@ export class TerminalView {
   /** attach(term.open) 전에 focus() 가 요청된 경우의 보류 플래그 —
    *  textarea 가 아직 없어 term.focus() 가 조용히 무시되기 때문이다. */
   private focusPending = false;
+  /** replay 재생 완료 전의 onData 억제 플래그 — 낡은 단말 질의에 대한 xterm
+   *  자동 응답이 PTY 로 새는 것을 막는다 (attach() 의 onData 배선 주석 참조). */
+  private replayDone = false;
 
   constructor(
     parent: HTMLElement,
@@ -131,31 +134,42 @@ export class TerminalView {
       this.onChunk(chunk);
     };
 
+    // 입력 배선은 replay write 전에 건다 — 단 **replay 재생 완료 전의 onData 는
+    // PTY 로 보내지 않는다** (체크포인트 1 버그 2). replay 에는 ConPTY 가 동기화용
+    // 으로 넣는 단말 질의(ESC[6n 등)가 보존돼 있고, xterm 은 파싱하며 CPR
+    // (`ESC[..R`) 같은 자동 응답을 onData 로 낸다 — 낡은 질의에 응답하면 그
+    // 바이트가 셸 입력 줄에 stray `R` 로 남는다 (전환·리로드마다 1개씩 누적).
+    // 라이브 스트림의 새 질의는 replay 파싱 완료 후 도착하므로 정상 응답된다
+    // (우리 resize nudge 가 유발하는 재동기화 질의 포함).
+    this.onDataSub = this.term.onData((data) => {
+      if (!this.replayDone) {
+        console.debug("[wmux] dropped stale terminal auto-response", data.length);
+        return;
+      }
+      writeStdin(this.session, data).catch((err) => console.error("write_stdin failed", err));
+    });
+
     // 2) attach → raw body [u64 LE end_offset][replay bytes] 파싱.
     const body = await attachTerminal(this.session, channel);
     if (this.disposed) return; // attach 중 뷰가 해제됐으면 여기서 끝 (세션은 유지)
     const { offset: endOffset, bytes: replay } = parseFrame(body);
     const traceDone = this.onTraceReplayDone;
     if (replay.byteLength > 0) {
-      if (traceDone === undefined) {
-        this.term.write(replay);
-      } else {
+      const bytes = replay.byteLength;
+      this.term.write(replay, () => {
+        // 파싱 완료 — 이 시점부터의 onData 는 라이브 응답·사용자 입력이다.
+        this.replayDone = true;
         // 전환 계측 완료점 — replay write 완료 콜백 + rAF 1회 보정 (계획 A-2:
         // 실제 페인트가 아닌 근사, report 의 approximatePaint 가 명시).
-        const bytes = replay.byteLength;
-        this.term.write(replay, () => requestAnimationFrame(() => traceDone(bytes)));
-      }
-    } else if (traceDone !== undefined) {
+        if (traceDone !== undefined) requestAnimationFrame(() => traceDone(bytes));
+      });
+    } else {
+      this.replayDone = true;
       // replay 가 비어도 완료점은 알린다 (rAF 보정만) — trace 가 이 탭을 기다린다.
-      requestAnimationFrame(() => traceDone(0));
+      if (traceDone !== undefined) requestAnimationFrame(() => traceDone(0));
     }
     // 3) 게이트 개방 — 큐잉분 판정·배출 (폐기분 즉시 ack 포함).
     this.applyGateResult(this.gate.onSnapshot(endOffset));
-
-    // 입력 배선 — 가로채기 키 목록 외 입력은 전부 xterm 기본 onData 경로로 PTY 에 간다.
-    this.onDataSub = this.term.onData((data) => {
-      writeStdin(this.session, data).catch((err) => console.error("write_stdin failed", err));
-    });
     this.onResizeSub = this.term.onResize(({ cols, rows }) => {
       resizeTerminal(this.session, cols, rows).catch((err) =>
         console.error("resize failed", err),

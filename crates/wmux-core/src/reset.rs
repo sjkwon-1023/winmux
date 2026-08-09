@@ -14,12 +14,15 @@
 //!    (글루 계약 — xterm 은 단말 질의(DA·DSR 등)에 자동 응답하는 write 를 만들고
 //!    그 질의는 replay 재생에도 들어 있어, stdin 을 활동으로 치면 리셋 후 재발화
 //!    자기루프가 된다. 실제 타이핑은 프론트 활동 핑이 잡는다 — 16단계 리뷰).
-//! 2. **Hidden**: unfocused **이면서** invisible 인 상태가 `hidden_ms` 연속되면
-//!    발화. **계획 v2 원문은 "최소화 또는 포커스 아웃"(OR)이지만 여기서는 AND 로
-//!    좁혔다(의도적 이탈)**: 포커스만 잃고 창이 보이는 상태는 사용자가 지켜보는
-//!    중일 수 있어(리셋이 가시화되면 "보이지 않아야 한다" 원칙 위반) 카운트하지
-//!    않는다. OS focus 오인 대비를 겸한다. 같은 연속 숨김 구간에서는 1회만
-//!    발화하며, 표시 복귀 또는 실제 입력이 카운트다운을 재시작한다.
+//! 2. **Hidden**: document visibility 가 invisible(최소화·완전 가림)인 상태가
+//!    `hidden_ms` 연속되면 발화. **계획 v2 원문 "최소화 또는 포커스 아웃" 중
+//!    최소화/가림(invisible)만 채택했다(의도적 이탈)**: 포커스만 잃고 창이
+//!    보이는 상태는 사용자가 지켜보는 중일 수 있어(리셋이 가시화되면 "보이지
+//!    않아야 한다" 원칙 위반) 카운트하지 않고, focus 신호 자체를 판정에서
+//!    제외한다 — Windows 실기에서 최소화 시 Tauri `Focused(false)` 가 신뢰성
+//!    있게 오지 않아, focus 를 판정 조건으로 걸면 hidden 이 영영 미발화할 수
+//!    있다 (체크포인트 1 실기 검증). 같은 연속 숨김 구간에서는 1회만 발화하며,
+//!    표시 복귀 또는 실제 입력이 카운트다운을 재시작한다.
 //! 3. **MemWatchdog**: 메모리 샘플이 임계를 초과하면 pending 예약만 한다 (직접
 //!    발화 금지). 발화는 다음 안전한 순간 — 마지막 입력에서 `safe_idle_ms` 경과
 //!    ([`ResetPolicy::poll`]) 또는 워크스페이스 전환 직후
@@ -45,7 +48,8 @@
 pub struct ResetConfig {
     /// 마지막 실제 입력 후 이 시간(ms) 경과 시 Idle 발화. `None` = off.
     pub idle_ms: Option<u64>,
-    /// 숨김(unfocused && invisible)이 이 시간(ms) 연속되면 Hidden 발화. `None` = off.
+    /// 숨김(invisible — 최소화·완전 가림)이 이 시간(ms) 연속되면 Hidden 발화.
+    /// `None` = off.
     pub hidden_ms: Option<u64>,
     /// 메모리 샘플이 이 값(bytes)을 초과하면 워치독 pending. `None` = off.
     pub mem_limit_bytes: Option<u64>,
@@ -78,6 +82,10 @@ pub struct ResetPolicy {
     last_input: u64,
     /// Idle 발화 대기 상태 — 발화 시 false, 다음 실제 입력에서 true.
     idle_armed: bool,
+    /// 마지막으로 보고된 창 포커스 상태. **hidden 판정에는 쓰이지 않는다**
+    /// (판정은 visibility 단독 — 모듈 문서 트리거 2 참조). 향후 로그·계측의
+    /// 참고 신호로만 보관하며, 현재는 읽는 곳이 없다.
+    #[allow(dead_code)]
     focused: bool,
     visible: bool,
     /// 현재 숨김 구간의 카운트다운 시작 시각. 표시 중이면 `None`.
@@ -123,8 +131,8 @@ impl ResetPolicy {
 
     /// 실제 사용자 입력(타이핑·붙여넣기·dispatch·throttled 활동 핑). idle 과
     /// hidden 대기를 **모두** 재무장한다 — 숨김 카운트다운도 현재 시각에서
-    /// 재시작하므로, OS 가 Focused(false) 로 오인한 채 타이핑 중이어도 hidden 이
-    /// 발화할 수 없다.
+    /// 재시작하므로, invisible 보고가 잘못 남아 있는 상태에서 타이핑 중이어도
+    /// hidden 이 발화할 수 없다.
     pub fn on_user_input(&mut self, now: u64) {
         self.last_input = now;
         self.idle_armed = true;
@@ -134,22 +142,26 @@ impl ResetPolicy {
         }
     }
 
-    /// 창 포커스 변화. visibility 와 함께 "숨김 = 둘 다 숨김" 판정에 쓰인다.
-    /// 포커스 이벤트는 활동이 아니므로 idle 타이머는 건드리지 않는다.
-    pub fn on_focus(&mut self, focused: bool, now: u64) {
+    /// 창 포커스 변화 보고. **hidden 판정에는 영향을 주지 않는다** — 판정은
+    /// visibility 단독이다 (최소화 시 `Focused(false)` 미도착 실기 사례, 모듈
+    /// 문서 트리거 2). 참고 신호로 기록만 하며, 포커스 이벤트는 활동이 아니므로
+    /// idle 타이머도 건드리지 않는다.
+    pub fn on_focus(&mut self, focused: bool, _now: u64) {
         self.focused = focused;
-        self.sync_hidden(now);
     }
 
-    /// 프론트 visibility 변화 (`document.visibilitychange` 보조 신호).
+    /// 프론트 visibility 변화 (`document.visibilitychange`) — **hidden 판정의
+    /// 단독 신호**. invisible 전이가 카운트다운을 시작하고 visible 복귀가
+    /// 구간을 종료한다. visibility 이벤트는 활동이 아니므로 idle 타이머는
+    /// 건드리지 않는다.
     pub fn on_visibility(&mut self, visible: bool, now: u64) {
         self.visible = visible;
         self.sync_hidden(now);
     }
 
-    /// focus·visibility 를 합쳐 숨김 구간의 시작/종료 전이를 반영한다.
+    /// visibility 상태로 숨김 구간의 시작/종료 전이를 반영한다.
     fn sync_hidden(&mut self, now: u64) {
-        let hidden = !self.focused && !self.visible;
+        let hidden = !self.visible;
         match (hidden, self.hidden_since) {
             (true, None) => {
                 // 표시 → 숨김 전이: 카운트다운 시작.
@@ -383,43 +395,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn idle_stays_disarmed_without_input_despite_time_and_polls() {
+        // 회귀(실기): idle 리셋이 입력 없이 30초마다 반복 발화했다 — 원인은
+        // 글루가 visibility 보고를 user_input 으로 집계한 것. 정책 자체는 발화
+        // 후 disarm 상태에서 어떤 시간 경과·poll 반복에도 재발화하면 안 된다.
+        let mut p = ResetPolicy::new(idle_only(), 0);
+        assert_eq!(p.poll(1_000), Some(ResetTrigger::Idle));
+        // idle_ms 간격으로 idle_ms×10 까지 반복 poll — 전부 미발화.
+        for i in 1..=10u64 {
+            let t = 1_000 + i * 1_000;
+            assert_eq!(p.poll(t), None, "idle refired at t={t} without input");
+            // disarm 중에는 대기할 idle 데드라인 자체가 없어야 한다.
+            assert_eq!(p.next_deadline(t), None);
+        }
+    }
+
+    #[test]
+    fn idle_not_rearmed_by_visibility_or_focus_events() {
+        // visibility·focus 이벤트는 활동이 아니다 — disarm 된 idle 을 재무장하면
+        // 안 된다 (재무장은 on_user_input 뿐).
+        let mut p = ResetPolicy::new(idle_only(), 0);
+        assert_eq!(p.poll(1_000), Some(ResetTrigger::Idle));
+        for i in 0..5u64 {
+            let t = 2_000 + i * 2_000;
+            p.on_visibility(false, t);
+            p.on_focus(false, t);
+            p.on_visibility(true, t + 1_000);
+            p.on_focus(true, t + 1_000);
+            assert_eq!(p.poll(t + 1_999), None, "idle refired after window events");
+        }
+        assert_eq!(p.poll(60_000), None);
+        assert_eq!(p.next_deadline(60_000), None);
+    }
+
     // ---- Hidden ----
 
     #[test]
-    fn hidden_requires_both_unfocused_and_invisible() {
+    fn hidden_uses_visibility_only_and_ignores_focus() {
         let mut p = ResetPolicy::new(hidden_only(), 0);
-        // focus 를 잃어도 visible 이면 표시 (OR 판정) — 카운트하지 않는다.
+        // focus 를 잃어도 visible 이면 카운트하지 않는다 (가시 리셋 방지).
         p.on_focus(false, 0);
         assert_eq!(p.poll(10_000), None);
-        // invisible 이어도 focused 면 표시.
+        // focused 여도 invisible 이면 카운트한다 — focus 는 판정에서 제외
+        // (최소화 시 Focused(false) 미도착 실기 사례).
         p.on_focus(true, 10_000);
         p.on_visibility(false, 10_000);
-        assert_eq!(p.poll(20_000), None);
-        // 둘 다 숨김이 된 순간부터 카운트다운.
-        p.on_focus(false, 20_000);
-        assert_eq!(p.poll(20_499), None);
-        assert_eq!(p.poll(20_500), Some(ResetTrigger::Hidden));
+        assert_eq!(p.poll(10_499), None);
+        assert_eq!(p.poll(10_500), Some(ResetTrigger::Hidden));
+    }
+
+    #[test]
+    fn hidden_fires_after_minimize_without_any_focus_event() {
+        // 실기 시나리오: 최소화 시 visibilitychange(false)만 오고 Focused(false)
+        // 는 오지 않는다 — visibility 단독으로 발화해야 한다.
+        let mut p = ResetPolicy::new(hidden_only(), 0);
+        p.on_visibility(false, 0);
+        assert_eq!(p.poll(499), None);
+        assert_eq!(p.poll(500), Some(ResetTrigger::Hidden));
     }
 
     #[test]
     fn hidden_rearms_on_show_transition() {
         let mut p = ResetPolicy::new(hidden_only(), 0);
-        p.on_focus(false, 0);
         p.on_visibility(false, 0);
         // 만료 전에 표시로 복귀 → 구간 종료.
-        p.on_focus(true, 400);
+        p.on_visibility(true, 400);
         assert_eq!(p.poll(10_000), None);
         // 다시 숨김 → 새 구간으로 처음부터 센다.
-        p.on_focus(false, 10_000);
+        p.on_visibility(false, 10_000);
         assert_eq!(p.poll(10_499), None);
         assert_eq!(p.poll(10_500), Some(ResetTrigger::Hidden));
     }
 
     #[test]
     fn hidden_rearms_on_user_input_while_hidden() {
-        // Focused(false) 오인 중 타이핑 시나리오 — 입력이 숨김 카운트다운을 재시작한다.
+        // invisible 보고가 남은 채 타이핑하는 시나리오 — 입력이 숨김 카운트다운을
+        // 재시작한다.
         let mut p = ResetPolicy::new(hidden_only(), 0);
-        p.on_focus(false, 0);
         p.on_visibility(false, 0);
         p.on_user_input(300);
         assert_eq!(p.poll(500), None); // 원래 만료 시각(0+500)에는 미발화
@@ -430,7 +483,6 @@ mod tests {
     #[test]
     fn hidden_fires_once_per_stretch() {
         let mut p = ResetPolicy::new(hidden_only(), 0);
-        p.on_focus(false, 0);
         p.on_visibility(false, 0);
         assert_eq!(p.poll(500), Some(ResetTrigger::Hidden));
         // 같은 숨김 구간이 계속되는 동안은 재발화 없음 (cooldown 0 이어도).
@@ -445,9 +497,8 @@ mod tests {
     fn duplicate_hide_events_keep_countdown() {
         // 같은 방향 중복 이벤트가 카운트다운을 리셋하면 안 된다.
         let mut p = ResetPolicy::new(hidden_only(), 0);
-        p.on_focus(false, 0);
         p.on_visibility(false, 0);
-        p.on_focus(false, 400); // 중복 — 시작 시각 0 유지
+        p.on_visibility(false, 400); // 중복 — 시작 시각 0 유지
         assert_eq!(p.poll(500), Some(ResetTrigger::Hidden));
     }
 
@@ -567,7 +618,6 @@ mod tests {
             },
             0,
         );
-        p.on_focus(false, 0);
         p.on_visibility(false, 0);
         assert_eq!(p.poll(100), Some(ResetTrigger::Hidden)); // cooldown → 5_100
                                                              // idle 만료(1_000)가 cooldown 안 — 억제되지만 suppressed 는 워치독 전용.
@@ -624,7 +674,6 @@ mod tests {
         p.on_mem_sample(0, 100); // 다음 샘플 200
         assert_eq!(p.next_deadline(100), Some(200));
         // 숨김 시작(만료 620)·pending(safe 도달 0+200=200) 추가.
-        p.on_focus(false, 120);
         p.on_visibility(false, 120);
         p.on_mem_sample(2_000_000, 200); // pending, 다음 샘플 300
                                          // 이미 지난 데드라인(200)도 그대로 반환 — 즉시 poll 하라는 신호.
@@ -645,7 +694,6 @@ mod tests {
     #[test]
     fn next_deadline_excludes_fired_hidden_stretch() {
         let mut p = ResetPolicy::new(hidden_only(), 0);
-        p.on_focus(false, 0);
         p.on_visibility(false, 0);
         assert_eq!(p.next_deadline(0), Some(500));
         assert_eq!(p.poll(500), Some(ResetTrigger::Hidden));

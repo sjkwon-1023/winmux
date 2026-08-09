@@ -6,9 +6,9 @@
 // 이 핑이 있어야 순수 열람(입력 없이 스크롤백 wheel 만)이 idle 로 오인되지
 // 않는다 (계획 0장 — "활성 사용 중 절대 리셋 금지"). visibility 변화(보조 신호)
 // 는 침묵 창과 무관하게 즉시 통과한다 — hidden 카운트다운의 시작/종료 전이는
-// 지연 없이 정책에 도달해야 한다. visibility 전송도 백엔드에서 활동으로
-// 집계되므로(user_activity 커맨드 계약) 침묵 창을 같이 리셋해 직후의 중복
-// 활동 핑을 아낀다.
+// 지연 없이 정책에 도달해야 한다. visibility 전송은 백엔드에서 **활동으로 치지
+// 않으므로**(체크포인트 1 버그 4·5 수정 — 최소화 보고가 hidden 을 재무장하거나
+// 리로드 동기화가 idle 을 재무장하면 안 된다) 침묵 창을 건드리지 않는다.
 
 /** 백엔드 전송 콜백 — `visible` 은 visibilitychange 보조 신호, 활동 핑은 null. */
 export type ActivitySender = (visible: boolean | null) => void;
@@ -30,9 +30,10 @@ export class ActivityPing {
     this.send(null);
   }
 
-  /** visibility 전이 — throttle 우회 즉시 전송 (visible 값 동봉). */
-  visibility(visible: boolean, now: number): void {
-    this.lastSentAt = now;
+  /** visibility 전이 — throttle 우회 즉시 전송 (visible 값 동봉). 침묵 창은
+   *  건드리지 않는다 — visibility 는 활동이 아니므로, 직후의 실제 제스처 핑이
+   *  억제되면 재무장이 최대 10초 늦는다. */
+  visibility(visible: boolean, _now: number): void {
     this.send(visible);
   }
 }

@@ -450,3 +450,35 @@ fn dropped_sink_keeps_session_free_running() {
     );
     session.kill();
 }
+
+// 신규 (d) kill() → on_exit 정확히 1회 (waiter 단독 호출)·stats.alive=false·
+//    멱등 kill 재호출에도 추가 on_exit 없음.
+#[test]
+fn kill_invokes_on_exit_exactly_once() {
+    let (session, rx) = spawn_sh(SessionOptions::default());
+    session.kill();
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match rx.recv_timeout(remaining(deadline, "exit event after kill")) {
+            Ok(Event::Exit(_)) => break,
+            Ok(_) => {}
+            Err(err) => panic!("no exit event after kill ({err})"),
+        }
+    }
+    // waiter 가 on_exit 직전에 alive 를 내리므로 수신 후에는 false 가 보장된다.
+    assert!(
+        !session.stats().alive,
+        "stats.alive must be false after kill"
+    );
+
+    // 멱등성: 두 번째 kill 은 no-op — 두 번째 Exit 이 오면 안 된다.
+    session.kill();
+    thread::sleep(Duration::from_millis(300));
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, Event::Exit(_)),
+            "on_exit must fire exactly once per session"
+        );
+    }
+}

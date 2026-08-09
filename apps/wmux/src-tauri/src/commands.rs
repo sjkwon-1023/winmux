@@ -210,12 +210,15 @@ pub fn ack_output(state: State<'_, AppState>, id: SessionId, n: usize) -> Result
 /// wheel)도 여기로 잡혀 "활성 사용 중 절대 리셋 금지"가 성립한다 (계획 0장).
 #[tauri::command]
 pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
-    // visibility 먼저 — 같은 now 로 이어지는 user_input 이 새 숨김 구간 기준으로
-    // 재무장하게 한다 (같은 틱이라 순서는 로그 가독성 문제일 뿐 의미론 동일).
-    if let Some(visible) = visible {
-        state.reset.visibility(visible);
+    match visible {
+        // visibility 전이 보고는 **활동이 아니다** (체크포인트 1 버그 4·5).
+        // 활동으로 집계하면: 최소화 보고(visible=false)가 hidden 카운트다운을
+        // 스스로 재무장해 hidden 리셋이 영원히 발화하지 못하고, 리로드 직후의
+        // visible=true 동기화는 idle 을 재무장해 30초 주기 재발화 루프가 된다.
+        // 최소화 클릭 같은 실제 제스처는 그 직전의 mousedown 핑이 이미 잡는다.
+        Some(visible) => state.reset.visibility(visible),
+        None => state.reset.user_input(),
     }
-    state.reset.user_input();
 }
 
 /// 수동 WebView 리셋 — **dev 훅(`window.__wmux.resetUi`)·향후 MCP 전용이며 UI

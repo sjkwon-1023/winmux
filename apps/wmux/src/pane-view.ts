@@ -160,7 +160,13 @@ export class PaneView {
     btn.title = title;
     if (command !== null) {
       btn.addEventListener("click", () => {
-        void this.dispatch(command());
+        const cmd = command();
+        // 진단 로그 (체크포인트 1 버그 3 — "엉뚱한 pane 분할" 재현 시 어떤
+        // PaneView 의 버튼이 어떤 커맨드를 보냈는지 즉시 판별하기 위한 상시
+        // debug 레벨 기록. 정적 분석으로는 배선·구조 경로가 결백해 재현
+        // 데이터가 필요하다).
+        console.debug("[wmux] pane-icon click", { pane: this.paneId, cmd });
+        void this.dispatch(cmd);
       });
     }
     return btn;

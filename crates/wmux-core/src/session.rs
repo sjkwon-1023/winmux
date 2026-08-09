@@ -18,6 +18,24 @@
 //! flow control 이 Pause 상태이면 전달만 멈추는 게 아니라 **PTY read 자체를
 //! 중단**(condvar 대기)해 OS 파이프에 backpressure 를 넘긴다.
 //!
+//! # 스레드 구조와 종료 감지 (리더 + waiter)
+//!
+//! 세션마다 스레드 둘이 돈다 — **리더**(위 출력 파이프라인 전담)와 **waiter**
+//! (수명 전담 — `Child` 를 소유하고 `child.wait()` 로 종료를 관측한다).
+//!
+//! 종료 감지를 waiter 로 분리한 근거는 Windows ConPTY 다: **ConPTY 는 자식
+//! 프로세스가 종료해도 출력 파이프를 EOF 시키지 않는다** — conhost 가
+//! `ClosePseudoConsole` 전까지 파이프를 유지한다. 따라서 "read 탈출(EOF/EIO)
+//! 후 wait" 하는 Unix 식 단일 스레드 구조로는 Windows 자연 종료 시 리더가
+//! read 에 영구 블록돼 종료를 영영 감지하지 못한다. waiter 는 wait 반환 시
+//! 다음 순서로 종료를 전파한다: lock 안에서 alive=false·killed=true 확정 →
+//! `notify_all`(paused 리더 해제) → writer·master drop(=`ClosePseudoConsole`
+//! — 블록된 read 가 에러로 풀려 리더 탈출; Unix 에선 fd 회수만) →
+//! `sink.on_exit(code)`.
+//!
+//! `on_exit` 는 자연 종료·kill 어느 경로든 **waiter 만, 세션당 정확히 1회**
+//! 호출한다 — 리더와 [`PtySession::kill`] 은 호출 경로가 아니다.
+//!
 //! # offset 스트림과 reattach
 //!
 //! `offset` 은 세션 시작부터의 누적 출력 오프셋(u64)이다. 각 chunk 는 자기 시작
@@ -59,8 +77,9 @@ pub enum Delivery {
 }
 
 /// 세션 이벤트 수신자. Tauri 글루(채널 emit)나 테스트 하네스가 구현한다.
-/// 리더 스레드에서 호출되므로 구현은 블로킹을 최소화해야 한다.
-pub trait SessionSink: Send + 'static {
+/// 리더 스레드(`on_output`·`on_osc`)와 waiter 스레드(`on_exit`)에서 호출되므로
+/// 구현은 블로킹을 최소화해야 한다.
+pub trait SessionSink: Send + Sync + 'static {
     /// PTY 출력 chunk. OSC 감지는 passthrough 라 원본 바이트가 그대로 온다.
     /// `offset` = 이 chunk 시작 시점의 누적 스트림 오프셋. `Dropped` 반환 시
     /// 리더는 이 chunk 의 flow 계정을 보상 롤백한다 (detach 모드).
@@ -132,25 +151,35 @@ struct Inner {
     bytes_out: u64,
     osc_count: u64,
     last_osc: Option<String>,
-    /// 리더 스레드가 프로세스 종료를 관측하면 false 로 내린다.
+    /// waiter 스레드가 프로세스 종료를 관측(`child.wait()` 반환)하면 false 로
+    /// 내린다.
     alive: bool,
-    /// `kill()` 이 눌렸다 — 리더 스레드는 이를 보면 즉시 루프를 빠져나간다.
+    /// `kill()` 또는 waiter(자식 종료 관측)가 올린다 — 리더 스레드는 이를 보면
+    /// 즉시 루프를 빠져나간다.
     killed: bool,
 }
+
+/// waiter 스레드와 공유하는 PTY 입력 writer. 종료 후에는 None (fd 회수됨).
+type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+/// waiter 스레드와 공유하는 PTY master. drop 이 Windows 에서는
+/// `ClosePseudoConsole` 이라 블록된 read 를 풀어주는 종료 전파 수단이기도 하다.
+type SharedMaster = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
 
 /// PTY 세션 핸들. 스레드 간 공유 가능(`&self` API + 내부 Mutex).
 pub struct PtySession {
     shared: Arc<Shared>,
-    /// PTY 입력 writer. kill 후에는 None (fd 회수).
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
-    /// PTY master. resize 에 사용하며 kill 시 drop 해 fd 를 회수한다.
-    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
-    /// 리더 스레드가 `Child` 본체(wait 용)를 가져가므로 kill 신호는 분리된 killer 로 보낸다.
+    /// PTY 입력 writer. waiter 와 공유 — kill·종료 후에는 None (fd 회수).
+    writer: SharedWriter,
+    /// PTY master. resize 에 사용하며 kill·종료 시 drop 해 fd 를 회수한다.
+    /// waiter 와 공유 — Windows 자연 종료 시 waiter 가 이 drop 으로 리더의
+    /// 블록된 read 를 풀어준다 (모듈 rustdoc "스레드 구조와 종료 감지").
+    master: SharedMaster,
+    /// waiter 스레드가 `Child` 본체(wait 용)를 가져가므로 kill 신호는 분리된 killer 로 보낸다.
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
 impl PtySession {
-    /// 프로세스를 PTY 로 스폰하고 리더 스레드를 시작한다.
+    /// 프로세스를 PTY 로 스폰하고 리더(출력)·waiter(수명) 스레드를 시작한다.
     pub fn spawn(
         spec: SpawnSpec,
         sink: Box<dyn SessionSink>,
@@ -197,17 +226,37 @@ impl PtySession {
             cond: Condvar::new(),
         });
 
-        let thread_shared = Arc::clone(&shared);
-        // JoinHandle 은 보관하지 않는다(detach). 리더 스레드는 EOF/에러/kill 로
-        // 반드시 종료되고, 종료하면서 자신이 가진 reader fd 와 child 핸들을 놓는다.
+        // sink 는 리더(on_output·on_osc)·waiter(on_exit) 양쪽에서 쓰므로 Arc 로
+        // 공유한다 (공개 API 는 Box 를 받고 내부에서만 변환 — 메서드가 전부
+        // &self 라 가능).
+        let sink: Arc<dyn SessionSink> = Arc::from(sink);
+        let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
+        let master: SharedMaster = Arc::new(Mutex::new(Some(master)));
+
+        // JoinHandle 은 보관하지 않는다(detach). 리더는 EOF/에러/killed 로, waiter
+        // 는 child.wait() 반환으로 반드시 종료되고, 종료하면서 자신이 가진
+        // reader fd·child 핸들을 놓는다.
         std::thread::Builder::new()
             .name("wmux-pty-reader".into())
-            .spawn(move || reader_loop(reader, child, sink, thread_shared))?;
+            .spawn({
+                let sink = Arc::clone(&sink);
+                let shared = Arc::clone(&shared);
+                move || reader_loop(reader, sink, shared)
+            })?;
+        std::thread::Builder::new()
+            .name("wmux-pty-waiter".into())
+            .spawn({
+                let sink = Arc::clone(&sink);
+                let shared = Arc::clone(&shared);
+                let writer = Arc::clone(&writer);
+                let master = Arc::clone(&master);
+                move || waiter_loop(child, sink, shared, writer, master)
+            })?;
 
         Ok(Self {
             shared,
-            writer: Mutex::new(Some(writer)),
-            master: Mutex::new(Some(master)),
+            writer,
+            master,
             killer: Mutex::new(killer),
         })
     }
@@ -314,29 +363,32 @@ impl PtySession {
     }
 
     /// 세션을 종료한다: 자식 프로세스 kill + 리더 스레드 정리 + PTY fd 회수.
-    /// 멱등 — 두 번째 호출부터는 아무것도 하지 않는다.
+    /// 멱등 — 두 번째 호출부터는 아무것도 하지 않는다 (waiter 가 자연 종료를
+    /// 먼저 관측해 killed 를 올린 뒤의 호출도 no-op).
+    ///
+    /// `on_exit` 는 여기서 호출하지 않는다 — kill 로 죽인 자식도 waiter 의
+    /// `child.wait()` 를 반환시키므로, 자연 종료·kill 어느 경로든 **waiter 가
+    /// 단독으로 정확히 1회** 호출한다 ([`waiter_loop`] 참조).
     pub fn kill(&self) {
-        let was_alive;
         {
             let mut inner = self.shared.inner.lock().unwrap();
             if inner.killed {
                 return;
             }
             inner.killed = true;
-            was_alive = inner.alive;
         }
         // paused 로 condvar 대기 중인 리더 스레드를 깨워 종료 경로로 보낸다.
         self.shared.cond.notify_all();
 
-        if was_alive {
-            // 자식이 방금 자연 종료해 신호 전송이 실패(ESRCH 등)할 수 있다.
-            // "프로세스가 죽어 있어야 한다"는 의도는 이미 충족된 상태이므로 이
-            // 에러는 무시한다 (멱등 kill — 에러 은폐가 아님).
-            let _ = self.killer.lock().unwrap().kill();
-        }
+        // 자식이 방금 자연 종료했다면(waiter 가 아직 관측 전) 신호 전송이 실패
+        // (ESRCH 등)할 수 있다. "프로세스가 죽어 있어야 한다"는 의도는 이미
+        // 충족된 상태이므로 이 에러는 무시한다 (멱등 kill — 에러 은폐가 아님).
+        let _ = self.killer.lock().unwrap().kill();
 
-        // writer/master 를 drop 해 우리가 쥔 PTY fd 를 회수한다. 리더 스레드의
-        // 복제 reader 는 스레드 종료 시 함께 drop 된다.
+        // writer/master 를 즉시 drop 해 우리가 쥔 PTY fd 를 회수한다. waiter 도
+        // wait 반환 후 같은 drop 을 수행하지만 Option take 라 이중 drop 은 없다
+        // — 여기서는 회수 시점을 앞당길 뿐이다. 리더 스레드의 복제 reader 는
+        // 스레드 종료 시 함께 drop 된다.
         *self.writer.lock().unwrap() = None;
         *self.master.lock().unwrap() = None;
     }
@@ -349,13 +401,10 @@ impl Drop for PtySession {
     }
 }
 
-/// 리더 스레드 본체. 종료 시(EOF·에러·kill) `sink.on_exit` 를 정확히 1회 호출한다.
-fn reader_loop(
-    mut reader: Box<dyn Read + Send>,
-    mut child: Box<dyn Child + Send + Sync>,
-    sink: Box<dyn SessionSink>,
-    shared: Arc<Shared>,
-) {
+/// 리더 스레드 본체 — 출력 파이프라인 전담. 종료 시(EOF·read 에러·killed) 그냥
+/// 리턴한다 — exit 관측·`on_exit`·alive 갱신·자식 회수(reap)는 전부 waiter 몫이다
+/// ([`waiter_loop`]).
+fn reader_loop(mut reader: Box<dyn Read + Send>, sink: Arc<dyn SessionSink>, shared: Arc<Shared>) {
     let mut scanner = OscScanner::new();
     let mut buf = [0u8; READ_BUF_BYTES];
     loop {
@@ -417,14 +466,46 @@ fn reader_loop(
             let _ = inner.flow.on_acked(n);
         }
     }
+}
 
+/// waiter 스레드 본체 — 세션 수명 전담. 자연 종료·kill 어느 경로든
+/// `child.wait()` 가 반환하면 종료 시퀀스를 수행한다.
+///
+/// `sink.on_exit` 는 **이 스레드만** 호출한다 — 리더도 `kill()` 도 호출 경로가
+/// 아니므로 "세션당 정확히 1회" 계약이 코드 구조로 보장된다.
+///
+/// 순서가 중요하다 (모듈 rustdoc "스레드 구조와 종료 감지"):
+/// 1. lock 안에서 alive=false·killed=true — stats 관측과 리더 탈출 지시를 한
+///    시점에 확정한다.
+/// 2. `notify_all` — paused 로 condvar 대기 중인 리더를 깨워 탈출시킨다.
+/// 3. writer·master drop — ConPTY 는 자식이 죽어도 출력 파이프를 EOF 시키지
+///    않으므로 master drop(=`ClosePseudoConsole`)으로 블록된 read 를 에러로
+///    풀어야 리더가 탈출한다. 이게 Windows 자연 종료 감지의 핵심이다 (Unix 는
+///    EOF/EIO 로 이미 탈출하므로 fd 회수만 담당). kill() 경로에서는 이미 None
+///    일 수 있다 — Option take 라 이중 drop 없음.
+/// 4. `sink.on_exit(code)` — lock 밖에서 호출한다.
+///
+/// killed=true 지시와 리더의 잔여 read 사이 경합으로, 자식이 종료 직전 파이프에
+/// 남긴 tail 출력 일부가 전달되지 않을 수 있다 — 종료 감지의 확실성(리더 블록
+/// 해제)을 tail 완전 배출보다 우선한 트레이드오프다.
+fn waiter_loop(
+    mut child: Box<dyn Child + Send + Sync>,
+    sink: Arc<dyn SessionSink>,
+    shared: Arc<Shared>,
+    writer: SharedWriter,
+    master: SharedMaster,
+) {
     // 자식을 회수(reap)해 exit code 를 얻는다. kill 경로에서는 신호가 이미
     // 전송됐으므로 곧 반환된다. wait 실패 시 code 는 알 수 없음(None).
     let code = child.wait().ok().map(|status| status.exit_code());
     {
         let mut inner = shared.inner.lock().unwrap();
         inner.alive = false;
+        inner.killed = true;
     }
+    shared.cond.notify_all();
+    *writer.lock().unwrap() = None;
+    *master.lock().unwrap() = None;
     sink.on_exit(code);
 }
 
