@@ -30,6 +30,18 @@ two checkpoints: after stage 16 (sidebar + teardown latency + persistence + auto
 and after stage 21 (text passing + notifications + keyboard + viewer tabs + full
 regression). Stages 22–23 (ARM64 CI / device testing) come after checkpoint 2.
 
+Stages 17–21 are **code-complete, Windows verification pending** (2026-08-09, awaiting
+**checkpoint 2** — `docs/WINDOWS-BUILD.md` §10): stage 17 (inter-pane text passing:
+send/send&run icons, target-pick mode, bracketed-paste delivery guards), stage 18 (OSC
+routing: `notify.rs` merge-cell coalescing + glue `OscRouter` 100ms flush,
+`wmux:<status>` hook contract in `scripts/wsl/claude-hook-example.md`, keyed reconcile
+for sidebar/tab strip with node-identity tests), stage 20 (keyboard navigation:
+Ctrl+1–9 / Alt+arrows / Ctrl+Tab; intercept list canonical in `apps/wmux/src/keys.ts`),
+stage 21 (viewer tabs: folderBrowser/textViewer/markdownViewer, `wslpath` UNC
+validation, fs_* invokes with default-distro resolution, viewer unmount lifecycle).
+Plan files `docs/plans/mvp-stage{17,18,20,21}-plan.md` stay until checkpoint 2 passes,
+then distill into ADRs per ADR-0001's docs governance.
+
 ## Layout
 
 - `crates/wmux-core` — pure Rust core (PTY session, flow control, OSC scanner, replay
