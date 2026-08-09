@@ -3,6 +3,8 @@
 //! PTY 출력 스트림에서 OSC 0/7/9/777 시퀀스를 증분(incremental)으로 감지한다.
 //! 감지 전용이다 — 입력 바이트를 변형하거나 소비 표시하지 않으며, 호출자는 입력을
 //! 그대로 프론트엔드에 passthrough 한다. 계약: `docs/plans/spike-plan.md` 4.1장.
+//! OSC 2(아이콘+창 제목)는 ConPTY 가 제목을 재인코딩할 가능성에 대비해 OSC 0 과 동일하게
+//! `Osc0Title` 로 취급한다.
 
 /// 감지된 OSC 이벤트. 문자열은 payload 를 UTF-8 lossy 변환한 결과다.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,7 +169,9 @@ fn parse_payload(payload: &[u8]) -> Option<OscEvent> {
         None => (text.as_ref(), ""),
     };
     match code {
-        "0" => Some(OscEvent::Osc0Title(rest.to_string())),
+        // "2" 는 OSC 0(아이콘+제목)의 부분집합인 "창 제목만" 코드 — ConPTY 가 제목을
+        // 이 코드로 재인코딩할 가능성에 대비해 별칭으로 취급한다(enum variant 는 불변).
+        "0" | "2" => Some(OscEvent::Osc0Title(rest.to_string())),
         "7" => Some(OscEvent::Osc7Cwd(rest.to_string())),
         "9" => Some(OscEvent::Osc9Notify(rest.to_string())),
         "777" => {
@@ -207,6 +211,24 @@ mod tests {
         assert_eq!(
             scan(b"\x1b]0;my title\x1b\\"),
             vec![OscEvent::Osc0Title("my title".into())]
+        );
+    }
+
+    #[test]
+    fn osc2_title_parsed_as_osc0title() {
+        // OSC 2 는 OSC 0 과 동일하게 Osc0Title 로 파스된다(ConPTY 재인코딩 대비 별칭).
+        assert_eq!(
+            scan(b"\x1b]2;my title\x07"),
+            vec![OscEvent::Osc0Title("my title".into())]
+        );
+    }
+
+    #[test]
+    fn osc0_title_still_parsed_after_osc2_alias_added() {
+        // "2" 별칭 추가가 기존 OSC 0 처리에 회귀를 만들지 않는지 확인.
+        assert_eq!(
+            scan(b"\x1b]0;another title\x1b\\"),
+            vec![OscEvent::Osc0Title("another title".into())]
         );
     }
 

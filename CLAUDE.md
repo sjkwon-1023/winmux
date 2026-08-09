@@ -69,7 +69,9 @@ cd apps/wmux && npm run build && npx vitest run
   docs are English (this file, README, ADRs). Korean domain/plan docs keep their names.
 - The terminal output hot path stays raw binary end to end (`ipc::Channel` +
   `InvokeResponseBody::Raw`; xterm gets `Uint8Array`). No JSON on that path — JSON is
-  fine for low-frequency events (`osc-event`, `terminal-exit`, stats).
+  fine for low-frequency events (`state-changed`, `terminal-exit`, stats). OSC no longer
+  crosses the IPC boundary in `apps/wmux` — it is routed into the model in Rust (stage 18);
+  the `osc-event` emit survives only in the frozen `apps/spike`.
 - Lock discipline in the glue: never hold the session-registry mutex across a blocking
   PTY call. Write/resize/spawn go through `spawn_blocking`; `ack_output` stays sync and
   cheap. See the module docs in `apps/spike/src-tauri/src/commands.rs`.

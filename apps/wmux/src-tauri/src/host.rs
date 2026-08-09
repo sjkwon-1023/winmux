@@ -9,6 +9,7 @@ use tauri::AppHandle;
 use wmux_core::command::{SessionHost, ShellSpawnReq};
 use wmux_core::session::{SessionId, SessionManager, SessionOptions, SpawnSpec};
 
+use crate::router::OscRouter;
 use crate::sink::{SinkHandle, TerminalSink};
 use crate::state::SinkRegistry;
 
@@ -18,14 +19,22 @@ pub struct TauriHost {
     app: AppHandle,
     sessions: Arc<SessionManager>,
     sinks: Arc<SinkRegistry>,
+    /// 새로 만드는 sink 에 물려 줄 OSC 라우터 핸들 (18단계 glue 계약).
+    router: Arc<OscRouter>,
 }
 
 impl TauriHost {
-    pub fn new(app: AppHandle, sessions: Arc<SessionManager>, sinks: Arc<SinkRegistry>) -> Self {
+    pub fn new(
+        app: AppHandle,
+        sessions: Arc<SessionManager>,
+        sinks: Arc<SinkRegistry>,
+        router: Arc<OscRouter>,
+    ) -> Self {
         Self {
             app,
             sessions,
             sinks,
+            router,
         }
     }
 }
@@ -88,7 +97,11 @@ impl SessionHost for TauriHost {
         // 고아 sink 를 남기지 않는다 — factory 밖으로 id 를 꺼내는 Cell.
         let registered: Cell<Option<SessionId>> = Cell::new(None);
         let result = self.sessions.create(spec, SessionOptions::default(), |id| {
-            let sink = Arc::new(TerminalSink::new(id, self.app.clone()));
+            let sink = Arc::new(TerminalSink::new(
+                id,
+                self.app.clone(),
+                Arc::clone(&self.router),
+            ));
             self.sinks.insert(id, Arc::clone(&sink));
             registered.set(Some(id));
             Box::new(SinkHandle(sink))

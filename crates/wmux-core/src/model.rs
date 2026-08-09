@@ -104,10 +104,19 @@ pub struct Workspace {
     pub layout: SplitTree,
     pub panes: BTreeMap<PaneId, Pane>,
     pub active_pane: PaneId,
-    /// 18단계가 갱신 — 지금은 Idle 고정.
+    /// OSC 알림이 갱신하는 에이전트 상태 (계획 v2 9장). 기록한 탭은
+    /// [`Workspace::agent_status_source`] 에 남는다.
     pub agent_status: AgentStatus,
-    /// 사이드바 미리보기용 OSC 777 body (계획 v2 9장) — 갱신은 18단계.
+    /// 사이드바 미리보기용 OSC 777 body (계획 v2 9장).
     pub last_agent_message: Option<String>,
+    /// `agent_status` 를 마지막으로 기록한 탭 (18단계 계획 core 계약). needsInput
+    /// 우선 규칙에서 "같은 출처의 강등만 허용"을 판정하고, 그 탭이 사라질 때
+    /// 상태를 Idle 로 되돌리는 리셋 대상을 알아내는 데 쓴다.
+    ///
+    /// None 이면 JSON 에 아예 나타나지 않는다 — 이 필드를 모르는 기존 스냅샷
+    /// (golden fixture·디스크의 state.json)과 계약이 그대로 유지된다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status_source: Option<TabId>,
 }
 
 impl Workspace {
@@ -384,7 +393,8 @@ pub struct Tab {
     pub title: String,
     pub kind: TabKind,
     pub notification: NotificationState,
-    /// 마지막 활동 시각 (epoch ms) — 갱신은 18단계.
+    /// 마지막 활동 시각 (epoch ms) — OSC 델타 반영 시 글루가 주입한 시각으로
+    /// 갱신된다 (코어는 시계를 읽지 않는다).
     pub last_activity_ms: Option<u64>,
 }
 
@@ -611,7 +621,31 @@ mod tests {
             active_pane: PaneId(2),
             agent_status: AgentStatus::Idle,
             last_agent_message: None,
+            agent_status_source: None,
         }
+    }
+
+    #[test]
+    fn agent_status_source_is_omitted_while_none() {
+        // None → JSON 에 키 자체가 없다 (이 필드를 모르는 기존 스냅샷과의 계약
+        // 유지 — fixtures/stage10-snapshot.json round-trip 은 tests/dispatcher.rs).
+        let mut ws = test_workspace();
+        let json = serde_json::to_value(&ws).unwrap();
+        assert!(
+            json.get("agentStatusSource").is_none(),
+            "None 인데 키가 나타남: {json}"
+        );
+
+        // Some → camelCase 키로 탭 id 가 실린다.
+        ws.agent_status_source = Some(TabId(7));
+        let json = serde_json::to_value(&ws).unwrap();
+        assert_eq!(json["agentStatusSource"], serde_json::json!(7));
+
+        // 키 없는 JSON 은 None 으로 역직렬화된다 (serde default).
+        let mut without = json.as_object().unwrap().clone();
+        without.remove("agentStatusSource");
+        let parsed: Workspace = serde_json::from_value(without.into()).unwrap();
+        assert_eq!(parsed.agent_status_source, None);
     }
 
     #[test]

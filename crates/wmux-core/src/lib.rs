@@ -7,6 +7,7 @@
 pub mod command;
 pub mod flow;
 pub mod model;
+pub mod notify;
 pub mod osc;
 pub mod persist;
 pub mod replay;

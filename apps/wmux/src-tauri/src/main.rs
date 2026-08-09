@@ -17,6 +17,7 @@
 mod commands;
 mod host;
 mod reset_supervisor;
+mod router;
 mod sink;
 mod state;
 
@@ -47,8 +48,15 @@ fn main() {
             let handle = app.handle().clone();
             let sessions = Arc::new(SessionManager::new());
             let sinks = Arc::new(state::SinkRegistry::default());
-            let tauri_host =
-                host::TauriHost::new(handle.clone(), Arc::clone(&sessions), Arc::clone(&sinks));
+            // OSC 라우터는 sink 생성보다 먼저 — sink factory(TauriHost)가 핸들을
+            // 물려 받아야 한다 (18단계 glue 계약).
+            let router = Arc::new(router::OscRouter::spawn(handle.clone()));
+            let tauri_host = host::TauriHost::new(
+                handle.clone(),
+                Arc::clone(&sessions),
+                Arc::clone(&sinks),
+                Arc::clone(&router),
+            );
 
             // 상태 파일은 앱 데이터 디렉터리의 state.json. 경로 해석 실패는 부팅
             // 불능이므로 setup 에러로 그대로 올린다 (가짜 진행 금지).
@@ -103,6 +111,7 @@ fn main() {
                 sinks,
                 saver: Arc::clone(&saver),
                 reset,
+                router,
             });
 
             // Fresh 부팅 dogfood — 직접 상태 조작 없이 커맨드 bus 경유로 초기
@@ -177,7 +186,13 @@ fn main() {
                 // 종료 직전 대기분 flush — debounce 창(≤500ms) 안의 마지막 변이가
                 // 정상 종료에서 유실되지 않게 한다 (크래시 유실은 계획상 수용).
                 match app.try_state::<state::AppState>() {
-                    Some(managed) => managed.saver.flush(),
+                    Some(managed) => {
+                        // 순서가 계약이다: OSC 라우터를 **먼저** 비워 flush 창
+                        // (기본 100ms) 안의 cwd·상태 변경이 상태에 반영되게 한 뒤,
+                        // 그 결과까지 담아 Saver 를 flush 한다 (18단계 glue 계약).
+                        managed.router.flush_now();
+                        managed.saver.flush();
+                    }
                     // setup 실패로 manage 전에 종료되는 경로뿐 — flush 할 상태
                     // 자체가 없다.
                     None => eprintln!("[wmux] exit: managed state unavailable; nothing to flush"),

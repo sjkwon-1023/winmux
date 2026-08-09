@@ -23,6 +23,7 @@ use wmux_core::persist::Saver;
 use wmux_core::session::{SessionId, SessionManager};
 
 use crate::reset_supervisor::ResetSupervisor;
+use crate::router::OscRouter;
 use crate::sink::TerminalSink;
 
 /// 세션별 출력 sink 레지스트리 — `attach_terminal` 이 채널을 장착할 대상을
@@ -62,6 +63,9 @@ pub struct AppState {
     /// 자동 UI 리셋 supervisor (계획 16단계 C-2) — 커맨드의 활동 신호와 창
     /// 이벤트(Focused)가 여기로 모인다. 내부가 Arc 공유라 별도 Arc 불필요.
     pub reset: ResetSupervisor,
+    /// OSC 배치 라우터 (계획 18단계 glue) — sink 와 `Arc` 로 공유하며, 종료 시
+    /// `RunEvent::Exit` 가 여기서 `flush_now` 를 부른다.
+    pub router: Arc<OscRouter>,
 }
 
 /// 현재 스냅샷을 `state-changed` 이벤트로 emit 하고 저장을 예약한다 (emit +

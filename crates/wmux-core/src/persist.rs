@@ -14,6 +14,12 @@
 //!   [`SessionId`](crate::session::SessionId) 는 프로세스 수명의 휘발성 u32 라,
 //!   저장된 구 id 를 남겨두면 재시작 후 새 레지스트리가 발급한 동일 숫자의 다른
 //!   세션과 충돌(오배선)한다. 재스폰 시 새 id 가 다시 채워진다 (B-2).
+//! - **에이전트 상태·알림도 pty_session 소거와 동급으로 무조건 초기화한다**
+//!   (18단계 계획, 터미널-계획-v2.md 11장): 각 워크스페이스의 `agent_status` =
+//!   `Idle`, `agent_status_source` = `None`, `last_agent_message` = `None`,
+//!   전 탭의 `notification` = `NotificationState::None`, `last_activity_ms` =
+//!   `None`. pty_session 과 동일한 이유 — 죽은 세션이 남긴 needsInput 이
+//!   재시작을 넘어 사이드바에 유령처럼 남는 걸 막는다.
 //! - `next_id` 가 사용 중인 최대 안정 id(워크스페이스·pane·탭·**split** 포함 —
 //!   split 노드도 같은 단일 카운터 발급, ADR-0003) 이하면 `max+1` 로 수리하고
 //!   사유를 [`LoadOutcome::Restored`] 의 `repairs` 로 보고한다.
@@ -28,7 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{AppState, TabKind};
+use crate::model::{AgentStatus, AppState, NotificationState, TabKind};
 
 /// 현재 디스크 포맷 버전. 다른 값은 [`FreshReason::UnsupportedVersion`] 으로 강등.
 pub const PERSIST_VERSION: u32 = 1;
@@ -217,15 +223,21 @@ fn validate_app(state: &AppState) -> Result<(), String> {
 }
 
 /// 복원 상태 sanitize (모듈 rustdoc 참조). 수리 사유들을 반환한다 — pty_session
-/// 소거는 무조건 수행되는 정상 동작이라 사유에 포함하지 않는다.
+/// 소거·에이전트 상태/알림 초기화는 무조건 수행되는 정상 동작이라 사유에
+/// 포함하지 않는다.
 fn sanitize(state: &mut AppState) -> Vec<String> {
     let mut repairs = Vec::new();
     for ws in &mut state.workspaces {
+        ws.agent_status = AgentStatus::Idle;
+        ws.agent_status_source = None;
+        ws.last_agent_message = None;
         for pane in ws.panes.values_mut() {
             for tab in &mut pane.tabs {
                 if let TabKind::Terminal { pty_session, .. } = &mut tab.kind {
                     *pty_session = None;
                 }
+                tab.notification = NotificationState::None;
+                tab.last_activity_ms = None;
             }
         }
     }
@@ -487,6 +499,7 @@ mod tests {
                 active_pane: PaneId(2),
                 agent_status: AgentStatus::Idle,
                 last_agent_message: None,
+                agent_status_source: None,
             }],
             active_workspace: Some(WorkspaceId(1)),
             next_id,
@@ -658,6 +671,43 @@ mod tests {
                 assert_eq!(state.next_id, 7);
                 assert_eq!(repairs.len(), 1);
                 assert!(repairs[0].contains("next_id"), "repairs: {repairs:?}");
+            }
+            other => panic!("Restored 여야 함: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_resets_agent_status_and_notifications() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        // 채워진 알림/에이전트 상태로 저장 — 죽은 세션의 needsInput 이 재시작을
+        // 넘지 않아야 한다 (18단계 계획, pty_session 소거와 동급 규칙).
+        let mut state = sample_state(None, 7);
+        {
+            let ws = &mut state.workspaces[0];
+            ws.agent_status = AgentStatus::NeedsInput;
+            ws.agent_status_source = Some(TabId(5));
+            ws.last_agent_message = Some("waiting for input".into());
+            for pane in ws.panes.values_mut() {
+                for tab in &mut pane.tabs {
+                    tab.notification = NotificationState::Unread;
+                    tab.last_activity_ms = Some(123_456);
+                }
+            }
+        }
+        save_atomic(&path, &state).unwrap();
+        match load(&path) {
+            LoadOutcome::Restored { state, .. } => {
+                let ws = &state.workspaces[0];
+                assert_eq!(ws.agent_status, AgentStatus::Idle);
+                assert_eq!(ws.agent_status_source, None);
+                assert_eq!(ws.last_agent_message, None);
+                for pane in ws.panes.values() {
+                    for tab in &pane.tabs {
+                        assert_eq!(tab.notification, NotificationState::None);
+                        assert_eq!(tab.last_activity_ms, None);
+                    }
+                }
             }
             other => panic!("Restored 여야 함: {other:?}"),
         }

@@ -173,9 +173,9 @@ Scripts referenced by that checklist:
   `--random-lines` high-entropy burst) for the flow control / backpressure check.
 - [`scripts/wsl/scrollback-test.sh`](../scripts/wsl/scrollback-test.sh) — emits 12,000 lines to
   confirm the 5,000-line scrollback cap actually evicts old lines.
-- [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md) — Claude Code
-  `Stop`/`Notification` hook example that emits OSC 777 to `/dev/tty`, for the agent-notification
-  half of the checklist.
+- [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md) — the canonical
+  OSC contract (`wmux:` status tokens, title/cwd) plus the Claude Code hook and shell-prompt
+  snippets that emit it, for the agent-notification half of the checklist.
 - [`scripts/win/measure.ps1`](../scripts/win/measure.ps1) — run from a **Windows** PowerShell
   prompt (not inside WSL) while the Spike app is running, to record private working set (WebView2
   process tree included) over time and export it to CSV:

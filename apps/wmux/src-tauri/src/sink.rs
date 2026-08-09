@@ -6,59 +6,20 @@
 //! - exit: Dispatcher 에 `SessionExited` 를 반영하고 `publish_state` 로
 //!   `state-changed` emit + 저장 예약한다 (dispatch 와 함께 상태 변이의 유일한
 //!   두 경로 — 계획 15단계 B-2 저장 훅).
-//! - OSC: 10단계에서는 상태 반영 없이 `osc-event` emit 만 남긴다 (18단계 대비,
-//!   JSON 이지만 저빈도라 수용).
+//! - OSC: [`OscRouter`] 에 밀어넣기만 한다 — 모델 반영은 라우터 worker 가 flush
+//!   창당 한 번 한다 (18단계 계획 glue 계약). 리더 스레드에서 Dispatcher lock 을
+//!   잡지 않는 경계가 여기다.
 
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use wmux_core::command::SessionEvent;
 use wmux_core::osc::OscEvent;
 use wmux_core::session::{Delivery, SessionId, SessionSink};
 
+use crate::router::OscRouter;
 use crate::state::{publish_state, AppState};
-
-/// `osc-event` payload — spike 프론트 계약과 동일 형태:
-/// `{ id, kind: "777"|"9"|"7"|"0", title, body }` (비는 칸은 빈 문자열).
-#[derive(Clone, serde::Serialize)]
-pub struct OscEventPayload {
-    pub id: SessionId,
-    pub kind: &'static str,
-    pub title: String,
-    pub body: String,
-}
-
-impl OscEventPayload {
-    fn from_event(id: SessionId, event: &OscEvent) -> Self {
-        match event {
-            OscEvent::Osc0Title(title) => Self {
-                id,
-                kind: "0",
-                title: title.clone(),
-                body: String::new(),
-            },
-            OscEvent::Osc7Cwd(uri) => Self {
-                id,
-                kind: "7",
-                title: String::new(),
-                body: uri.clone(),
-            },
-            OscEvent::Osc9Notify(message) => Self {
-                id,
-                kind: "9",
-                title: String::new(),
-                body: message.clone(),
-            },
-            OscEvent::Osc777Notify { title, body } => Self {
-                id,
-                kind: "777",
-                title: title.clone(),
-                body: body.clone(),
-            },
-        }
-    }
-}
 
 /// 세션 1개 분의 sink. 레지스트리(`SinkRegistry`)와 리더 스레드([`SinkHandle`])가
 /// `Arc` 로 공유한다 — attach_terminal 이 실행 중인 세션의 채널 슬롯을 갈아끼울
@@ -76,15 +37,18 @@ pub struct TerminalSink {
     /// 빈 화면 버그), 재-attach 의 replay 질의는 이전 프론트가 이미 응답한 낡은
     /// 질의라 응답을 억제해야 한다 (stray `R` 버그).
     attached_once: std::sync::atomic::AtomicBool,
+    /// OSC 배치 라우터 — [`SessionSink::on_osc`] 가 이벤트를 흘려보내는 곳.
+    router: Arc<OscRouter>,
 }
 
 impl TerminalSink {
-    pub fn new(session: SessionId, app: AppHandle) -> Self {
+    pub fn new(session: SessionId, app: AppHandle, router: Arc<OscRouter>) -> Self {
         Self {
             session,
             app,
             channel: Mutex::new(None),
             attached_once: std::sync::atomic::AtomicBool::new(false),
+            router,
         }
     }
 
@@ -144,14 +108,10 @@ impl SessionSink for SinkHandle {
     }
 
     fn on_osc(&self, event: &OscEvent) {
-        // 10단계에서는 상태 반영 없음 — emit 만 (18단계 대비).
-        let payload = OscEventPayload::from_event(self.0.session, event);
-        if let Err(err) = self.0.app.emit("osc-event", payload) {
-            eprintln!(
-                "[wmux] osc-event emit failed (session={}): {err}",
-                self.0.session
-            );
-        }
+        // 리더 스레드 핫패스 — 배치에 합치고 깨우기만 한다. 모델 반영은 라우터
+        // worker 가 flush 창당 한 번 하며, 여기서 Dispatcher lock 을 잡지 않는다
+        // (router.rs 잠금 규율).
+        self.0.router.push(self.0.session, event);
     }
 
     fn on_exit(&self, code: Option<u32>) {
