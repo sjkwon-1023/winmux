@@ -107,7 +107,10 @@ pub fn to_unc(distro: &str, linux_path: &str) -> Result<String, String> {
     Ok(unc)
 }
 
-/// UNC 의 공유 이름 자리에 그대로 들어가는 값이라 구분자·NUL·빈 이름을 거부한다.
+/// UNC 의 공유 이름 자리에 그대로 들어가는 값이라 구분자·NUL·빈 이름을 거부하고,
+/// 경로 컴포넌트와 같은 규칙(`.`/`..`, `:`, 후행 점·공백)도 적용한다 — 출처가
+/// 본인 설정(env·워크스페이스 필드)이라 위협은 아니지만, 밀수 가드의 커버리지가
+/// 경로에만 있고 공유 이름에는 없는 비대칭을 남기지 않는다 (21단계 리뷰 finding).
 fn validate_distro(distro: &str) -> Result<(), String> {
     if distro.is_empty() {
         return Err("distro must not be empty".to_owned());
@@ -115,6 +118,17 @@ fn validate_distro(distro: &str) -> Result<(), String> {
     if distro.contains('/') || distro.contains('\\') || distro.contains('\0') {
         return Err(format!(
             "distro must not contain '/', '\\' or a NUL byte: {distro:?}"
+        ));
+    }
+    if distro == "." || distro == ".." {
+        return Err(format!("distro must not be a dot component: {distro:?}"));
+    }
+    if distro.contains(':') {
+        return Err(format!("distro must not contain ':': {distro:?}"));
+    }
+    if distro.ends_with('.') || distro.ends_with(' ') {
+        return Err(format!(
+            "distro must not end with a dot or a space (Win32 trims them): {distro:?}"
         ));
     }
     Ok(())
@@ -224,7 +238,18 @@ mod tests {
 
     #[test]
     fn to_unc_rejects_bad_distro() {
-        for distro in ["", "Ubuntu/x", r"Ubuntu\x", "Ubu\0ntu"] {
+        // 경로 컴포넌트와 같은 밀수 가드를 공유 이름에도 적용한다 (커버리지 대칭).
+        for distro in [
+            "",
+            "Ubuntu/x",
+            r"Ubuntu\x",
+            "Ubu\0ntu",
+            ".",
+            "..",
+            "Ubuntu:22",
+            "Ubuntu.",
+            "Ubuntu ",
+        ] {
             let err = to_unc(distro, "/home").unwrap_err();
             assert!(err.contains("distro"), "{distro:?} → {err}");
         }

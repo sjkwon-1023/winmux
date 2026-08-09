@@ -44,6 +44,10 @@ export const MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;
 /** 라이브 리로드 폴링 주기. 9P 왕복 1회(fs_stat)라 2초면 체감 즉시에 가깝다. */
 export const RELOAD_POLL_MS = 2000;
 
+/** 로드 실패 후의 폴링 baseline — 실제 mtime 이 될 수 없는 값이라, 다음 성공
+ *  stat 이 무조건 "변화"로 관측돼 자동 재로드를 건다 (실패 자가 회복 경로). */
+export const RETRY_BASELINE_MS = -1;
+
 const defaultTimers: TimerHost = {
   setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
   clearTimeout: (handle) => globalThis.clearTimeout(handle as number),
@@ -345,6 +349,11 @@ export class MarkdownView implements ViewerView {
     this.loadDocument(token).catch((err: unknown) => {
       if (this.disposed || token !== this.loadToken) return;
       this.renderError(describeError(err));
+      // 실패는 폴링을 재시도 모드로 돌린다 (21단계 리뷰 finding): baseline 을
+      // 실존 불가능한 값으로 고정하면 다음 성공 stat 의 mtime 이 반드시 달라
+      // 자동 재로드가 걸린다 — 9P 과도 실패는 다음 주기에 스스로 낫고, 첫
+      // 로드부터 실패한 탭(없는 파일)도 파일이 생기면 재마운트 없이 복구된다.
+      this.poller.start(RETRY_BASELINE_MS);
     });
   }
 
@@ -418,10 +427,12 @@ export class MarkdownView implements ViewerView {
 
   /** 로드 실패 — 인라인 에러로 표면화하고 탭은 유지한다 (없는·삭제된 파일도
    *  모델에 남아 재시도가 가능해야 한다). 보류된 복원 위치는 소비하지 않는다:
-   *  파일이 돌아오면 그때 원래 지점으로 복원된다. */
+   *  파일이 돌아오면 그때 원래 지점으로 복원된다. **본문은 지우지 않는다**
+   *  (21단계 리뷰 finding) — 라이브 리로드의 일시 실패(9P 과도 상태)에서
+   *  마지막으로 성공한 렌더를 배너 아래에 그대로 유지한다. 첫 로드 실패면
+   *  본문이 원래 비어 있어 배너만 남는 기존 표시와 같다. */
   private renderError(message: string): void {
     this.setBanner(`cannot read ${this.path}: ${message}`, true);
-    this.bodyEl.replaceChildren();
   }
 
   private setBanner(text: string | null, error: boolean): void {
