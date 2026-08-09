@@ -31,6 +31,7 @@
 // keydown capture 를 걸었다 뗀다 (상시 리스너 금지 — 평시 Esc 는 PTY 소유).
 
 import { detachTerminal } from "./backend";
+import type { PaneRect } from "./keys";
 import { PaneView } from "./pane-view";
 import type { SendController, ViewRegistry } from "./pane-view";
 import { SendMode, sendModePrompt } from "./send-mode";
@@ -345,6 +346,20 @@ export class WorkspaceView {
     // 대상이 명시된 tab/pane 류만 즉시 시도한다 (그 대상은 stale 스냅샷에서도
     // 동일 객체다).
     if (req.kind !== "activePane") this.tryResolveFocus(false);
+  }
+
+  /** 현재 렌더된 pane 들의 화면 기하 (20단계) — 키보드 pane 이동(Alt+방향키)의
+   *  방향 판정 재료다. 레이아웃 트리를 걷지 않고 pane DOM 의 실측 rect 를 쓴다:
+   *  중첩 split 의 시각 배치를 트리 순회로 재구성하는 것보다 정확하고, 판정
+   *  (keys.paneInDirection)이 순수 함수로 남는다. paneViews 는 활성 워크스페이스
+   *  의 레이아웃에 있는 pane 만 담는다 (rebuild 가 이탈 pane 을 지운다). */
+  paneRects(): PaneRect[] {
+    const out: PaneRect[] = [];
+    for (const [pane, view] of this.paneViews) {
+      const rect = view.root.getBoundingClientRect();
+      out.push({ pane, x: rect.left, y: rect.top, w: rect.width, h: rect.height });
+    }
+    return out;
   }
 
   /** pendingFocus 해소 시도. atRender 면 미해소마다 rendersLeft 를 줄이고 0 이

@@ -2,13 +2,16 @@
 // (13단계) + 우측 활성 워크스페이스 split tree 렌더 (11~12단계). 분할 렌더·
 // splitter·탭바·클릭 포커스는 workspace-view/pane-view/splitter 가, 카드 리스트·
 // 인라인 폼은 sidebar 가 담당하고, 여기는 부트스트랩과 dispatchUI 래퍼
-// (CommandError 상태 라인 표면화 + focus 보상)만 남는다. dev 훅
+// (CommandError 상태 라인 표면화 + focus 보상), 그리고 키보드 3층 이동 글루
+// (20단계 — 판정은 순수 모듈 keys.ts, 가로채기 목록도 거기가 정본)만 남는다. dev 훅
 // window.__wmux 는 유지한다 — 콘솔에서 raw dispatch/getState 를 직접 부르는
 // 조작 표면 (주의: dispatchUI 를 우회하므로 focus 보상·에러 표면화가 없다).
 
 import { ActivityPing } from "./activity-ping";
 import { dispatch, getState, resetUi, userActivity } from "./backend";
 import { formatCommandError } from "./command-error";
+import { keyAction, nextTab, paneInDirection, workspaceAtOrdinal } from "./keys";
+import type { KeyAction } from "./keys";
 import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import { SwitchTracer } from "./switch-trace";
@@ -128,8 +131,74 @@ class App {
     };
     installReloadKey();
     installActivityPing();
+    this.installNavKeys();
     this.store.subscribe((snapshot) => this.render(snapshot));
     await this.store.init();
+  }
+
+  /** 키보드 3층 이동 배선 (20단계) — capture 단계 window 리스너라 xterm 보다
+   *  먼저 잡는다. 가로채기 목록(keys.ts)에 든 조합이면 preventDefault +
+   *  stopPropagation 으로 터미널까지 새지 않게 막고, 목록 밖이면 이벤트에 손대지
+   *  않는다. 해석 결과가 없어도(범위 밖 ordinal 등) 가로채기 자체는 유지한다 —
+   *  같은 키가 어떤 때는 셸에 문자를 남기는 비일관을 만들지 않기 위해서다.
+   *  stopPropagation 은 같은 window 의 다른 리스너(활동 핑·send-mode Esc)를 막지
+   *  않으므로 설치 순서 불변식과 무관하다 (stopImmediatePropagation 아님). */
+  private installNavKeys(): void {
+    window.addEventListener(
+      "keydown",
+      (ev) => {
+        const action = keyAction({
+          key: ev.key,
+          ctrl: ev.ctrlKey,
+          alt: ev.altKey,
+          shift: ev.shiftKey,
+          isComposing: ev.isComposing,
+        });
+        if (action === null) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.runNavAction(action);
+      },
+      { capture: true },
+    );
+  }
+
+  /** 이동 액션 해석 — 최신 채택 스냅샷 기준. 대상이 없으면(스냅샷 미도착, 범위
+   *  밖 ordinal, 이미 활성인 워크스페이스, 인접 pane 없음, 탭 0~1개) 전부 조용한
+   *  no-op 이다: 이동 계열은 에러를 띄우지 않는다 (누른 키가 안 먹는 것 자체가
+   *  피드백). 실제 전환·포커스 보상은 dispatchUI 의 기존 경로를 그대로 탄다 —
+   *  switchWorkspace 는 사이드바 클릭과 같은 activePane 보상, focusPane/
+   *  activateTab 은 cmd 대상 보상. */
+  private runNavAction(action: KeyAction): void {
+    const snapshot = this.store.snapshot;
+    if (snapshot === null) return;
+    if (action.type === "switchWorkspace") {
+      const target = workspaceAtOrdinal(
+        snapshot.state.workspaces.map((w) => w.id),
+        action.ordinal,
+      );
+      if (target === null || target === snapshot.state.activeWorkspace) return;
+      void this.dispatchUI({ type: "switchWorkspace", workspace: target });
+      return;
+    }
+    const ws = activeWorkspace(snapshot);
+    if (ws === null) return;
+    if (action.type === "focusPane") {
+      const target = paneInDirection(this.wsView.paneRects(), ws.activePane, action.dir);
+      if (target === null) return;
+      void this.dispatchUI({ type: "focusPane", pane: target });
+      return;
+    }
+    // panes 맵 키는 문자열 숫자 (JSON object 키 제약 — types.ts 참조).
+    const pane = ws.panes[String(ws.activePane)];
+    if (pane === undefined) return;
+    const target = nextTab(
+      pane.tabs.map((t) => t.id),
+      pane.activeTab,
+      action.delta,
+    );
+    if (target === null) return;
+    void this.dispatchUI({ type: "activateTab", tab: target });
   }
 
   /** UI 발 dispatch 공통 경로 — 실패 payload 를 formatCommandError 로 요약해

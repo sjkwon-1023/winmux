@@ -492,6 +492,43 @@ regression once the model fields are dynamic.
    `lastAgentMessage`, and every tab's `notification` is cleared — same guarantee as the
    existing `pty_session` reset, extended to the new notification fields.
 
+### Stage 20 — three-tier keyboard navigation (계획 v2 "키보드 모델"; the canonical interception list lives in the [`apps/wmux/src/keys.ts`](../apps/wmux/src/keys.ts) module doc)
+
+One movement key per tier: `Ctrl+1`…`Ctrl+9` (workspace), `Alt+arrows` (pane focus, by
+on-screen adjacency), `Ctrl+Tab` / `Ctrl+Shift+Tab` (tab cycle inside the active pane).
+All three are window-level capture handlers, so they work with the terminal focused. When
+a key has no target (ordinal past the last workspace, already-active workspace, no pane in
+that direction, 0–1 tabs) the app does nothing — silently, with no status-line error.
+
+1. **Workspace switch (`Ctrl+1`…`Ctrl+9`)** — with 2+ workspaces and a terminal focused,
+   press `Ctrl+2`: the sidebar's **second** card becomes active (1-based, sidebar order)
+   and focus lands in that workspace's active pane (typing goes to its terminal
+   immediately). Pressing the ordinal of the **already active** workspace, or an ordinal
+   past the last card (e.g. `Ctrl+9` with 3 workspaces), does nothing at all.
+2. **Pane focus move (`Alt+arrows`)** — in a workspace split into 2x2 panes, `Alt+→` /
+   `Alt+↓` / `Alt+←` / `Alt+↑` move the active-pane highlight to the geometrically
+   adjacent pane each time, and the newly focused pane's terminal receives typing. At an
+   edge (e.g. `Alt+→` from the rightmost pane) and in a single-pane workspace, nothing
+   happens and no error appears.
+3. **Tab cycle (`Ctrl+Tab` / `Ctrl+Shift+Tab`)** — in a pane with 3 tabs, `Ctrl+Tab`
+   advances through them in tab-strip order and **wraps** from the last back to the first;
+   `Ctrl+Shift+Tab` walks the same cycle backwards. The activated tab's terminal takes
+   focus. In a pane with 0 or 1 tabs, nothing happens.
+4. **Intercepted keys never reach the shell** — with a shell prompt focused, press each of
+   the keys above (including the no-op cases from items 1–3, such as `Ctrl+9` with fewer
+   workspaces): the command line stays empty — no stray digits, no `^I`/tab completion
+   triggered, no escape-sequence garbage — and no line is ever submitted. Then confirm the
+   keys **not** in the interception list still belong to the terminal: a bare `Tab`
+   completes a path, bare arrow keys walk shell history/cursor, and `Ctrl+C` still
+   interrupts a running command.
+5. **[conditional] `Ctrl+Tab` reaches the page in WebView2** — item 3 depends on WebView2
+   delivering `Ctrl+Tab` to the page instead of consuming it as a host-level shortcut,
+   which is an **unverified precondition** (plan risk). If `Ctrl+Tab` produces no tab
+   change *and* leaves nothing in the terminal, the interception itself is fine but the
+   key never arrives: this is **not a stage blocker** — items 1, 2 and 4 stand on their
+   own, and the follow-up is to pick a replacement binding (e.g. `Ctrl+PgUp`/`Ctrl+PgDn`)
+   in `keys.ts` and re-run item 3. Record which behavior you observed.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
