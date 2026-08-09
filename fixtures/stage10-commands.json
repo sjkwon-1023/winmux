@@ -20,6 +20,18 @@
   { "type": "createTab", "pane": 2, "tab": { "type": "terminal", "cwd": null } },
   { "type": "activateTab", "tab": 5 },
   { "type": "closeTab", "tab": 5 },
+  { "type": "navigateFolder", "tab": 7, "path": "/home/dev/code/wmux/src" },
+  { "type": "setViewerScroll", "tab": 8, "scrollTop": 4096.0 },
+  {
+    "type": "createTab",
+    "pane": 2,
+    "tab": { "type": "folderBrowser", "path": null }
+  },
+  {
+    "type": "createTab",
+    "pane": 2,
+    "tab": { "type": "textViewer", "path": "/home/dev/code/wmux/notes.txt" }
+  },
   {
     "type": "createWorkspace",
     "name": "legacy",

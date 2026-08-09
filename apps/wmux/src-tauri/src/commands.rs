@@ -1,6 +1,6 @@
 //! Tauri 커맨드 — 프론트엔드 ↔ wmux-core 글루.
 //!
-//! 두 갈래로 나뉜다 (10단계 계획 0-3 잠금 배치):
+//! 세 갈래로 나뉜다 (10단계 계획 0-3 잠금 배치 + 21단계 뷰어):
 //!
 //! - **구조 변이** (`dispatch`, `get_state`): `Mutex<Dispatcher>` 를 잡는다.
 //!   dispatch 는 내부 스폰이 블로킹이라 전체를 `spawn_blocking` 에서 돈다.
@@ -9,13 +9,21 @@
 //!   레지스트리의 짧은 내부 lock 만 스친다. write·resize 는 블로킹 가능성이
 //!   있어 `spawn_blocking`, ack 은 뮤텍스 갱신 + condvar notify 뿐이라 sync 즉시
 //!   처리한다 (paused 재개 최단 경로 — spike 와 동일 규율).
+//! - **뷰어 파일 접근** (`fs_list_dir`/`fs_stat`/`fs_read_chunk` — 21단계): 상태를
+//!   건드리지 않는 읽기 전용 콘텐츠 플레인이라 Dispatcher lock 도 관리 상태도
+//!   타지 않는다. 9P(`\\wsl.localhost`) I/O 와 distro 질의(프로세스 스폰)가 전부
+//!   블로킹이라 **경로 해석까지 통째로** `spawn_blocking` 안에서 돈다.
 
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::{AppHandle, State};
 use wmux_core::command::{Command, CommandError, CommandOutput};
 use wmux_core::session::{PtySession, SessionId};
+use wmux_core::wslpath;
 
 use crate::state::{publish_state, AppState};
 
@@ -257,4 +265,291 @@ pub fn get_stats(state: State<'_, AppState>) -> Vec<SessionStatsDto> {
             alive: stats.alive,
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 뷰어 파일 접근 (21단계 계획 glue 계약)
+//
+// folderBrowser·textViewer 가 쓰는 읽기 전용 커맨드 3종. Windows 에서는
+// `\\wsl.localhost\<distro>\...` UNC 로 접근한다 — Windows→WSL 방향이라 interop 을
+// 잠근 배포판에서도 동작한다 (계획 v2 5장). 경로 형태 검증·UNC 조립은 순수 함수
+// (`wmux_core::wslpath`)에 있고 테스트도 거기 있다 — 게이트가 `-p wmux-core` 만
+// 돌기 때문이다.
+//
+// **이 3종의 실동작 검증은 UNC·9P 가 필요해 Linux 게이트로는 불가능하다 —
+// 체크포인트 2 사용자 체크리스트로 이월하는 것이 계획 명문이다** (21단계 계획
+// "완료 기준" 3·6·9·12번 항목).
+// ---------------------------------------------------------------------------
+
+/// `fs_list_dir` 한 번이 돌려주는 최대 항목 수. 9P 는 대형 디렉터리에서 느리고
+/// 프론트도 이 이상을 한 번에 그리지 않는다 — 넘치면 잘라내고 `truncated` 로
+/// 알린다 (계획 리스크 [med] 완화).
+const MAX_DIR_ENTRIES: usize = 5_000;
+
+/// `fs_read_chunk` 한 번의 최대 길이 (4 MiB). textViewer 의 윈도우는 512KiB 라
+/// 통상 한참 아래고, 이 상한은 프론트 결함이 IPC 로 거대 버퍼를 요구하는 것을
+/// 막는다.
+const MAX_READ_LEN: u32 = 4 * 1024 * 1024;
+
+/// `fs_list_dir` 응답. **정렬하지 않는다** — dirs-first·name asc 정렬은 프론트
+/// 순수 함수(vitest 대상)의 몫이다 (계획 프론트 계약).
+#[derive(serde::Serialize)]
+pub struct DirListing {
+    pub entries: Vec<DirEntryDto>,
+    /// 상한(`MAX_DIR_ENTRIES`) 초과로 목록을 잘랐다 — 프론트가 배너로 알린다.
+    pub truncated: bool,
+}
+
+/// 디렉터리 항목 하나. 필드명은 serde 기본(snake_case) 그대로 나간다 — 글루 DTO
+/// 는 `SessionStatsDto` 전례를 따르고 계획의 glue 계약도 이 이름으로 적혀 있다
+/// (코어 모델의 camelCase 는 코어 타입 쪽 rename 계약이라 별개다). 타입 이름만
+/// `std::fs::DirEntry` 와 겹치지 않게 `Dto` 접미사를 붙였다.
+#[derive(serde::Serialize)]
+pub struct DirEntryDto {
+    pub name: String,
+    pub is_dir: bool,
+    /// 디렉터리이거나 항목 metadata 조회가 실패하면 None.
+    pub size: Option<u64>,
+}
+
+/// `fs_stat` 응답 — 링크는 따라간 뒤의 **최종 대상** 기준이다.
+#[derive(serde::Serialize)]
+pub struct FileStat {
+    pub size: u64,
+    pub mtime_ms: u64,
+    pub is_dir: bool,
+}
+
+/// 뷰어 디렉터리 목록 (folderBrowser).
+#[tauri::command]
+pub async fn fs_list_dir(distro: Option<String>, path: String) -> Result<DirListing, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 경로 해석도 블로킹이다 — Windows 경로는 distro 질의(wsl.exe 스폰)를
+        // 유발할 수 있어 해석까지 이 안에서 한다.
+        let root = host_path(distro, &path)?;
+        list_dir(&root)
+    })
+    .await
+    .map_err(|err| format!("fs_list_dir task join failed: {err}"))?
+}
+
+/// 파일 크기·수정시각 조회 (textViewer 윈도우 계산, 청크 D 의 mtime 폴링).
+#[tauri::command]
+pub async fn fs_stat(distro: Option<String>, path: String) -> Result<FileStat, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = host_path(distro, &path)?;
+        // `metadata` 는 링크를 따라간다 — 뷰어가 알고 싶은 것은 최종 대상이다.
+        let meta = std::fs::metadata(&target)
+            .map_err(|err| format!("cannot stat {}: {err}", target.display()))?;
+        let modified = meta
+            .modified()
+            .map_err(|err| format!("cannot read mtime of {}: {err}", target.display()))?;
+        // 라이브 리로드의 판정 기준값이라 조회 실패를 조용한 0 으로 대체하지
+        // 않는다 (epoch 이전 시각도 이 용도에선 의미가 없어 그대로 에러).
+        let since_epoch = modified.duration_since(UNIX_EPOCH).map_err(|err| {
+            format!(
+                "mtime of {} is before the unix epoch: {err}",
+                target.display()
+            )
+        })?;
+        Ok(FileStat {
+            size: meta.len(),
+            // u128 → u64 는 포화시킨다 (실재하지 않는 범위지만 조용한 절단 금지).
+            mtime_ms: u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX),
+            is_dir: meta.is_dir(),
+        })
+    })
+    .await
+    .map_err(|err| format!("fs_stat task join failed: {err}"))?
+}
+
+/// 파일의 바이트 윈도우 읽기 (textViewer). 응답은 **raw 바이트** —
+/// `attach_terminal` 과 같은 `tauri::ipc::Response` 경로라 base64 왕복이 없다.
+/// UTF-8 파단·부분행 절삭은 프론트 몫이다 (계획 프론트 계약).
+///
+/// `len` 상한 초과는 조용히 줄이지 않고 **거부**한다 — 요청한 크기와 다른 윈도우가
+/// 돌아가면 프론트의 오프셋 계산이 어긋난다. EOF 를 넘는 `offset` 은 빈 응답이며
+/// 에러가 아니다 (파일이 그새 줄어든 경우 — 프론트가 윈도우를 되감는다).
+#[tauri::command]
+pub async fn fs_read_chunk(
+    distro: Option<String>,
+    path: String,
+    offset: u64,
+    len: u32,
+) -> Result<Response, String> {
+    if len > MAX_READ_LEN {
+        return Err(format!(
+            "fs_read_chunk len {len} exceeds the {MAX_READ_LEN} byte limit"
+        ));
+    }
+    let bytes =
+        tauri::async_runtime::spawn_blocking(move || read_chunk(distro, &path, offset, len))
+            .await
+            .map_err(|err| format!("fs_read_chunk task join failed: {err}"))??;
+    Ok(Response::new(bytes))
+}
+
+/// 블로킹 디렉터리 열거 — fs 순서 그대로, 상한 초과분은 잘라낸다.
+fn list_dir(root: &Path) -> Result<DirListing, String> {
+    let iter =
+        std::fs::read_dir(root).map_err(|err| format!("cannot list {}: {err}", root.display()))?;
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for entry in iter {
+        // 상한 도달 후 **다음 항목이 실재할 때만** truncated 다.
+        if entries.len() >= MAX_DIR_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let entry = entry.map_err(|err| format!("cannot list {}: {err}", root.display()))?;
+        entries.push(dir_entry(&entry));
+    }
+    Ok(DirListing { entries, truncated })
+}
+
+/// 항목 하나의 표시 정보. 개별 metadata 조회 실패는 그 항목만 "파일·크기 미상"으로
+/// 낮춰 담는다 — 9P 에서 항목 하나의 권한·경합 실패가 목록 전체를 죽이지 않게.
+fn dir_entry(entry: &std::fs::DirEntry) -> DirEntryDto {
+    let name = entry.file_name().to_string_lossy().into_owned();
+    // `file_type`·`DirEntry::metadata` 는 링크를 따라가지 않는다. 클릭 동작이
+    // 종류로 갈리므로(디렉터리 탐색 vs 파일 열기) 링크일 때만 대상 metadata 를
+    // 한 번 더 조회한다 — 링크가 아닌 항목에는 추가 I/O 가 없다.
+    let meta = match entry.file_type() {
+        Ok(file_type) if file_type.is_symlink() => std::fs::metadata(entry.path()).ok(),
+        _ => entry.metadata().ok(),
+    };
+    match meta {
+        Some(meta) if meta.is_dir() => DirEntryDto {
+            name,
+            is_dir: true,
+            size: None,
+        },
+        Some(meta) => DirEntryDto {
+            name,
+            is_dir: false,
+            size: Some(meta.len()),
+        },
+        None => DirEntryDto {
+            name,
+            is_dir: false,
+            size: None,
+        },
+    }
+}
+
+/// 블로킹 윈도우 읽기 — `offset` 에서 최대 `len` 바이트.
+fn read_chunk(
+    distro: Option<String>,
+    path: &str,
+    offset: u64,
+    len: u32,
+) -> Result<Vec<u8>, String> {
+    let target = host_path(distro, path)?;
+    let mut file = std::fs::File::open(&target)
+        .map_err(|err| format!("cannot open {}: {err}", target.display()))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|err| format!("cannot seek {} to {offset}: {err}", target.display()))?;
+    let mut buf = Vec::new();
+    file.take(u64::from(len))
+        .read_to_end(&mut buf)
+        .map_err(|err| format!("cannot read {}: {err}", target.display()))?;
+    Ok(buf)
+}
+
+/// 리눅스 경로 → 이 프로세스가 실제로 열 수 있는 호스트 경로.
+///
+/// Windows 는 `\\wsl.localhost\<distro>\...` UNC 로 조립하고, unix(개발 실행)는
+/// 형태 검증만 한 뒤 리눅스 경로를 직접 쓴다 (distro 는 의미가 없다). 스폰 쪽
+/// `host.rs::spawn_spec` 의 cfg 분기와 같은 대칭이다.
+#[cfg(windows)]
+fn host_path(distro: Option<String>, path: &str) -> Result<PathBuf, String> {
+    let distro = resolve_distro(distro)?;
+    Ok(PathBuf::from(wslpath::to_unc(&distro, path)?))
+}
+
+#[cfg(not(windows))]
+fn host_path(_distro: Option<String>, path: &str) -> Result<PathBuf, String> {
+    wslpath::validate_linux_path(path)?;
+    Ok(PathBuf::from(path))
+}
+
+/// distro 해석 (계획 21단계 핵심 결정): 인자(workspace.distro) → env `WMUX_DISTRO`
+/// → `wsl.exe -l -q` 기본 배포판 lazy 질의. **셋 다 실패해야** 에러다 — 터미널
+/// 스폰(`host.rs`: distro 없으면 wsl.exe 기본값)과 정합을 맞춘 것으로, 둘 다
+/// 미설정인 가장 흔한 구성에서 뷰어만 죽는 비대칭을 만들지 않는다. 빈 문자열은
+/// 미설정 취급 (`host.rs::spawn_spec` 과 동일).
+#[cfg(windows)]
+fn resolve_distro(distro: Option<String>) -> Result<String, String> {
+    if let Some(distro) = distro.filter(|d| !d.is_empty()) {
+        return Ok(distro);
+    }
+    if let Some(distro) = std::env::var("WMUX_DISTRO").ok().filter(|d| !d.is_empty()) {
+        return Ok(distro);
+    }
+    default_distro()
+}
+
+/// 기본 배포판 이름을 프로세스 수명 동안 캐시한다 — 파일 접근마다 wsl.exe 를
+/// 띄우지 않기 위한 캐시라 **성공만** 담는다. 실패까지 캐시하면 앱을 켠 뒤
+/// 배포판을 설치·복구한 사용자가 재시작 전까지 영구히 막힌다. (초기 경합으로
+/// 질의가 두 번 나갈 수 있으나 결과는 하나로 수렴한다.)
+#[cfg(windows)]
+fn default_distro() -> Result<String, String> {
+    static DEFAULT_DISTRO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(cached) = DEFAULT_DISTRO.get() {
+        return Ok(cached.clone());
+    }
+    let distro = query_default_distro()?;
+    Ok(DEFAULT_DISTRO.get_or_init(|| distro).clone())
+}
+
+/// `wsl.exe -l -q` 질의. 출력은 **UTF-16LE** 이고(파이프로 리다이렉트해도 그렇다 —
+/// 실검증은 체크포인트 2 항목 12), `-l` 은 기본 배포판을 맨 앞에 내므로 디코드 후
+/// 첫 비어있지 않은 줄이 답이다. 실패 메시지에는 사용자가 취할 조치를 함께 적는다.
+#[cfg(windows)]
+fn query_default_distro() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+    let output = std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        // 릴리스 빌드는 windows_subsystem="windows" 라 콘솔이 없다 — 이 플래그가
+        // 없으면 질의마다 콘솔 창이 깜빡인다.
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|err| {
+            format!(
+                "cannot run 'wsl.exe -l -q' to find the default distro: {err}; \
+                 set workspace distro or WMUX_DISTRO"
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "'wsl.exe -l -q' failed ({}): {}; set workspace distro or WMUX_DISTRO",
+            output.status,
+            decode_utf16le(&output.stderr).trim()
+        ));
+    }
+    let listing = decode_utf16le(&output.stdout);
+    // BOM(U+FEFF)은 공백류가 아니라 trim 으로 떨어지지 않는다 — 명시적으로 벗긴다.
+    listing
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            "'wsl.exe -l -q' listed no distro; set workspace distro or WMUX_DISTRO".to_owned()
+        })
+}
+
+/// UTF-16LE 바이트열 → String. 짝이 안 맞는 마지막 바이트는 버리고, 부적합
+/// 서로게이트는 U+FFFD 로 둔다 (진단 문자열 용도라 lossy 로 충분하다).
+#[cfg(windows)]
+fn decode_utf16le(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
 }

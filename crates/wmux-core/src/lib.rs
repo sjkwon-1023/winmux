@@ -13,3 +13,4 @@ pub mod persist;
 pub mod replay;
 pub mod reset;
 pub mod session;
+pub mod wslpath;

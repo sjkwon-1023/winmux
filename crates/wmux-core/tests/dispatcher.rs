@@ -6,7 +6,7 @@
 //! (fixture 파일이 기준).
 
 use serde::{Deserialize, Serialize};
-use wmux_core::command::{Command, CommandError, CommandOutput};
+use wmux_core::command::{Command, CommandError, CommandOutput, NewTab};
 use wmux_core::model::{AppState, PaneId, SplitId, TabId, WorkspaceId};
 
 fn read_fixture(name: &str) -> String {
@@ -66,7 +66,8 @@ fn outputs_fixture_matches_serialization() {
     let text = read_fixture("stage10-outputs.json");
     let fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-    // 전 CommandOutput variant 1개씩 (4종) — variant 추가 시 fixture 도 갱신할 것.
+    // 전 CommandOutput variant 1개씩 (4종) + 뷰어 탭 생성 3종(session null —
+    // 21단계) — variant 추가 시 fixture 도 갱신할 것.
     let outputs = vec![
         CommandOutput::WorkspaceCreated {
             workspace: WorkspaceId(1),
@@ -85,8 +86,24 @@ fn outputs_fixture_matches_serialization() {
             session: Some(11),
         },
         CommandOutput::Done,
+        CommandOutput::WorkspaceCreated {
+            workspace: WorkspaceId(20),
+            pane: PaneId(21),
+            tab: Some(TabId(22)),
+            session: None,
+        },
+        CommandOutput::PaneCreated {
+            pane: PaneId(23),
+            split: SplitId(24),
+            tab: Some(TabId(25)),
+            session: None,
+        },
+        CommandOutput::TabCreated {
+            tab: TabId(26),
+            session: None,
+        },
     ];
-    // 전 CommandError variant 1개씩 (4종).
+    // 전 CommandError variant 1개씩 (7종).
     let errors = vec![
         CommandError::UnknownTarget {
             target: "pane 99".to_string(),
@@ -96,6 +113,11 @@ fn outputs_fixture_matches_serialization() {
             message: "wsl.exe: program not found".to_string(),
         },
         CommandError::InvalidRatio { ratio: 1.5 },
+        CommandError::KindMismatch { tab: TabId(7) },
+        CommandError::InvalidPath {
+            message: "path must be absolute: \"code/wmux\"".to_string(),
+        },
+        CommandError::InvalidScroll { value: -1.0 },
     ];
 
     let expected = serde_json::json!({ "outputs": outputs, "errors": errors });
@@ -108,23 +130,49 @@ fn commands_fixture_round_trips() {
     let original: serde_json::Value = serde_json::from_str(&text).unwrap();
     let parsed: Vec<Command> = serde_json::from_str(&text).unwrap();
 
-    // 전 Command variant 1개씩(10종) + createWorkspace 의 tab 필드 누락
-    // 하위호환 형태 1개 (마지막 엔트리) — variant 추가 시 fixture 도 갱신할 것.
-    assert_eq!(parsed.len(), 11);
+    // 전 Command variant 1개씩(12종) + 뷰어 NewTab 2종을 실은 createTab 2개
+    // (21단계) + createWorkspace 의 tab 필드 누락 하위호환 형태 1개 (마지막
+    // 엔트리) — variant 추가 시 fixture 도 갱신할 것.
+    assert_eq!(parsed.len(), 15);
+
+    // 뷰어 NewTab 잠금 (21단계): folderBrowser 의 path 는 nullable(= 워크스페이스
+    // root_path 상속), textViewer 는 필수다.
+    assert!(
+        matches!(
+            &parsed[12],
+            Command::CreateTab {
+                tab: NewTab::FolderBrowser { path: None },
+                ..
+            }
+        ),
+        "folderBrowser 엔트리: {:?}",
+        parsed[12]
+    );
+    assert!(
+        matches!(
+            &parsed[13],
+            Command::CreateTab {
+                tab: NewTab::TextViewer { .. },
+                ..
+            }
+        ),
+        "textViewer 엔트리: {:?}",
+        parsed[13]
+    );
 
     // 하위호환 잠금 (계획 13-D1): tab 필드가 없는 JSON 은 tab: None 으로
     // 파싱된다 — 13단계 이전 클라이언트의 createWorkspace 형태.
     assert!(
-        matches!(&parsed[10], Command::CreateWorkspace { tab: None, .. }),
+        matches!(&parsed[14], Command::CreateWorkspace { tab: None, .. }),
         "compat 엔트리가 tab: None 으로 파싱돼야 함: {:?}",
-        parsed[10]
+        parsed[14]
     );
 
     // 재직렬화는 None 을 "tab": null 로 명시하므로, 원본의 compat 엔트리에
     // "tab": null 을 보충한 형태와 비교한다 (그 외 전 엔트리는 strict
     // round-trip).
     let mut expected = original.clone();
-    expected[10]
+    expected[14]
         .as_object_mut()
         .unwrap()
         .insert("tab".to_string(), serde_json::Value::Null);

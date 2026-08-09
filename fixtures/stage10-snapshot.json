@@ -114,8 +114,19 @@
         "panes": {
           "11": {
             "id": 11,
-            "tabs": [],
-            "activeTab": null
+            "tabs": [
+              {
+                "id": 14,
+                "title": "/",
+                "kind": {
+                  "type": "folderBrowser",
+                  "path": "/"
+                },
+                "notification": "none",
+                "lastActivityMs": null
+              }
+            ],
+            "activeTab": 14
           }
         },
         "activePane": 11,
@@ -124,7 +135,7 @@
       }
     ],
     "activeWorkspace": 1,
-    "nextId": 14,
+    "nextId": 15,
     "revision": 6
   }
 }

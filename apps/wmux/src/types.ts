@@ -84,7 +84,11 @@ export interface Tab {
   lastActivityMs: number | null;
 }
 
-/** 탭 종류별 상태 — internal tag "type". 뷰어 3종은 타입 공간만 확정 (21단계). */
+/** 탭 종류별 상태 — internal tag "type".
+ *
+ *  scrollTop 시맨틱은 종류마다 다르다: textViewer 는 최상단 가시 행의 전역 byte
+ *  offset, markdownViewer 는 렌더된 픽셀 offset. folderBrowser 는 스크롤 위치를
+ *  기억하지 않아 필드 자체가 없다 (setViewerScroll 대상이 되면 kindMismatch). */
 export type TabKind =
   | {
       type: "terminal";
@@ -101,8 +105,15 @@ export type TerminalStatus =
   | { type: "running" }
   | { type: "exited"; code: number | null };
 
-/** CreateTab 의 탭 명세 (command.rs NewTab) — 뷰어 variant 는 21단계. */
-export type NewTab = { type: "terminal"; cwd: string | null };
+/** 탭 생성 명세 (command.rs NewTab) — createTab·splitPane·createWorkspace 공유.
+ *  markdownViewer 는 아직 없다 (21단계 청크 D 에서 추가 — variant 를 생략해
+ *  미구현 경로가 타입 수준에서 존재하지 않게 한다). */
+export type NewTab =
+  | { type: "terminal"; cwd: string | null }
+  /** path 가 null 이면 워크스페이스 rootPath, 그것도 null 이면 "/" (terminal
+   *  cwd 와 대칭). */
+  | { type: "folderBrowser"; path: string | null }
+  | { type: "textViewer"; path: string };
 
 /** 직렬화 가능한 command bus 명령 집합 (command.rs Command).
  *  JSON 은 internal tag: {"type": "createWorkspace", "name": ...}. */
@@ -126,12 +137,20 @@ export type Command =
   | { type: "closePane"; pane: PaneId }
   | { type: "createTab"; pane: PaneId; tab: NewTab }
   | { type: "activateTab"; tab: TabId }
-  | { type: "closeTab"; tab: TabId };
+  | { type: "closeTab"; tab: TabId }
+  /** folderBrowser 탭의 경로 변경 — 탐색도 dispatcher 를 경유한다 (21단계).
+   *  대상이 folderBrowser 가 아니면 kindMismatch, 경로 형태가 불량하면
+   *  invalidPath. 성공 시 탭 제목도 basename 으로 갱신된다. */
+  | { type: "navigateFolder"; tab: TabId; path: string }
+  /** 뷰어 스크롤 위치 기록 (unmount 복원·persist). scrollTop 은 finite·0 이상
+   *  이어야 하고(아니면 invalidScroll), 값 시맨틱은 TabKind 참조. */
+  | { type: "setViewerScroll"; tab: TabId; scrollTop: number };
 
 /** dispatch 성공 결과 (command.rs CommandOutput). */
 export type CommandOutput =
-  /** createWorkspace 결과 — 생성된 안정 ID 전부. tab/session 은
-   *  createWorkspace.tab 이 non-null 이었을 때만 non-null (계획 13-D1). */
+  /** createWorkspace 결과 — 생성된 안정 ID 전부. tab 은 createWorkspace.tab 이
+   *  non-null 이었을 때만 non-null 이고, session 은 그 탭이 terminal 일 때만
+   *  non-null 이다 (뷰어 탭은 스폰이 없다 — 21단계). */
   | {
       type: "workspaceCreated";
       workspace: WorkspaceId;
@@ -139,8 +158,8 @@ export type CommandOutput =
       tab: TabId | null;
       session: SessionId | null;
     }
-  /** splitPane 결과 — 생성된 안정 ID 전부. tab/session 은 splitPane.tab 이
-   *  non-null 이었을 때만 non-null (계획 D5). */
+  /** splitPane 결과 — 생성된 안정 ID 전부. tab 은 splitPane.tab 이 non-null
+   *  이었을 때만, session 은 그 탭이 terminal 일 때만 non-null (D5·21단계). */
   | {
       type: "paneCreated";
       pane: PaneId;
@@ -148,6 +167,7 @@ export type CommandOutput =
       tab: TabId | null;
       session: SessionId | null;
     }
+  /** session 은 terminal 탭이면 스폰된 PTY 세션 id, 뷰어 탭이면 null. */
   | { type: "tabCreated"; tab: TabId; session: SessionId | null }
   | { type: "done" };
 
@@ -156,4 +176,11 @@ export type CommandError =
   | { type: "unknownTarget"; target: string }
   | { type: "lastPane" }
   | { type: "spawnFailed"; message: string }
-  | { type: "invalidRatio"; ratio: number };
+  | { type: "invalidRatio"; ratio: number }
+  /** 대상 탭의 종류가 이 명령을 받을 수 없다 — navigateFolder 는 folderBrowser
+   *  만, setViewerScroll 은 스크롤 위치를 모델에 가진 뷰어만 받는다 (21단계). */
+  | { type: "kindMismatch"; tab: TabId }
+  /** 뷰어 경로 형태 불량 (wslpath 검증 사유 문자열). 실존 여부와는 무관하다. */
+  | { type: "invalidPath"; message: string }
+  /** setViewerScroll 의 scrollTop 이 finite·0 이상이 아니다. */
+  | { type: "invalidScroll"; value: number };

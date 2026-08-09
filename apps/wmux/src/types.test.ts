@@ -15,6 +15,7 @@ import type {
   Command,
   CommandError,
   CommandOutput,
+  NewTab,
   SplitTree,
   StateSnapshot,
   TabKind,
@@ -66,6 +67,25 @@ function tabKindLabel(kind: TabKind): string {
   }
 }
 
+/** NewTab 전 variant 를 narrowing 으로 통과시키며 태그를 돌려준다 (21단계 —
+ *  markdownViewer 는 아직 union 에 없다). */
+function newTabTag(spec: NewTab): string {
+  switch (spec.type) {
+    case "terminal":
+      expect(spec.cwd === null || typeof spec.cwd === "string").toBe(true);
+      return spec.type;
+    case "folderBrowser":
+      // path 는 nullable — null 이면 워크스페이스 rootPath 상속.
+      expect(spec.path === null || typeof spec.path === "string").toBe(true);
+      return spec.type;
+    case "textViewer":
+      expect(typeof spec.path).toBe("string");
+      return spec.type;
+    default:
+      return assertNever(spec);
+  }
+}
+
 /** Command 전 variant 를 narrowing 으로 통과시키며 태그를 돌려준다. */
 function commandTag(cmd: Command): string {
   switch (cmd.type) {
@@ -73,9 +93,9 @@ function commandTag(cmd: Command): string {
       expect(typeof cmd.name).toBe("string");
       // tab 은 필드 누락(undefined)·null·NewTab 전부 허용 — 누락은 13단계
       // 이전 클라이언트 하위호환 (계획 13-D1).
-      expect(
-        cmd.tab === undefined || cmd.tab === null || cmd.tab.type === "terminal",
-      ).toBe(true);
+      expect(cmd.tab === undefined || cmd.tab === null || newTabTag(cmd.tab) !== "").toBe(
+        true,
+      );
       return cmd.type;
     case "switchWorkspace":
       expect(typeof cmd.workspace).toBe("number");
@@ -89,7 +109,7 @@ function commandTag(cmd: Command): string {
     case "splitPane":
       expect(["horizontal", "vertical"]).toContain(cmd.direction);
       // tab 은 nullable — null(빈 pane) 또는 NewTab(원자 탭 동반 분할, D5).
-      expect(cmd.tab === null || cmd.tab.type === "terminal").toBe(true);
+      expect(cmd.tab === null || newTabTag(cmd.tab) !== "").toBe(true);
       return cmd.type;
     case "resizeSplit":
       expect(typeof cmd.split).toBe("number");
@@ -99,13 +119,21 @@ function commandTag(cmd: Command): string {
       expect(typeof cmd.pane).toBe("number");
       return cmd.type;
     case "createTab":
-      expect(cmd.tab.type).toBe("terminal");
+      expect(newTabTag(cmd.tab)).not.toBe("");
       return cmd.type;
     case "activateTab":
       expect(typeof cmd.tab).toBe("number");
       return cmd.type;
     case "closeTab":
       expect(typeof cmd.tab).toBe("number");
+      return cmd.type;
+    case "navigateFolder":
+      expect(typeof cmd.tab).toBe("number");
+      expect(cmd.path.startsWith("/")).toBe(true);
+      return cmd.type;
+    case "setViewerScroll":
+      expect(typeof cmd.tab).toBe("number");
+      expect(typeof cmd.scrollTop).toBe("number");
       return cmd.type;
     default:
       return assertNever(cmd);
@@ -157,6 +185,15 @@ function errorTag(entry: CommandError): string {
     case "invalidRatio":
       expect(typeof entry.ratio).toBe("number");
       return entry.type;
+    case "kindMismatch":
+      expect(typeof entry.tab).toBe("number");
+      return entry.type;
+    case "invalidPath":
+      expect(typeof entry.message).toBe("string");
+      return entry.type;
+    case "invalidScroll":
+      expect(typeof entry.value).toBe("number");
+      return entry.type;
     default:
       return assertNever(entry);
   }
@@ -188,7 +225,7 @@ describe("stage10-snapshot.json", () => {
     expect(snapshotFixture.revision).toBe(6);
     expect(snapshotFixture.state.revision).toBe(6);
     expect(snapshotFixture.state.activeWorkspace).toBe(1);
-    expect(snapshotFixture.state.nextId).toBe(14);
+    expect(snapshotFixture.state.nextId).toBe(15);
     expect(snapshotFixture.state.workspaces).toHaveLength(2);
   });
 
@@ -237,6 +274,13 @@ describe("stage10-snapshot.json", () => {
     expect(labels).toContain("textViewer:0");
     const tab5 = ws1.panes["2"].tabs[1];
     expect(tab5.notification).toBe("unread");
+
+    // 뷰어 탭이 pane 의 activeTab 인 형태 (21단계 — 뷰어 마운트 대상 판정의
+    // 입력) + 루트 경로 folderBrowser.
+    const ws2 = snapshotFixture.state.workspaces[1];
+    const pane11 = ws2.panes["11"];
+    expect(pane11.activeTab).toBe(14);
+    expect(tabKindLabel(pane11.tabs[0].kind)).toBe("folderBrowser:/");
   });
 
   it("parses workspace nullable/git fields and empty panes", () => {
@@ -249,7 +293,7 @@ describe("stage10-snapshot.json", () => {
     expect(ws2.gitDirty).toBe(true);
     expect(ws2.agentStatus).toBe("needsInput");
     expect(ws2.lastAgentMessage).not.toBeNull();
-    // 빈 pane (탭 0개, activeTab null) — 10단계 임시 허용 상태.
+    // 빈 pane (탭 0개, activeTab null) — SplitPane{tab: null} 등으로 도달한다.
     expect(ws1.panes["9"].tabs).toEqual([]);
     expect(ws1.panes["9"].activeTab).toBeNull();
   });
@@ -267,7 +311,8 @@ describe("stage10-snapshot-empty.json", () => {
 describe("stage10-commands.json", () => {
   it("covers every Command variant with internal tag narrowing", () => {
     const tags = commandsFixture.map(commandTag);
-    // 마지막 createWorkspace 는 tab 필드 누락 하위호환 형태 (계획 13-D1).
+    // 뒤쪽 createTab 2개는 뷰어 NewTab 2종을 실은 형태(21단계)이고, 마지막
+    // createWorkspace 는 tab 필드 누락 하위호환 형태다 (계획 13-D1).
     expect(tags).toEqual([
       "createWorkspace",
       "switchWorkspace",
@@ -279,6 +324,10 @@ describe("stage10-commands.json", () => {
       "createTab",
       "activateTab",
       "closeTab",
+      "navigateFolder",
+      "setViewerScroll",
+      "createTab",
+      "createTab",
       "createWorkspace",
     ]);
   });
@@ -292,7 +341,7 @@ describe("stage10-commands.json", () => {
     expect(create.tab).toEqual({ type: "terminal", cwd: null });
 
     // 마지막 엔트리는 tab 필드 누락 하위호환 잠금 — 파싱 시 undefined.
-    const legacy = commandsFixture[10];
+    const legacy = commandsFixture[14];
     if (legacy.type !== "createWorkspace") throw new Error("last must be createWorkspace");
     expect(legacy.tab).toBeUndefined();
 
@@ -310,6 +359,29 @@ describe("stage10-commands.json", () => {
     const createTab = commandsFixture[7];
     if (createTab.type !== "createTab") throw new Error("eighth must be createTab");
     expect(createTab.tab).toEqual({ type: "terminal", cwd: null });
+
+    // 뷰어 명령·뷰어 NewTab 잠금 (21단계).
+    const navigate = commandsFixture[10];
+    if (navigate.type !== "navigateFolder") throw new Error("11th must be navigateFolder");
+    expect(navigate.tab).toBe(7);
+    expect(navigate.path).toBe("/home/dev/code/wmux/src");
+
+    const scroll = commandsFixture[11];
+    if (scroll.type !== "setViewerScroll") throw new Error("12th must be setViewerScroll");
+    expect(scroll.tab).toBe(8);
+    expect(scroll.scrollTop).toBe(4096);
+
+    const folderTab = commandsFixture[12];
+    if (folderTab.type !== "createTab") throw new Error("13th must be createTab");
+    // folderBrowser 의 path 는 nullable (null = 워크스페이스 rootPath 상속).
+    expect(folderTab.tab).toEqual({ type: "folderBrowser", path: null });
+
+    const textTab = commandsFixture[13];
+    if (textTab.type !== "createTab") throw new Error("14th must be createTab");
+    expect(textTab.tab).toEqual({
+      type: "textViewer",
+      path: "/home/dev/code/wmux/notes.txt",
+    });
   });
 });
 
@@ -325,18 +397,31 @@ describe("stage10-outputs.json", () => {
     expect(Array.isArray(fixture.outputs)).toBe(true);
     expect(Array.isArray(fixture.errors)).toBe(true);
     // 각 union 의 전 variant 가 1회씩 — 태그 커버리지를 잠근다 (값 세부는
-    // 글루 소유 fixture 라 태그·필드 타입 수준까지만 고정).
+    // 글루 소유 fixture 라 태그·필드 타입 수준까지만 고정). 뒤쪽 생성 3종은
+    // 뷰어 탭 형태(session null — 21단계)의 재등장이다.
     expect(fixture.outputs.map(outputTag)).toEqual([
       "workspaceCreated",
       "paneCreated",
       "tabCreated",
       "done",
+      "workspaceCreated",
+      "paneCreated",
+      "tabCreated",
     ]);
+    // 뷰어 탭 생성 결과는 tab 만 non-null 이고 session 은 null 이다.
+    for (const entry of fixture.outputs.slice(4)) {
+      if (entry.type === "done") throw new Error("viewer outputs must create ids");
+      expect(entry.tab).not.toBeNull();
+      expect(entry.session).toBeNull();
+    }
     expect(fixture.errors.map(errorTag)).toEqual([
       "unknownTarget",
       "lastPane",
       "spawnFailed",
       "invalidRatio",
+      "kindMismatch",
+      "invalidPath",
+      "invalidScroll",
     ]);
   });
 });

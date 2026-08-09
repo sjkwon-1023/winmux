@@ -93,6 +93,57 @@ export function resetUi(): Promise<void> {
   return invoke<void>("reset_ui");
 }
 
+// --- 뷰어 파일 접근 (21단계) --------------------------------------------------
+// folderBrowser·textViewer 가 쓰는 읽기 전용 커맨드 3종. 백엔드가 Windows 에서
+// \\wsl.localhost UNC 로 접근하므로 프론트는 항상 **리눅스 경로**를 넘긴다.
+// distro 는 워크스페이스 설정값(없으면 null) — 백엔드가 null 이면 WMUX_DISTRO,
+// 그것도 없으면 WSL 기본 배포판으로 해석한다 (commands.rs resolve_distro).
+// DTO 필드명은 글루 DTO 관례(SessionStats 와 동일)대로 snake_case 그대로다.
+
+/** fs_list_dir 의 디렉터리 항목. size 는 디렉터리이거나 조회 실패면 null. */
+export interface DirEntry {
+  name: string;
+  is_dir: boolean;
+  size: number | null;
+}
+
+/** fs_list_dir 응답. entries 는 **정렬되지 않은** fs 순서 — dirs-first·name asc
+ *  정렬은 프론트 순수 함수 몫이다. truncated 면 5,000 항목 상한에서 잘렸다. */
+export interface DirListing {
+  entries: DirEntry[];
+  truncated: boolean;
+}
+
+/** fs_stat 응답 — 링크를 따라간 최종 대상 기준. */
+export interface FileStat {
+  size: number;
+  mtime_ms: number;
+  is_dir: boolean;
+}
+
+/** 디렉터리 목록 (folderBrowser). 존재하지 않는 경로·권한 실패는 reject 된다 —
+ *  호출자는 인라인 에러로 표시하고 탭은 유지한다. */
+export function fsListDir(distro: string | null, path: string): Promise<DirListing> {
+  return invoke<DirListing>("fs_list_dir", { distro, path });
+}
+
+/** 파일 크기·수정시각 조회 (윈도우 계산·mtime 폴링). */
+export function fsStat(distro: string | null, path: string): Promise<FileStat> {
+  return invoke<FileStat>("fs_stat", { distro, path });
+}
+
+/** 파일의 바이트 윈도우 읽기 (textViewer). 응답은 attachTerminal 과 같은 raw
+ *  body — ArrayBuffer 로 온다 (JSON·base64 왕복 없음). len 은 4MiB 상한이고
+ *  넘기면 거부된다. EOF 를 넘는 offset 은 빈 버퍼(에러 아님)다. */
+export function fsReadChunk(
+  distro: string | null,
+  path: string,
+  offset: number,
+  len: number,
+): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("fs_read_chunk", { distro, path, offset, len });
+}
+
 /** state-changed 구독 헬퍼 — 변이마다 전체 스냅샷(revision 포함)이 온다.
  *  stale 판정(revision 가드)은 store 몫이다. */
 export function onStateChanged(

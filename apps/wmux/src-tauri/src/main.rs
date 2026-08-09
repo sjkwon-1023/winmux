@@ -178,6 +178,10 @@ fn main() {
             commands::get_stats,
             commands::user_activity,
             commands::reset_ui,
+            // 뷰어 파일 접근 (21단계) — 읽기 전용 콘텐츠 플레인.
+            commands::fs_list_dir,
+            commands::fs_stat,
+            commands::fs_read_chunk,
         ])
         .build(tauri::generate_context!())
         .expect("error while building wmux")

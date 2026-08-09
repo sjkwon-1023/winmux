@@ -3,12 +3,18 @@
     { "type": "workspaceCreated", "workspace": 1, "pane": 2, "tab": 3, "session": 11 },
     { "type": "paneCreated", "pane": 9, "split": 12, "tab": 13, "session": 11 },
     { "type": "tabCreated", "tab": 4, "session": 11 },
-    { "type": "done" }
+    { "type": "done" },
+    { "type": "workspaceCreated", "workspace": 20, "pane": 21, "tab": 22, "session": null },
+    { "type": "paneCreated", "pane": 23, "split": 24, "tab": 25, "session": null },
+    { "type": "tabCreated", "tab": 26, "session": null }
   ],
   "errors": [
     { "type": "unknownTarget", "target": "pane 99" },
     { "type": "lastPane" },
     { "type": "spawnFailed", "message": "wsl.exe: program not found" },
-    { "type": "invalidRatio", "ratio": 1.5 }
+    { "type": "invalidRatio", "ratio": 1.5 },
+    { "type": "kindMismatch", "tab": 7 },
+    { "type": "invalidPath", "message": "path must be absolute: \"code/wmux\"" },
+    { "type": "invalidScroll", "value": -1.0 }
   ]
 }

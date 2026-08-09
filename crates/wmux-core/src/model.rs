@@ -398,8 +398,17 @@ pub struct Tab {
     pub last_activity_ms: Option<u64>,
 }
 
-/// 탭 종류별 상태. 뷰어 3종은 타입 공간만 확정 — 생성 경로는 21단계
-/// (10단계 계획 1장 "타입 공간은 지금 확정" 기준).
+/// 탭 종류별 상태 (10단계 계획 1장 "타입 공간은 지금 확정" 기준). 생성 경로는
+/// folderBrowser·textViewer 가 21단계, markdownViewer 는 그 마지막 청크다
+/// (`command::NewTab` 은 착지한 종류만 싣는다).
+///
+/// # scroll_top 시맨틱
+///
+/// 뷰어의 스크롤 위치는 종류마다 단위가 다르다 — textViewer 는 **최상단 가시
+/// 행의 전역 byte offset**(파일이 커도 창 이동과 무관하게 같은 지점을 가리키게
+/// 하는 값), markdownViewer 는 **렌더된 픽셀 offset** 이다. folderBrowser 는
+/// 스크롤 위치를 기억하지 않아 필드 자체가 없다 (`SetViewerScroll` 대상이 되면
+/// `KindMismatch`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -418,10 +427,12 @@ pub enum TabKind {
     },
     TextViewer {
         path: String,
+        /// 최상단 가시 행의 전역 byte offset (enum rustdoc 참조).
         scroll_top: f64,
     },
     MarkdownViewer {
         path: String,
+        /// 렌더된 픽셀 offset (enum rustdoc 참조).
         scroll_top: f64,
     },
 }

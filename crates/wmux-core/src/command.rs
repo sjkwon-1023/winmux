@@ -103,10 +103,29 @@ pub enum Command {
     CloseTab {
         tab: TabId,
     },
+    /// folderBrowser 탭의 경로를 바꾼다 — 디렉터리 탐색도 뷰 내부 상태가 아니라
+    /// dispatcher 를 경유한다 (계획 v2 4장 + persist 최신성, 21단계). 대상이
+    /// folderBrowser 가 아니면 [`CommandError::KindMismatch`], 경로 형태가
+    /// 불량하면 [`CommandError::InvalidPath`] (실존 여부는 검사하지 않는다 —
+    /// 코어 무 I/O). 성공 시 `Tab.title` 도 새 경로의 basename 으로 갱신된다.
+    NavigateFolder {
+        tab: TabId,
+        path: String,
+    },
+    /// 뷰어 스크롤 위치를 기록한다 — unmount 복원·persist 용 (21단계). 값 시맨틱은
+    /// 탭 종류별로 다르다 ([`TabKind`] rustdoc 참조). finite·0 이상이어야 하고
+    /// (아니면 [`CommandError::InvalidScroll`]), 대상은 스크롤 위치를 모델에
+    /// 가진 뷰어 탭이어야 한다 — folderBrowser 는 그 필드가 없으므로
+    /// [`CommandError::KindMismatch`] (기결정).
+    SetViewerScroll {
+        tab: TabId,
+        scroll_top: f64,
+    },
 }
 
-/// CreateTab 의 탭 명세. 뷰어 variant 는 21단계에 추가된다 — variant 자체를
-/// 생략해 미구현 경로가 타입 수준에서 존재하지 않게 한다.
+/// 탭 생성 명세 — CreateTab·SplitPane·CreateWorkspace 가 공유한다. markdownViewer
+/// 는 아직 없다: variant 자체를 생략해 미구현 경로가 타입 수준에서 존재하지 않게
+/// 한다 (21단계 청크 D 에서 추가).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -117,6 +136,16 @@ pub enum NewTab {
     Terminal {
         /// None 이면 워크스페이스 root_path 를 기본 cwd 로 쓴다 (계획 v2 4장).
         cwd: Option<String>,
+    },
+    /// 디렉터리 탐색 탭. spawn 이 없는 순수 변이로 생성된다.
+    FolderBrowser {
+        /// None 이면 워크스페이스 root_path, 그것도 None 이면 `"/"` (Terminal
+        /// cwd 와 대칭 — 계획 21단계 core 계약).
+        path: Option<String>,
+    },
+    /// 텍스트 파일 뷰어 탭 (에디터가 아니다 — 읽기 전용). 경로는 필수다.
+    TextViewer {
+        path: String,
     },
 }
 
@@ -129,15 +158,17 @@ pub enum NewTab {
 )]
 pub enum CommandOutput {
     /// CreateWorkspace 결과 — 생성된 안정 ID 전부를 돌려준다 (계획 13-D1).
-    /// `tab`/`session` 은 `CreateWorkspace.tab` 이 Some 이었을 때만 Some.
+    /// `tab` 은 `CreateWorkspace.tab` 이 Some 이었을 때만 Some 이고, `session`
+    /// 은 그 탭이 **terminal 일 때만** Some 이다 (뷰어 탭은 스폰이 없다 — 21단계).
     WorkspaceCreated {
         workspace: WorkspaceId,
         pane: PaneId,
         tab: Option<TabId>,
         session: Option<SessionId>,
     },
-    /// SplitPane 결과 — 생성된 안정 ID 전부를 돌려준다 (계획 D5). `tab`/`session`
-    /// 은 `SplitPane.tab` 이 Some 이었을 때만 Some (session 은 그중 terminal 탭).
+    /// SplitPane 결과 — 생성된 안정 ID 전부를 돌려준다 (계획 D5). `tab` 은
+    /// `SplitPane.tab` 이 Some 이었을 때만 Some 이고, `session` 은 그 탭이
+    /// **terminal 일 때만** Some 이다 (뷰어 탭은 스폰이 없다 — 21단계).
     PaneCreated {
         pane: PaneId,
         split: SplitId,
@@ -146,7 +177,8 @@ pub enum CommandOutput {
     },
     TabCreated {
         tab: TabId,
-        /// terminal 탭이면 스폰된 PTY 세션 id. (뷰어 탭은 None — 21단계.)
+        /// terminal 탭이면 스폰된 PTY 세션 id, 뷰어 탭이면 None (스폰 없는 순수
+        /// 변이 — 21단계).
         session: Option<SessionId>,
     },
     /// id 를 새로 만들지 않는 명령의 성공.
@@ -170,6 +202,16 @@ pub enum CommandError {
     /// ResizeSplit 의 ratio 가 유효 범위 밖 — finite 하고 개구간 (0, 1) 안이어야
     /// 한다 (계획 D2 — 모델은 loud-fail, 픽셀 클램프는 UI 분담).
     InvalidRatio { ratio: f64 },
+    /// 대상 탭의 종류가 이 명령을 받을 수 없다 — NavigateFolder 는
+    /// folderBrowser 만, SetViewerScroll 은 스크롤 위치를 모델에 가진 뷰어만
+    /// 받는다 (21단계).
+    KindMismatch { tab: TabId },
+    /// 뷰어 경로의 형태가 불량하다 — 사유는 `wslpath::validate_linux_path` 의
+    /// 문자열을 그대로 싣는다 (21단계). 실존 여부와는 무관하다 (코어 무 I/O).
+    InvalidPath { message: String },
+    /// SetViewerScroll 의 scroll_top 이 finite·0 이상이 아니다 (InvalidRatio 와
+    /// 같은 loud-fail 방침).
+    InvalidScroll { value: f64 },
 }
 
 impl fmt::Display for CommandError {
@@ -188,6 +230,18 @@ impl fmt::Display for CommandError {
                 write!(
                     f,
                     "invalid split ratio {ratio}: must be finite and in (0, 1)"
+                )
+            }
+            CommandError::KindMismatch { tab } => {
+                write!(f, "tab {} has the wrong kind for this command", tab.0)
+            }
+            CommandError::InvalidPath { message } => {
+                write!(f, "invalid path: {message}")
+            }
+            CommandError::InvalidScroll { value } => {
+                write!(
+                    f,
+                    "invalid scroll offset {value}: must be finite and >= 0"
                 )
             }
         }
@@ -545,24 +599,22 @@ impl Dispatcher {
                 distro,
                 tab,
             } => {
-                // 원자성: 탭 동반 생성은 spawn 을 **모든 상태 변이보다 먼저**
-                // 수행한다 (CreateTab 과 동일한 spawn-first 순서) — 스폰 실패 시
-                // 워크스페이스·pane·next_id·revision 전부 불변이다. 워크스페이스
-                // 가 아직 상태에 없으므로 기본값(root_path·distro)을 직접 넘긴다.
-                let spawned = match tab {
-                    Some(NewTab::Terminal { cwd }) => {
-                        Some(self.spawn_terminal_with(&root_path, &distro, cwd)?)
-                    }
+                // 원자성: 탭 동반 생성은 준비 단계(terminal = spawn, 뷰어 = 경로
+                // 검증)를 **모든 상태 변이보다 먼저** 수행한다 (CreateTab 과 동일
+                // 한 순서) — 실패 시 워크스페이스·pane·next_id·revision 전부
+                // 불변이다. 워크스페이스가 아직 상태에 없으므로 기본값
+                // (root_path·distro)을 직접 넘긴다.
+                let prepared = match tab {
+                    Some(spec) => Some(self.prepare_tab_with(&root_path, &distro, spec)?),
                     None => None,
                 };
                 let workspace = WorkspaceId(self.state.alloc_id());
                 let pane = PaneId(self.state.alloc_id());
-                let tab_id = spawned.as_ref().map(|_| TabId(self.state.alloc_id()));
+                let tab_id = prepared.as_ref().map(|_| TabId(self.state.alloc_id()));
+                let session = prepared.as_ref().and_then(PreparedTab::session);
                 let mut initial = empty_pane(pane);
-                if let (Some(tab_id), Some((session, cwd))) = (tab_id, &spawned) {
-                    initial
-                        .tabs
-                        .push(terminal_tab(tab_id, *session, cwd.clone()));
+                if let (Some(tab_id), Some(prepared)) = (tab_id, prepared) {
+                    initial.tabs.push(prepared.into_tab(tab_id));
                     initial.active_tab = Some(tab_id);
                 }
                 self.state.workspaces.push(Workspace {
@@ -584,7 +636,7 @@ impl Dispatcher {
                     workspace,
                     pane,
                     tab: tab_id,
-                    session: spawned.map(|(session, _)| session),
+                    session,
                 })
             }
 
@@ -638,24 +690,24 @@ impl Dispatcher {
                 tab,
             } => {
                 let wi = self.ws_index_of_pane(pane)?;
-                // 원자성: 탭 동반 분할은 spawn 을 **모든 상태 변이보다 먼저** 수행
-                // 한다 (CreateTab 과 동일한 spawn-first 순서) — 스폰 실패 시
-                // 트리·panes·next_id 가 전부 불변이라 분할만 된 중간 상태가 없다.
-                let spawned = match tab {
-                    Some(NewTab::Terminal { cwd }) => Some(self.spawn_terminal(wi, cwd)?),
+                // 원자성: 탭 동반 분할은 준비 단계(terminal = spawn, 뷰어 = 경로
+                // 검증)를 **모든 상태 변이보다 먼저** 수행한다 (CreateTab 과 동일
+                // 한 순서) — 실패 시 트리·panes·next_id 가 전부 불변이라 분할만
+                // 된 중간 상태가 없다.
+                let prepared = match tab {
+                    Some(spec) => Some(self.prepare_tab(wi, spec)?),
                     None => None,
                 };
                 let new_pane = PaneId(self.state.alloc_id());
                 let split_id = SplitId(self.state.alloc_id());
-                let tab_id = spawned.as_ref().map(|_| TabId(self.state.alloc_id()));
+                let tab_id = prepared.as_ref().map(|_| TabId(self.state.alloc_id()));
+                let session = prepared.as_ref().and_then(PreparedTab::session);
                 let ws = &mut self.state.workspaces[wi];
                 let split_ok = ws.layout.split(pane, direction, new_pane, split_id);
                 debug_assert!(split_ok, "불변식: panes 의 pane 은 layout leaf 로 존재");
                 let mut created = empty_pane(new_pane);
-                if let (Some(tab_id), Some((session, cwd))) = (tab_id, &spawned) {
-                    created
-                        .tabs
-                        .push(terminal_tab(tab_id, *session, cwd.clone()));
+                if let (Some(tab_id), Some(prepared)) = (tab_id, prepared) {
+                    created.tabs.push(prepared.into_tab(tab_id));
                     created.active_tab = Some(tab_id);
                 }
                 ws.panes.insert(new_pane, created);
@@ -664,7 +716,7 @@ impl Dispatcher {
                     pane: new_pane,
                     split: split_id,
                     tab: tab_id,
-                    session: spawned.map(|(session, _)| session),
+                    session,
                 })
             }
 
@@ -701,19 +753,20 @@ impl Dispatcher {
 
             Command::CreateTab { pane, tab } => {
                 let wi = self.ws_index_of_pane(pane)?;
-                let NewTab::Terminal { cwd } = tab;
-                // 원자성: spawn 실패 시 상태(탭·next_id)가 변하지 않도록 spawn 먼저.
-                let (session, cwd) = self.spawn_terminal(wi, cwd)?;
+                // 원자성: 준비 단계(spawn·경로 검증) 실패 시 상태(탭·next_id)가
+                // 변하지 않도록 준비를 먼저 마친다.
+                let prepared = self.prepare_tab(wi, tab)?;
+                let session = prepared.session();
                 let tab_id = TabId(self.state.alloc_id());
                 let pane_ref = self.state.workspaces[wi]
                     .panes
                     .get_mut(&pane)
                     .expect("ws_index_of_pane 이 존재를 보장");
-                pane_ref.tabs.push(terminal_tab(tab_id, session, cwd));
+                pane_ref.tabs.push(prepared.into_tab(tab_id));
                 pane_ref.active_tab = Some(tab_id);
                 Ok(CommandOutput::TabCreated {
                     tab: tab_id,
-                    session: Some(session),
+                    session,
                 })
             }
 
@@ -763,6 +816,95 @@ impl Dispatcher {
                 reset_agent_source(ws, tab);
                 self.kill_if_terminal(&removed);
                 Ok(CommandOutput::Done)
+            }
+
+            Command::NavigateFolder { tab, path } => {
+                // 값 검증을 대상 탐색보다 먼저 (ResizeSplit 과 같은 순서).
+                validate_viewer_path(&path)?;
+                let title = path_title(&path);
+                let (wi, pane, ti) = self.locate_tab(tab)?;
+                let tab_ref = &mut self.state.workspaces[wi]
+                    .panes
+                    .get_mut(&pane)
+                    .expect("locate_tab 이 존재를 보장")
+                    .tabs[ti];
+                let TabKind::FolderBrowser { path: current } = &mut tab_ref.kind else {
+                    return Err(CommandError::KindMismatch { tab });
+                };
+                *current = path;
+                // 제목도 새 경로의 basename 으로 따라간다 (탭 스트립 표시).
+                tab_ref.title = title;
+                Ok(CommandOutput::Done)
+            }
+
+            Command::SetViewerScroll { tab, scroll_top } => {
+                if !(scroll_top.is_finite() && scroll_top >= 0.0) {
+                    return Err(CommandError::InvalidScroll { value: scroll_top });
+                }
+                let (wi, pane, ti) = self.locate_tab(tab)?;
+                let tab_ref = &mut self.state.workspaces[wi]
+                    .panes
+                    .get_mut(&pane)
+                    .expect("locate_tab 이 존재를 보장")
+                    .tabs[ti];
+                // folderBrowser·terminal 은 모델에 스크롤 위치가 없다 — 조용한
+                // no-op 대신 KindMismatch 로 드러낸다.
+                let TabKind::TextViewer {
+                    scroll_top: current,
+                    ..
+                } = &mut tab_ref.kind
+                else {
+                    return Err(CommandError::KindMismatch { tab });
+                };
+                *current = scroll_top;
+                Ok(CommandOutput::Done)
+            }
+        }
+    }
+
+    /// 워크스페이스 기본값(root_path·distro)을 적용한 [`Self::prepare_tab_with`]
+    /// — 이미 상태에 있는 워크스페이스(CreateTab·SplitPane)용.
+    fn prepare_tab(&self, wi: usize, spec: NewTab) -> Result<PreparedTab, CommandError> {
+        let ws = &self.state.workspaces[wi];
+        self.prepare_tab_with(&ws.root_path, &ws.distro, spec)
+    }
+
+    /// 탭 생성의 **앞단** — terminal 은 셸 스폰, 뷰어는 경로 기본값 해석 + 형태
+    /// 검증. 세 생성 지점(CreateTab·SplitPane·CreateWorkspace)이 공유하며,
+    /// 호출자는 **모든 상태 변이 전에** 이걸 마쳐 실패 시 상태 불변을 보장한다
+    /// (뷰어는 스폰이 없어도 InvalidPath 로 실패할 수 있다 — 계획 21단계).
+    fn prepare_tab_with(
+        &self,
+        root_path: &Option<String>,
+        distro: &Option<String>,
+        spec: NewTab,
+    ) -> Result<PreparedTab, CommandError> {
+        match spec {
+            NewTab::Terminal { cwd } => {
+                let (session, cwd) = self.spawn_terminal_with(root_path, distro, cwd)?;
+                Ok(PreparedTab::Terminal { session, cwd })
+            }
+            NewTab::FolderBrowser { path } => {
+                // 이중 기본값: 탭 path → 워크스페이스 root_path → "/".
+                let path = path
+                    .or_else(|| root_path.clone())
+                    .unwrap_or_else(|| "/".to_owned());
+                validate_viewer_path(&path)?;
+                Ok(PreparedTab::Viewer {
+                    title: path_title(&path),
+                    kind: TabKind::FolderBrowser { path },
+                })
+            }
+            NewTab::TextViewer { path } => {
+                validate_viewer_path(&path)?;
+                Ok(PreparedTab::Viewer {
+                    title: path_title(&path),
+                    // 새 탭은 항상 파일 선두에서 시작한다 (복원은 persist 몫).
+                    kind: TabKind::TextViewer {
+                        path,
+                        scroll_top: 0.0,
+                    },
+                })
             }
         }
     }
@@ -861,6 +1003,38 @@ impl Dispatcher {
     }
 }
 
+/// 탭 생성 앞단([`Dispatcher::prepare_tab_with`])의 결과 — terminal 은 스폰된
+/// 세션과 실제 cwd, 뷰어는 검증을 마친 제목·종류. 어느 쪽이든 상태 변이 전에
+/// 만들어지므로 이 값이 손에 들어온 시점에는 "실패할 일이 남아 있지 않다".
+enum PreparedTab {
+    Terminal {
+        session: SessionId,
+        cwd: Option<String>,
+    },
+    Viewer {
+        title: String,
+        kind: TabKind,
+    },
+}
+
+impl PreparedTab {
+    /// 발급된 안정 ID 로 탭 값을 완성한다.
+    fn into_tab(self, id: TabId) -> Tab {
+        match self {
+            PreparedTab::Terminal { session, cwd } => terminal_tab(id, session, cwd),
+            PreparedTab::Viewer { title, kind } => viewer_tab(id, title, kind),
+        }
+    }
+
+    /// 출력(`TabCreated` 등)에 실을 세션 id — 뷰어 탭은 None.
+    fn session(&self) -> Option<SessionId> {
+        match self {
+            PreparedTab::Terminal { session, .. } => Some(*session),
+            PreparedTab::Viewer { .. } => None,
+        }
+    }
+}
+
 fn empty_pane(id: PaneId) -> Pane {
     Pane {
         id,
@@ -883,6 +1057,35 @@ fn terminal_tab(id: TabId, session: SessionId, cwd: Option<String>) -> Tab {
         notification: NotificationState::None,
         last_activity_ms: None,
     }
+}
+
+/// 갓 만들어진 뷰어 탭의 값 — [`terminal_tab`] 의 뷰어 짝 (CreateTab·SplitPane·
+/// CreateWorkspace 공유). 스폰이 없으므로 순수 변이다.
+fn viewer_tab(id: TabId, title: String, kind: TabKind) -> Tab {
+    Tab {
+        id,
+        title,
+        kind,
+        notification: NotificationState::None,
+        last_activity_ms: None,
+    }
+}
+
+/// 뷰어 경로의 형태 검증 — 사유 문자열을 그대로 [`CommandError::InvalidPath`] 에
+/// 싣는다 (생성·NavigateFolder 공유). 실존 여부는 검사하지 않는다 (코어 무 I/O —
+/// 없는 경로는 뷰 로드 실패로 표면화).
+fn validate_viewer_path(path: &str) -> Result<(), CommandError> {
+    crate::wslpath::validate_linux_path(path)
+        .map_err(|message| CommandError::InvalidPath { message })
+}
+
+/// 경로에서 탭 제목으로 쓸 basename 을 뽑는다. 빈 세그먼트(`//`·후행 `/`)는
+/// 건너뛰고, 남는 컴포넌트가 없으면(루트) `"/"` 를 쓴다.
+fn path_title(path: &str) -> String {
+    path.rsplit('/')
+        .find(|component| !component.is_empty())
+        .unwrap_or("/")
+        .to_owned()
 }
 
 /// pane 을 워크스페이스에서 제거한다: panes remove + tree collapse(형제 승격) +
@@ -1285,6 +1488,14 @@ mod tests {
             },
             Command::ActivateTab { tab: TabId(99) },
             Command::CloseTab { tab: TabId(99) },
+            Command::NavigateFolder {
+                tab: TabId(99),
+                path: "/proj".into(),
+            },
+            Command::SetViewerScroll {
+                tab: TabId(99),
+                scroll_top: 0.0,
+            },
         ];
         for cmd in cases {
             let err = d.dispatch(cmd.clone()).unwrap_err();
@@ -1729,6 +1940,431 @@ mod tests {
         create_terminal_tab(&mut d, pane);
         assert_eq!(d.state().revision, 2);
         assert_eq!(d.snapshot().revision, 2);
+    }
+
+    // ---- 뷰어 탭 (21단계 계획 청크 A) ----
+
+    /// root_path 를 지정해 워크스페이스를 만드는 헬퍼 (뷰어 기본값 검증용).
+    fn create_ws_rooted(
+        d: &mut Dispatcher,
+        name: &str,
+        root_path: Option<&str>,
+    ) -> (WorkspaceId, PaneId) {
+        match d
+            .dispatch(Command::CreateWorkspace {
+                name: name.into(),
+                root_path: root_path.map(String::from),
+                distro: None,
+                tab: None,
+            })
+            .unwrap()
+        {
+            CommandOutput::WorkspaceCreated {
+                workspace,
+                pane,
+                tab: None,
+                session: None,
+            } => (workspace, pane),
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    /// 뷰어 탭 생성 헬퍼 — 스폰이 없으므로 출력의 session 은 항상 None 이다.
+    fn create_viewer_tab(d: &mut Dispatcher, pane: PaneId, spec: NewTab) -> TabId {
+        match d.dispatch(Command::CreateTab { pane, tab: spec }).unwrap() {
+            CommandOutput::TabCreated {
+                tab,
+                session: None,
+            } => tab,
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_folder_browser_inherits_root_path_without_spawning() {
+        let (mut d, host) = dispatcher();
+        let (ws, pane) = create_ws_rooted(&mut d, "ws", Some("/proj/app"));
+        let tab = create_viewer_tab(&mut d, pane, NewTab::FolderBrowser { path: None });
+
+        assert!(host.spawns().is_empty(), "뷰어 탭 생성은 스폰이 없다");
+        let t = tab_view(&d, tab);
+        // path 미지정 → 워크스페이스 root_path 상속, 제목은 basename.
+        assert_eq!(
+            t.kind,
+            TabKind::FolderBrowser {
+                path: "/proj/app".into()
+            }
+        );
+        assert_eq!(t.title, "app");
+        assert_eq!(
+            d.state().workspace(ws).unwrap().panes[&pane].active_tab,
+            Some(tab)
+        );
+    }
+
+    #[test]
+    fn folder_browser_falls_back_to_root_when_both_paths_are_none() {
+        // 탭 path 도 워크스페이스 root_path 도 없으면 "/" (계획 21단계 core 계약).
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let tab = create_viewer_tab(&mut d, pane, NewTab::FolderBrowser { path: None });
+        let t = tab_view(&d, tab);
+        assert_eq!(t.kind, TabKind::FolderBrowser { path: "/".into() });
+        assert_eq!(t.title, "/");
+    }
+
+    #[test]
+    fn create_text_viewer_starts_at_offset_zero() {
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws_rooted(&mut d, "ws", Some("/proj"));
+        let tab = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::TextViewer {
+                path: "/proj/notes.txt".into(),
+            },
+        );
+        assert!(host.spawns().is_empty());
+        let t = tab_view(&d, tab);
+        assert_eq!(
+            t.kind,
+            TabKind::TextViewer {
+                path: "/proj/notes.txt".into(),
+                scroll_top: 0.0,
+            }
+        );
+        assert_eq!(t.title, "notes.txt");
+    }
+
+    #[test]
+    fn create_workspace_and_split_pane_accept_viewer_tabs_atomically() {
+        let (mut d, host) = dispatcher();
+        // 워크스페이스 + 뷰어 탭 원자 생성 — session 만 None 이고 tab 은 Some.
+        let out = d
+            .dispatch(Command::CreateWorkspace {
+                name: "ws".into(),
+                root_path: Some("/proj".into()),
+                distro: None,
+                tab: Some(NewTab::FolderBrowser { path: None }),
+            })
+            .unwrap();
+        let CommandOutput::WorkspaceCreated {
+            workspace,
+            pane,
+            tab: Some(tab),
+            session: None,
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+        assert!(workspace.0 < pane.0 && pane.0 < tab.0);
+        let p = &d.state().workspace(workspace).unwrap().panes[&pane];
+        assert_eq!(p.tabs.len(), 1);
+        assert_eq!(p.active_tab, Some(tab));
+        assert_eq!(
+            p.tabs[0].kind,
+            TabKind::FolderBrowser {
+                path: "/proj".into()
+            }
+        );
+
+        // 분할 + 뷰어 탭 원자 생성.
+        let out = d
+            .dispatch(Command::SplitPane {
+                pane,
+                direction: SplitDirection::Vertical,
+                tab: Some(NewTab::TextViewer {
+                    path: "/proj/a.txt".into(),
+                }),
+            })
+            .unwrap();
+        let CommandOutput::PaneCreated {
+            pane: pane2,
+            split,
+            tab: Some(tab2),
+            session: None,
+        } = out
+        else {
+            panic!("unexpected output: {out:?}");
+        };
+        assert!(pane2.0 < split.0 && split.0 < tab2.0);
+        let w = d.state().workspace(workspace).unwrap();
+        assert_eq!(w.active_pane, pane2);
+        assert_eq!(w.panes[&pane2].active_tab, Some(tab2));
+        assert_eq!(tab_view(&d, tab2).title, "a.txt");
+        assert!(host.spawns().is_empty(), "뷰어 탭 생성은 스폰이 없다");
+    }
+
+    #[test]
+    fn navigate_folder_updates_path_and_title() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let tab = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::FolderBrowser {
+                path: Some("/proj".into()),
+            },
+        );
+
+        let out = d
+            .dispatch(Command::NavigateFolder {
+                tab,
+                path: "/proj/src/model".into(),
+            })
+            .unwrap();
+        assert_eq!(out, CommandOutput::Done);
+        let t = tab_view(&d, tab);
+        assert_eq!(
+            t.kind,
+            TabKind::FolderBrowser {
+                path: "/proj/src/model".into()
+            }
+        );
+        assert_eq!(t.title, "model");
+
+        // 루트로 올라가면 제목도 "/" (basename 이 없는 경로).
+        d.dispatch(Command::NavigateFolder {
+            tab,
+            path: "/".into(),
+        })
+        .unwrap();
+        let t = tab_view(&d, tab);
+        assert_eq!(t.kind, TabKind::FolderBrowser { path: "/".into() });
+        assert_eq!(t.title, "/");
+    }
+
+    #[test]
+    fn viewer_commands_reject_wrong_tab_kinds_without_state_change() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (terminal, _s) = create_terminal_tab(&mut d, pane);
+        let folder = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::FolderBrowser {
+                path: Some("/proj".into()),
+            },
+        );
+        let text = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::TextViewer {
+                path: "/proj/a.txt".into(),
+            },
+        );
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        let cases = [
+            // NavigateFolder 는 folderBrowser 만 받는다.
+            (
+                Command::NavigateFolder {
+                    tab: terminal,
+                    path: "/x".into(),
+                },
+                terminal,
+            ),
+            (
+                Command::NavigateFolder {
+                    tab: text,
+                    path: "/x".into(),
+                },
+                text,
+            ),
+            // SetViewerScroll 은 스크롤 위치를 모델에 가진 뷰어만 받는다 —
+            // folderBrowser 는 그 필드가 없어 KindMismatch (기결정).
+            (
+                Command::SetViewerScroll {
+                    tab: folder,
+                    scroll_top: 10.0,
+                },
+                folder,
+            ),
+            (
+                Command::SetViewerScroll {
+                    tab: terminal,
+                    scroll_top: 10.0,
+                },
+                terminal,
+            ),
+        ];
+        for (cmd, target) in cases {
+            let err = d.dispatch(cmd.clone()).unwrap_err();
+            assert_eq!(err, CommandError::KindMismatch { tab: target }, "{cmd:?}");
+            assert_eq!(
+                serde_json::to_value(d.state()).unwrap(),
+                before,
+                "{cmd:?} 가 상태를 바꿈"
+            );
+        }
+    }
+
+    #[test]
+    fn viewer_paths_are_validated_on_create_and_navigate() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let folder = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::FolderBrowser {
+                path: Some("/proj".into()),
+            },
+        );
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        // wslpath 거부 규칙별 대표 1개씩 — 사유는 wslpath.rs 테스트가 잠근다.
+        for path in [
+            "relative/path",
+            "/proj/../etc",
+            r"/proj/a\b",
+            "/proj/a:stream",
+            "/proj/trailing.",
+            "",
+        ] {
+            for cmd in [
+                Command::CreateTab {
+                    pane,
+                    tab: NewTab::TextViewer { path: path.into() },
+                },
+                Command::CreateTab {
+                    pane,
+                    tab: NewTab::FolderBrowser {
+                        path: Some(path.into()),
+                    },
+                },
+                Command::NavigateFolder {
+                    tab: folder,
+                    path: path.into(),
+                },
+            ] {
+                let err = d.dispatch(cmd.clone()).unwrap_err();
+                assert!(
+                    matches!(err, CommandError::InvalidPath { .. }),
+                    "{cmd:?} → {err:?}"
+                );
+                // next_id 까지 불변 (검증이 id 발급보다 먼저).
+                assert_eq!(
+                    serde_json::to_value(d.state()).unwrap(),
+                    before,
+                    "{cmd:?} 가 상태를 바꿈"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_viewer_scroll_records_offset_and_rejects_bad_values() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let tab = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::TextViewer {
+                path: "/proj/a.txt".into(),
+            },
+        );
+
+        let out = d
+            .dispatch(Command::SetViewerScroll {
+                tab,
+                scroll_top: 4096.0,
+            })
+            .unwrap();
+        assert_eq!(out, CommandOutput::Done);
+        assert_eq!(
+            tab_view(&d, tab).kind,
+            TabKind::TextViewer {
+                path: "/proj/a.txt".into(),
+                scroll_top: 4096.0,
+            }
+        );
+
+        // finite·0 이상이 아니면 InvalidScroll, 상태 불변 (0.0 은 유효 경계).
+        let before = serde_json::to_value(d.state()).unwrap();
+        for value in [f64::NAN, -1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = d
+                .dispatch(Command::SetViewerScroll {
+                    tab,
+                    scroll_top: value,
+                })
+                .unwrap_err();
+            assert!(
+                matches!(err, CommandError::InvalidScroll { .. }),
+                "{value} → {err:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(d.state()).unwrap(),
+                before,
+                "{value} 가 상태를 바꿈"
+            );
+        }
+        d.dispatch(Command::SetViewerScroll {
+            tab,
+            scroll_top: 0.0,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn viewer_tabs_survive_persist_round_trip() {
+        // 뷰어 탭은 sanitize 대상이 아니다 — 경로·스크롤이 재시작을 넘어 남아야
+        // 뷰어 재로드(계획 v2 "상태 저장")가 성립한다.
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws_rooted(&mut d, "ws", Some("/proj"));
+        let (terminal, _s) = create_terminal_tab(&mut d, pane);
+        let folder = create_viewer_tab(&mut d, pane, NewTab::FolderBrowser { path: None });
+        let text = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::TextViewer {
+                path: "/proj/notes.txt".into(),
+            },
+        );
+        d.dispatch(Command::SetViewerScroll {
+            tab: text,
+            scroll_top: 4096.0,
+        })
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        crate::persist::save_atomic(&path, d.state()).unwrap();
+        let crate::persist::LoadOutcome::Restored { state, repairs } =
+            crate::persist::load(&path)
+        else {
+            panic!("Restored 여야 함");
+        };
+        assert!(repairs.is_empty(), "정상 상태에 수리 사유: {repairs:?}");
+
+        let kind_of = |state: &AppState, id: TabId| {
+            state
+                .workspaces
+                .iter()
+                .flat_map(|ws| ws.panes.values())
+                .flat_map(|p| p.tabs.iter())
+                .find(|t| t.id == id)
+                .expect("탭이 존재해야 함")
+                .kind
+                .clone()
+        };
+        assert_eq!(
+            kind_of(&state, folder),
+            TabKind::FolderBrowser {
+                path: "/proj".into()
+            }
+        );
+        assert_eq!(
+            kind_of(&state, text),
+            TabKind::TextViewer {
+                path: "/proj/notes.txt".into(),
+                scroll_top: 4096.0,
+            },
+            "sanitize 가 뷰어 스크롤을 건드리면 안 된다"
+        );
+
+        // 재스폰 대상은 terminal 탭뿐 — 뷰어 탭은 열거에 끼지 않는다.
+        let adopted = Dispatcher::adopt(state, Box::new(FakeSessionHost::default()));
+        assert_eq!(adopted.running_terminal_tabs(), vec![terminal]);
     }
 
     // ---- OSC 델타 반영 (18단계 계획 core 계약) ----
