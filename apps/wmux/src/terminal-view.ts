@@ -62,6 +62,10 @@ export class TerminalView {
   constructor(
     parent: HTMLElement,
     private readonly session: SessionId,
+    /** 전환 계측 훅 (14단계) — replay write 완료 + rAF 1회 뒤 replay 바이트 수로
+     *  1회 호출한다 (페인트 근사 완료점). 계측 중이 아닌 attach 에는 undefined —
+     *  그 경우 콜백·rAF 를 아예 걸지 않아 오버헤드가 없다. */
+    private readonly onTraceReplayDone?: (bytes: number) => void,
   ) {
     this.root = document.createElement("div");
     this.root.className = "term-host";
@@ -131,7 +135,20 @@ export class TerminalView {
     const body = await attachTerminal(this.session, channel);
     if (this.disposed) return; // attach 중 뷰가 해제됐으면 여기서 끝 (세션은 유지)
     const { offset: endOffset, bytes: replay } = parseFrame(body);
-    if (replay.byteLength > 0) this.term.write(replay);
+    const traceDone = this.onTraceReplayDone;
+    if (replay.byteLength > 0) {
+      if (traceDone === undefined) {
+        this.term.write(replay);
+      } else {
+        // 전환 계측 완료점 — replay write 완료 콜백 + rAF 1회 보정 (계획 A-2:
+        // 실제 페인트가 아닌 근사, report 의 approximatePaint 가 명시).
+        const bytes = replay.byteLength;
+        this.term.write(replay, () => requestAnimationFrame(() => traceDone(bytes)));
+      }
+    } else if (traceDone !== undefined) {
+      // replay 가 비어도 완료점은 알린다 (rAF 보정만) — trace 가 이 탭을 기다린다.
+      requestAnimationFrame(() => traceDone(0));
+    }
     // 3) 게이트 개방 — 큐잉분 판정·배출 (폐기분 즉시 ack 포함).
     this.applyGateResult(this.gate.onSnapshot(endOffset));
 

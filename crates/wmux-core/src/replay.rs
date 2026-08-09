@@ -2,16 +2,35 @@
 //!
 //! 프론트엔드 재접속·재렌더 시 최근 화면 내용을 다시 흘려보내기 위한 버퍼.
 //! chunk 단위 VecDeque 와 총 바이트 계정으로 구현하며, 상한 초과 시 오래된
-//! chunk 를 통째로 evict 한다. escape 시퀀스가 chunk 경계에서 잘릴 수 있는
-//! 점은 Spike 한계로 허용한다. 계약: `docs/plans/spike-plan.md` 4.2장.
+//! chunk 를 통째로 evict 한다.
+//!
+//! # evicted head 트림 (14단계)
+//!
+//! evict 는 chunk 경계에서 일어나고 chunk 는 PTY read 단위라 아무 데서나 잘린다
+//! — 스냅샷 선두가 행 중간·escape 시퀀스 중간에서 시작할 수 있다. Spike 에서
+//! "escape-cut 허용"이던 이 한계는 14단계에서 **완화됐다**: evict 가 한 번이라도
+//! 일어난 버퍼의 [`ReplayBuffer::snapshot`] 은 앞쪽 `TRIM_SCAN_BYTES` 내 첫
+//! `\n` 뒤부터 반환해 행 경계 시작을 보장한다 (휴리스틱 근거는 해당 rustdoc).
+//! 트림이 못 미치는 무개행 출력(TUI 전체 화면 프레임)의 재그리기는 attach 시
+//! SIGWINCH nudge(프론트 terminal-view) 수위가 담당한다. 계약:
+//! `docs/plans/spike-plan.md` 4.2장 + `docs/plans/mvp-stage14-16-plan.md` 1장.
 
 use std::collections::VecDeque;
+
+/// evicted 스냅샷의 head 트림에서 행 경계(`\n`)를 찾는 앞쪽 윈도우 크기.
+/// "한 행"의 길이 상한으로 삼는 값 — 이 안에 `\n` 이 없으면 행 구조가 아닌
+/// 출력로 보고 트림하지 않는다 ([`ReplayBuffer::snapshot`] 참조).
+const TRIM_SCAN_BYTES: usize = 4096;
 
 pub struct ReplayBuffer {
     chunks: VecDeque<Vec<u8>>,
     /// 보관 중인 총 바이트 수 (chunks 내 길이 합계와 항상 일치).
     total: usize,
     cap: usize,
+    /// evict 가 한 번이라도 일어났다 — `snapshot()` head 트림의 발동 조건.
+    /// 리셋되지 않는다: evict 이후의 버퍼 선두는 언제나 chunk 경계 절단으로
+    /// 시작했을 수 있기 때문이다.
+    evicted: bool,
 }
 
 impl ReplayBuffer {
@@ -21,6 +40,7 @@ impl ReplayBuffer {
             chunks: VecDeque::new(),
             total: 0,
             cap: cap_bytes,
+            evicted: false,
         }
     }
 
@@ -35,22 +55,51 @@ impl ReplayBuffer {
         self.chunks.push_back(bytes.to_vec());
         while self.total > self.cap {
             match self.chunks.pop_front() {
-                Some(evicted) => self.total -= evicted.len(),
+                Some(dropped) => {
+                    self.total -= dropped.len();
+                    self.evicted = true;
+                }
                 None => break,
             }
         }
     }
 
     /// 보관 중인 데이터를 오래된 것부터 순서대로 이어붙여 반환한다.
+    ///
+    /// # evicted head 트림
+    ///
+    /// evict 가 한 번이라도 일어났으면 선두가 행·escape 시퀀스 중간일 수 있으므로
+    /// 앞쪽 `TRIM_SCAN_BYTES`(4096B) 내 **첫 `\n` 뒤**부터 반환한다. 근거:
+    ///
+    /// - `\n` 을 행 경계로 보는 것은 셸 스크롤 출력 대상 휴리스틱이다 — OSC/DCS
+    ///   페이로드 안의 `\n` 을 오인할 이론적 여지는 있으나 이 레포 사용례
+    ///   (OSC 0/7/9/777 제목·알림 — payload 에 개행 없음)에서는 실질 무해하다.
+    /// - 4096B 는 "한 행"의 길이 상한이다. 이 안에 `\n` 이 없으면 행 구조가 아닌
+    ///   출력(TUI 전체 화면 프레임 등)로 보고 트림하지 않는다 — 그 재그리기는
+    ///   attach 시 SIGWINCH nudge 수위로 위임한다 (모듈 rustdoc).
+    /// - 트림 결과가 빈 스냅샷이 되는 경우(첫 `\n` 이 버퍼 마지막 바이트)에도
+    ///   트림하지 않는다 — 내용이 있는데 빈 화면을 돌려주지 않는다.
+    ///
+    /// 트림은 반환 스냅샷에만 적용된다 — [`len`](Self::len) 은 보관량 그대로다.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.total);
         for chunk in &self.chunks {
             out.extend_from_slice(chunk);
         }
+        if self.evicted {
+            let window = &out[..out.len().min(TRIM_SCAN_BYTES)];
+            if let Some(pos) = window.iter().position(|&b| b == b'\n') {
+                // pos + 1 == out.len() 이면 트림 결과가 빈 스냅샷 — 무트림.
+                if pos + 1 < out.len() {
+                    out.drain(..=pos);
+                }
+            }
+        }
         out
     }
 
-    /// 보관 중인 총 바이트 수.
+    /// 보관 중인 총 바이트 수. evicted head 트림과 무관한 **보관량**이다 —
+    /// `snapshot().len()` 과 다를 수 있다 (트림은 snapshot 반환값에만 적용).
     pub fn len(&self) -> usize {
         self.total
     }
@@ -143,5 +192,70 @@ mod tests {
         }
         assert_eq!(buf.len(), 6);
         assert_eq!(buf.snapshot(), b"abcabc");
+    }
+
+    // --- evicted head 트림 (14단계 계획 1장 A-1) ---
+
+    #[test]
+    fn trims_snapshot_head_to_line_boundary_after_evict() {
+        let mut buf = ReplayBuffer::new(16);
+        buf.push(b"aaaa"); // 4
+        buf.push(b"bb\ncc"); // 9
+        buf.push(b"ddddddddd"); // 18 → "aaaa" evict → 14
+                                // evict 발생 → 첫 `\n`(index 2) 뒤부터 반환. len() 은 보관량 유지 —
+                                // 스냅샷 길이와 달라진다 (트림 자체를 잠그는 assert).
+        assert_eq!(buf.snapshot(), b"ccddddddddd");
+        assert_eq!(buf.len(), 14);
+    }
+
+    #[test]
+    fn does_not_trim_when_window_has_no_newline() {
+        let mut buf = ReplayBuffer::new(4);
+        buf.push(b"aaaa");
+        buf.push(b"bbb"); // 7 → "aaaa" evict → 3
+                          // evict 는 됐지만 `\n` 이 없다 — 무개행 출력은 트림하지 않는다.
+        assert_eq!(buf.snapshot(), b"bbb");
+        assert_eq!(buf.len(), 3);
+    }
+
+    #[test]
+    fn does_not_trim_before_any_evict() {
+        let mut buf = ReplayBuffer::new(100);
+        buf.push(b"aa\nbb");
+        // evict 전에는 선두가 스트림 시작 그대로다 — `\n` 이 있어도 무트림.
+        assert_eq!(buf.snapshot(), b"aa\nbb");
+    }
+
+    #[test]
+    fn trims_past_crlf_leaving_no_dangling_cr() {
+        let mut buf = ReplayBuffer::new(12);
+        buf.push(b"xx"); // 2
+        buf.push(b"ab\r\ncd"); // 8
+        buf.push(b"efgh"); // 12 (== cap, evict 없음)
+        buf.push(b"ij"); // 14 → "xx" evict → 12
+                         // `\r\n` 도 "첫 `\n` 뒤" 규칙 하나로 처리된다 — `\r` 이 남지 않는다.
+        assert_eq!(buf.snapshot(), b"cdefghij");
+    }
+
+    #[test]
+    fn does_not_trim_to_empty_when_newline_is_last_byte() {
+        let mut buf = ReplayBuffer::new(4);
+        buf.push(b"abc");
+        buf.push(b"d\n"); // 5 → "abc" evict → 2
+                          // 유일한 `\n` 이 마지막 바이트 — 트림하면 빈 스냅샷이 되므로 무트림.
+        assert_eq!(buf.snapshot(), b"d\n");
+    }
+
+    #[test]
+    fn ignores_newline_beyond_scan_window() {
+        let mut buf = ReplayBuffer::new(2 * TRIM_SCAN_BYTES);
+        buf.push(&[b'x'; TRIM_SCAN_BYTES]);
+        buf.push(&[b'y'; TRIM_SCAN_BYTES]); // == cap, evict 없음
+        buf.push(b"zz\nw"); // 초과 → 첫 chunk evict → 4100
+                            // 첫 `\n` 위치(4098)가 윈도우(4096) 밖 — 행 길이 상한 초과로 보고 무트림.
+        let snap = buf.snapshot();
+        assert_eq!(snap.len(), TRIM_SCAN_BYTES + 4);
+        assert_eq!(&snap[..TRIM_SCAN_BYTES], &[b'y'; TRIM_SCAN_BYTES][..]);
+        assert_eq!(&snap[TRIM_SCAN_BYTES..], b"zz\nw");
     }
 }

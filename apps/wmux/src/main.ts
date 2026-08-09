@@ -10,13 +10,21 @@ import { dispatch, getState } from "./backend";
 import { formatCommandError } from "./command-error";
 import { Sidebar } from "./sidebar";
 import { Store } from "./store";
+import { SwitchTracer } from "./switch-trace";
+import type { SwitchReport } from "./switch-trace";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { Command, CommandOutput, StateSnapshot } from "./types";
 
 declare global {
   interface Window {
     /** dev 조작 표면 — 실 UI 미구현 경로(탭 전환·닫기 등)를 콘솔에서 호출한다. */
-    __wmux: { dispatch: typeof dispatch; getState: typeof getState; reload: () => void };
+    __wmux: {
+      dispatch: typeof dispatch;
+      getState: typeof getState;
+      reload: () => void;
+      /** 마지막 워크스페이스 전환 계측 report (14단계) — 정착 전에는 null. */
+      lastSwitch: SwitchReport | null;
+    };
   }
 }
 
@@ -62,7 +70,17 @@ class App {
   private readonly statusEl = requireElement("status-line");
   private readonly viewEl = requireElement("view");
   private readonly store = new Store();
-  private readonly wsView = new WorkspaceView(this.viewEl, (cmd) => this.dispatchUI(cmd));
+  /** 전환 지연 tracer (14단계) — 정착 시 report 를 콘솔·dev 훅에 노출한다.
+   *  wsView 필드 초기화가 참조하므로 선언 순서상 wsView 보다 앞이어야 한다. */
+  private readonly tracer = new SwitchTracer((report) => {
+    console.debug("[wmux] switch", report);
+    window.__wmux.lastSwitch = report;
+  });
+  private readonly wsView = new WorkspaceView(
+    this.viewEl,
+    (cmd) => this.dispatchUI(cmd),
+    this.tracer,
+  );
   private readonly sidebar = new Sidebar(requireElement("sidebar"), (cmd) => this.dispatchUI(cmd));
   private errorText: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -70,7 +88,7 @@ class App {
   async init(): Promise<void> {
     // dev 훅은 부트스트랩 실패와 무관하게 먼저 노출한다 — 실패 시 콘솔에서
     // getState 로 상태를 직접 확인할 수 있어야 한다.
-    window.__wmux = { dispatch, getState, reload: () => location.reload() };
+    window.__wmux = { dispatch, getState, reload: () => location.reload(), lastSwitch: null };
     installReloadKey();
     this.store.subscribe((snapshot) => this.render(snapshot));
     await this.store.init();
@@ -82,12 +100,18 @@ class App {
    *  에러는 이미 화면에 노출됐으므로 호출측(splitter 복원 등)은 null 분기만
    *  하면 된다. */
   private async dispatchUI(cmd: Command): Promise<CommandOutput | null> {
+    // 전환 계측 t0 = dispatch 시각 (계획 A-2). begin 은 await **앞**이어야 한다 —
+    // state-changed 이벤트가 invoke 응답보다 먼저 처리되는 순서(workspace-view
+    // 주석의 기지 race)에서 전환 스냅샷 렌더의 markSnapshot 을 놓치지 않기
+    // 위해서다. 실패하면 catch 에서 폐기한다.
+    if (cmd.type === "switchWorkspace") this.tracer.begin(cmd.workspace, performance.now());
     try {
       const out = await dispatch(cmd);
       this.clearError();
       this.compensateFocus(cmd, out);
       return out;
     } catch (err) {
+      if (cmd.type === "switchWorkspace") this.tracer.discard(cmd.workspace);
       console.error("dispatch failed", cmd, err);
       this.showError(formatCommandError(err));
       return null;
@@ -157,9 +181,15 @@ class App {
   }
 
   private render(snapshot: StateSnapshot): void {
+    // 전환 스냅샷 도착 시각 — wsView.render(attach 시작 기록)보다 먼저 찍는다.
+    // 이 콜백은 store 구독이라 offer 채택 직후 동기 호출된다 (스냅샷 시각과 동일).
+    this.tracer.markSnapshot(snapshot.state.activeWorkspace, performance.now());
     this.renderStatusLine();
     this.sidebar.render(snapshot);
     this.wsView.render(snapshot);
+    // 렌더 말미 봉인 — 이 렌더에서 attach 를 시작한 탭이 없으면(터미널 0개·전부
+    // keep-alive 재사용) 여기서 즉시 정착한다 (계획 A-2).
+    this.tracer.settle();
   }
 
   private renderStatusLine(): void {

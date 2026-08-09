@@ -29,6 +29,7 @@ import type { ViewRegistry } from "./pane-view";
 import { Splitter } from "./splitter";
 import type { DragGuard } from "./splitter";
 import { flexPair, structureKey } from "./split-layout";
+import type { SwitchTracer } from "./switch-trace";
 import { TerminalView } from "./terminal-view";
 import { planViewSync } from "./view-reconcile";
 import type { VisibleView } from "./view-reconcile";
@@ -115,6 +116,9 @@ export class WorkspaceView {
   constructor(
     private readonly rootEl: HTMLElement,
     private readonly dispatch: DispatchFn,
+    /** 전환 지연 tracer (14단계) — ensureView 의 새 attach 를 계측 대상으로
+     *  등록한다. trace 미진행 시 markAttachStart 가 즉시 false 라 오버헤드 없음. */
+    private readonly tracer: SwitchTracer,
   ) {}
 
   /** 스냅샷 반영 진입점 — store 구독에서 revision 순으로 호출된다. */
@@ -232,7 +236,15 @@ export class WorkspaceView {
   ): TerminalView {
     let view = this.views.get(tab);
     if (view !== undefined) return view;
-    const created = new TerminalView(parent, session);
+    // 전환 계측 (14단계): 진행 중 trace 가 이 탭의 새 attach 를 수락한 경우에만
+    // replay 완료 훅을 단다 — keep-alive 재사용(위 early return)은 replay 왕복이
+    // 없어 계측 대상이 아니다. attach 가 실패하면 trace 는 완주하지 못하고 다음
+    // begin 이 폐기한다 (실패 자체는 아래 catch 가 별도로 노출한다).
+    let onTraceReplayDone: ((bytes: number) => void) | undefined;
+    if (this.tracer.markAttachStart(tab, performance.now())) {
+      onTraceReplayDone = (bytes) => this.tracer.markReplayDone(tab, bytes, performance.now());
+    }
+    const created = new TerminalView(parent, session, onTraceReplayDone);
     this.views.set(tab, created);
     created.attach().catch((err) => {
       console.error("attach_terminal failed", err);
