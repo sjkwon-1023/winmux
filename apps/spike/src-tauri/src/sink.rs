@@ -49,6 +49,15 @@ impl OscEventPayload {
                 title: title.clone(),
                 body: body.clone(),
             },
+            // pane 간 전송(winmux-send)은 MVP 앱의 기능이고 이 계측 하네스는
+            // 전달을 구현하지 않는다 (frozen — ADR-0001 재현 rig). 관측만 되게
+            // 대상만 실어 보낸다: base64 payload 는 프론트 표시에 쓸모가 없다.
+            OscEvent::Osc777Send { target, .. } => Self {
+                id,
+                kind: "777-send",
+                title: target.clone(),
+                body: String::new(),
+            },
         }
     }
 }

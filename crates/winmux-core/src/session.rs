@@ -516,6 +516,9 @@ fn summarize_osc(event: &OscEvent) -> String {
         OscEvent::Osc7Cwd(uri) => format!("7:{uri}"),
         OscEvent::Osc9Notify(message) => format!("9:{message}"),
         OscEvent::Osc777Notify { title, .. } => format!("777:{title}"),
+        // 전송 payload(base64)는 요약에 싣지 않는다 — 대상만 있으면 충분하고,
+        // stats 문자열에 사용자 텍스트를 흘릴 이유가 없다.
+        OscEvent::Osc777Send { target, .. } => format!("777-send:{target}"),
     }
 }
 

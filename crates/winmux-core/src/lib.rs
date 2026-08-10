@@ -12,5 +12,6 @@ pub mod osc;
 pub mod persist;
 pub mod replay;
 pub mod reset;
+pub mod send;
 pub mod session;
 pub mod wslpath;

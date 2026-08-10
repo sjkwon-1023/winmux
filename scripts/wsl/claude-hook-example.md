@@ -15,6 +15,35 @@ Claude Code hook (UserPromptSubmit / Notification / Stop)
 v1 uses the PTY output itself (OSC sequences) as the delivery path, with no IPC server,
 named pipe, or Windows helper CLI.
 
+## Automatic provisioning
+
+**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v2`); this
+document remains the contract and the manual path.**
+
+On launch the app streams a setup script into `wsl.exe [-d <distro>] -- bash -s` for every
+distro it knows about (each workspace's, plus the WSL default) — stdin, so no Windows-side
+guess at the WSL home path and no dependency on a distro's `interop`/`automount` settings.
+Once per distro it:
+
+- installs the script below at `~/.winmux/bin/winmux-notify.sh` (executable),
+- installs the `winmux-send` skill at `~/.claude/skills/winmux-send/SKILL.md` (the agent
+  send channel below; source: `scripts/wsl/skills/winmux-send/SKILL.md`),
+- merges the three hooks into `~/.claude/settings.json`, keeping every existing value and
+  **skipping any event that already runs a `winmux-notify.sh`** — a hand-wired setup is
+  never duplicated or overwritten,
+- adds a `notify` key to `~/.codex/config.toml` **only if** that file exists and has no
+  `notify` of its own (Codex runs it once per completed turn, which maps to `winmux:idle`);
+  a missing file means Codex is not installed there and nothing is created,
+- records what it did in `~/.winmux/setup.log`, then writes the marker.
+
+Any failure leaves the marker unwritten, so the next launch retries. A distro without
+`python3` gets the notify script but no hook merge (the merge has to preserve an existing
+`settings.json`, which rules out text munging) — install `python3` or wire it by hand.
+
+The installer lives in `apps/winmux/src-tauri/src/provision.rs`, and the copies it embeds
+are **byte-identical** to their sources — the "Example hook script" below and
+`scripts/wsl/skills/winmux-send/SKILL.md`: change both halves together.
+
 ## OSC meaning contract
 
 winmux interprets four kinds of sequences.
@@ -24,6 +53,7 @@ winmux interprets four kinds of sequences.
 | `OSC 777;notify;winmux:running;<body>` | Agent work started | `running` | no |
 | `OSC 777;notify;winmux:needsInput;<body>` | Waiting for user input | `needsInput` | yes |
 | `OSC 777;notify;winmux:idle;<body>` | Work finished | `idle` | yes |
+| `OSC 777;winmux-send;<target>;<base64>` | Text delivered to another pane's stdin (next section) | unchanged | no |
 | Any other `OSC 777` / every `OSC 9` | Status-neutral notification | **unchanged** | yes |
 | `OSC 0` (and the alias `OSC 2`) | Tab title | unchanged | no |
 | `OSC 7` `file://host/path` | Tab cwd (respawn location on restart) | unchanged | no |
@@ -49,6 +79,56 @@ Detailed rules:
   mis-splits the fields, so the emitting side substitutes it.
 - A restart resets all notifications and statuses (a dead session's needsInput does not
   survive a restart — 계획 v2 section 11).
+- `winmux-send` is the one `OSC 777` that is **not** a notification: it changes no state at
+  all, raises no dot, and is not coalesced into the 100ms flush window. It is an action, and
+  it has its own section below.
+
+## Agent send channel — `OSC 777;winmux-send`
+
+The agent-facing way to put text into **another pane's terminal**. This is the designed
+successor to the retired manual send mode ([ADR-0005](../../docs/adr/0005-inter-pane-text-passing.md)):
+it is addressed by tab title, it works while the target sits in a background workspace, and
+it never goes through the frontend — the Rust side writes the bytes to the target session's
+stdin directly.
+
+The skill that teaches an agent to use it is `scripts/wsl/skills/winmux-send/SKILL.md`
+(auto-provisioned to `~/.claude/skills/winmux-send/SKILL.md`).
+
+```
+ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
+```
+
+| Field | Contract |
+|---|---|
+| `winmux-send` | Literal kind marker. Everything else after `777;` keeps its old meaning. |
+| `<target>` | Matched **case-insensitively as a substring** of a tab's title (the title the target set with `OSC 0`), across **all** workspaces. |
+| `<base64>` | Standard base64 (`A-Za-z0-9+/`, optional `=` padding) of the raw bytes. No URL-safe alphabet, no embedded whitespace or newline. |
+
+| Situation | Result |
+|---|---|
+| Exactly one running terminal tab matches | Its stdin receives the decoded bytes verbatim |
+| No match | Nothing is sent |
+| Two or more matches | Nothing is sent — the first match is **never** picked |
+| The sender's own tab matches | It is excluded before counting |
+| Decoded size > 32 KiB | Rejected |
+| Malformed base64 / missing text field | Rejected |
+
+- **Nothing is written back to the sender**, on success or failure — a diagnostic in someone
+  else's terminal (and in its replay buffer) is worse pollution than a missed send. Failures
+  go to the app's stderr only, so sending is silent fire-and-forget.
+- The bytes reach the target exactly as sent: no bracketed paste, no quoting, no trailing
+  newline added. **Include the newline** if the target shell should run the line.
+- The effective size limit is far below 32 KiB: the OSC scanner discards any payload over
+  64 KiB before parsing — sized so the full 32 KiB text contract survives base64
+  expansion. Pass a path, not
+  a file.
+- No state changes, so no snapshot is published and nothing is persisted.
+
+**Security.** Any terminal program on the machine that can write to a pane's PTY can inject
+input into another pane this way. That is intended — winmux assumes your own machine and
+cooperating agents — and this channel is a convenience, **not** a privilege boundary. The
+size cap, the unique-match requirement and the self-exclusion are misfire guards, not
+security controls.
 
 ## tty resolution discipline — direct `/dev/tty` → ancestor pts fallback
 
@@ -86,7 +166,10 @@ its stdout *is* the PTY, so neither a redirect nor a fallback is needed.)
 
 ## Example hook script
 
-`~/.claude/hooks/winmux-notify.sh` (must be made executable: `chmod +x`):
+`~/.claude/hooks/winmux-notify.sh` (must be made executable: `chmod +x`) — auto-provisioning
+installs this same text at `~/.winmux/bin/winmux-notify.sh` instead, so the block below is
+the canonical source for the copy embedded in `apps/winmux/src-tauri/src/provision.rs`
+(**keep the two byte-identical**):
 
 ```bash
 #!/usr/bin/env bash

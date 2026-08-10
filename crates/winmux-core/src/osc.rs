@@ -17,10 +17,32 @@ pub enum OscEvent {
     Osc9Notify(String),
     /// OSC 777 — `notify;title;body` 형식 알림 (urxvt 계열).
     Osc777Notify { title: String, body: String },
+    /// OSC 777 — `winmux-send;<target>;<base64>` 형식의 **pane 간 텍스트 전송**
+    /// 요청 (에이전트 채널 — `scripts/wsl/skills/winmux-send/SKILL.md`).
+    ///
+    /// 알림과 달리 상태 델타가 아니라 **액션**이다: 글루가 코얼레싱 배치에 넣지
+    /// 않고 즉시 대상 세션의 stdin 에 쓴다. 여기서는 필드를 나누기만 하고,
+    /// base64 디코드·상한 검사는 [`crate::send`] 가, 대상 해석은
+    /// [`crate::command::Dispatcher::resolve_send_target`] 가 맡는다.
+    ///
+    /// 세 번째 필드가 아예 없는 payload(`777;winmux-send;build`)는 형식 불일치라
+    /// 이벤트가 되지 않는다 — 빈 전송을 조용히 성공시키지 않는다.
+    ///
+    /// # 보안
+    ///
+    /// 같은 머신에서 이 PTY 로 바이트를 흘릴 수 있는 **어떤 터미널 프로그램이든**
+    /// 이 시퀀스로 다른 pane 에 입력을 넣을 수 있다. 본인 머신·협력 에이전트를
+    /// 전제한 의도된 기능이며, 오발사 가드는 상한(32KiB)·유일 매치·자기 제외
+    /// 셋뿐이다 — 권한 경계가 아니다.
+    Osc777Send { target: String, text_b64: String },
 }
 
 /// payload 상한 (bytes). 초과하는 시퀀스는 통째로 폐기한다 — 악성/폭주 입력 방어.
-const MAX_PAYLOAD_BYTES: usize = 4096;
+/// 64KiB 인 이유: `winmux-send` 의 텍스트 계약이 32KiB(디코드 후)이고 base64
+/// 팽창(4/3) + 헤더를 더하면 payload 가 ~44KiB 까지 자란다 — 4096 이면 문서화된
+/// 상한이 실효 ~3KB 로 무음 축소된다 (리뷰 finding). 버퍼는 세션당 진행 중
+/// 시퀀스 1개뿐이라 메모리 상한은 세션 수 × 64KiB 로 유계다.
+const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
@@ -176,14 +198,25 @@ fn parse_payload(payload: &[u8]) -> Option<OscEvent> {
         "9" => Some(OscEvent::Osc9Notify(rest.to_string())),
         "777" => {
             // urxvt 계열: `777;notify;title;body`. body 안의 `;` 는 body 에 포함.
+            // `winmux-send` 는 winmux 자체 확장(pane 간 전송)이고, 그 외 kind 는
+            // 감지 대상이 아니다 — 기존 `notify` 계약은 그대로다.
             let mut parts = rest.splitn(3, ';');
-            let kind = parts.next().unwrap_or("");
-            if kind != "notify" {
-                return None;
+            match parts.next().unwrap_or("") {
+                "notify" => {
+                    let title = parts.next().unwrap_or("").to_string();
+                    let body = parts.next().unwrap_or("").to_string();
+                    Some(OscEvent::Osc777Notify { title, body })
+                }
+                "winmux-send" => {
+                    // 두 필드가 모두 있어야 한다 (`?`) — 텍스트 필드가 없는 요청은
+                    // 형식 불일치로 떨어뜨린다. base64 표준 알파벳에는 `;` 가 없어
+                    // 세 번째 필드가 그대로 payload 다.
+                    let target = parts.next()?.to_string();
+                    let text_b64 = parts.next()?.to_string();
+                    Some(OscEvent::Osc777Send { target, text_b64 })
+                }
+                _ => None,
             }
-            let title = parts.next().unwrap_or("").to_string();
-            let body = parts.next().unwrap_or("").to_string();
-            Some(OscEvent::Osc777Notify { title, body })
         }
         _ => None,
     }
@@ -304,6 +337,66 @@ mod tests {
     }
 
     #[test]
+    fn osc777_send_parsed() {
+        assert_eq!(
+            scan(b"\x1b]777;winmux-send;build;Y2FyZ28gdGVzdAo=\x07"),
+            vec![OscEvent::Osc777Send {
+                target: "build".into(),
+                text_b64: "Y2FyZ28gdGVzdAo=".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn osc777_send_st_terminated_and_split() {
+        // ST 종결 + 청크 분할에서도 같은 계약 (알림과 같은 스캐너 경로).
+        let mut s = OscScanner::new();
+        assert_eq!(s.feed(b"\x1b]777;winmux-se"), vec![]);
+        assert_eq!(
+            s.feed(b"nd;my Tab;aGk=\x1b\\"),
+            vec![OscEvent::Osc777Send {
+                target: "my Tab".into(),
+                text_b64: "aGk=".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn osc777_send_without_text_field_ignored() {
+        // 대상만 있고 텍스트 필드가 없으면 이벤트가 되지 않는다 (빈 전송 금지).
+        assert_eq!(scan(b"\x1b]777;winmux-send;build\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]777;winmux-send\x07"), vec![]);
+    }
+
+    #[test]
+    fn osc777_send_keeps_trailing_semicolons_in_text_field() {
+        // 세 번째 필드는 끝까지 텍스트다 — base64 에 `;` 는 없으므로 이 경우는
+        // 디코드 단계에서 거부된다(파서는 자르지 않는다).
+        assert_eq!(
+            scan(b"\x1b]777;winmux-send;t;aGk=;x\x07"),
+            vec![OscEvent::Osc777Send {
+                target: "t".into(),
+                text_b64: "aGk=;x".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn osc777_notify_contract_unchanged_by_send_kind() {
+        // winmux-send 추가가 기존 notify 계약을 건드리지 않는지 (회귀 잠금).
+        assert_eq!(
+            scan(b"\x1b]777;notify;winmux:idle;done\x07"),
+            vec![OscEvent::Osc777Notify {
+                title: "winmux:idle".into(),
+                body: "done".into()
+            }]
+        );
+        // 비슷하지만 다른 kind 는 여전히 무시된다.
+        assert_eq!(scan(b"\x1b]777;winmux-sendx;t;aGk=\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]777;send;t;aGk=\x07"), vec![]);
+    }
+
+    #[test]
     fn split_across_two_feeds() {
         let mut s = OscScanner::new();
         assert_eq!(s.feed(b"\x1b]9;he"), vec![]);
@@ -346,7 +439,7 @@ mod tests {
     #[test]
     fn oversized_payload_discarded() {
         let mut input = Vec::from(&b"\x1b]9;"[..]);
-        input.extend(std::iter::repeat_n(b'a', 5000));
+        input.extend(std::iter::repeat_n(b'a', 64 * 1024 + 1));
         input.push(0x07);
         let mut s = OscScanner::new();
         assert_eq!(s.feed(&input), vec![]);

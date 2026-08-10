@@ -16,6 +16,7 @@
 
 mod commands;
 mod host;
+mod provision;
 mod reset_supervisor;
 mod router;
 mod sink;
@@ -161,6 +162,22 @@ fn main() {
             // 저장) — 이 시점 상태가 다음 크래시 복원의 기준선이 된다. Fresh
             // 부팅의 초기 워크스페이스도 이 한 번으로 저장된다.
             saver.schedule(dispatcher.lock().unwrap().state().clone());
+
+            // 에이전트 알림 훅 프로비저닝 (fire-and-forget) — 부팅 경로를 붙잡지
+            // 않도록 setup 의 맨 끝에서, 상태에 있는 distro 들 + 기본 distro 를
+            // 대상으로 건다. Dispatcher lock 은 이 한 문장(목록 복사) 동안만 잡힌다.
+            let distros: Vec<String> = dispatcher
+                .lock()
+                .unwrap()
+                .state()
+                .workspaces
+                .iter()
+                .filter_map(|workspace| workspace.distro.clone())
+                .collect();
+            provision::ensure_provisioned(&handle, None);
+            for distro in &distros {
+                provision::ensure_provisioned(&handle, Some(distro));
+            }
             Ok(())
         })
         // 창 이벤트 두 갈래 — 포커스 전이는 리셋 정책 신호, 크기 전이는 프론트

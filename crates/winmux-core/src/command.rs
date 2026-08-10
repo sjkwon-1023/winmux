@@ -26,6 +26,7 @@ use crate::model::{
     Tab, TabId, TabKind, TerminalStatus, Workspace, WorkspaceId,
 };
 use crate::notify::{OscBatch, OscDelta};
+use crate::send::SendTargetError;
 use crate::session::SessionId;
 
 /// 직렬화 가능한 command bus 의 명령 집합.
@@ -562,6 +563,57 @@ impl Dispatcher {
             }
         }
         tabs
+    }
+
+    /// pane 간 전송의 **대상 해석** — 순수 조회다 (상태·revision 불변).
+    ///
+    /// 규칙 (에이전트 채널 계약 — `scripts/wsl/skills/winmux-send/SKILL.md`):
+    ///
+    /// - 후보는 **전 워크스페이스**의 running 터미널 탭이다. 백그라운드 워크스페이스도
+    ///   포함한다 — 이 채널의 요점이 "지금 화면에 없는 pane 에도 보낼 수 있다"는 것이다.
+    /// - `target` 은 [`Tab::title`] 에 대한 **부분일치·대소문자 무시**다 (대상 탭이
+    ///   `OSC 0` 으로 정한 제목).
+    /// - **송신자 자신은 제외**한다 (자기 stdin 에 되먹임 금지).
+    /// - 0건이면 [`SendTargetError::NoMatch`], 2건 이상이면
+    ///   [`SendTargetError::Ambiguous`] — **첫 매치를 고르지 않는다.** 엉뚱한 pane 에
+    ///   명령이 들어가는 것보다 아무 데도 안 가는 쪽이 낫다 (오발사 방지).
+    /// - Exited 탭·뷰어 탭·세션 없는 탭은 애초에 후보가 아니다 (쓸 stdin 이 없다).
+    ///
+    /// 빈 `target` 은 모든 제목에 부분일치하므로, 후보가 정확히 하나일 때만 전달되고
+    /// 그 외에는 위 규칙대로 거부된다 (별도 특례를 두지 않는다).
+    pub fn resolve_send_target(
+        &self,
+        sender: SessionId,
+        target: &str,
+    ) -> Result<SessionId, SendTargetError> {
+        // 한국어 등 대소문자가 없는 문자도 그대로 통과하도록 Unicode lowercase 를 쓴다.
+        let needle = target.to_lowercase();
+        let mut first = None;
+        let mut count = 0usize;
+        for ws in &self.state.workspaces {
+            for pane in ws.panes.values() {
+                for tab in &pane.tabs {
+                    let TabKind::Terminal {
+                        pty_session: Some(session),
+                        status: TerminalStatus::Running,
+                        ..
+                    } = &tab.kind
+                    else {
+                        continue;
+                    };
+                    if *session == sender || !tab.title.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    count += 1;
+                    first.get_or_insert(*session);
+                }
+            }
+        }
+        match count {
+            0 => Err(SendTargetError::NoMatch),
+            1 => Ok(first.expect("count 1 이면 매치가 기록돼 있다")),
+            count => Err(SendTargetError::Ambiguous { count }),
+        }
     }
 
     /// adopt 된 상태의 터미널 탭 하나에 새 셸을 재스폰한다 — manage-first 부팅의
@@ -3328,5 +3380,134 @@ mod tests {
         let (tab, _session) = create_terminal_tab(&mut d, PaneId(2));
         assert_eq!(tab, TabId(8));
         assert_eq!(d.state().next_id, 9);
+    }
+
+    // ---- pane 간 전송 대상 해석 (에이전트 채널) ----
+
+    /// 탭 제목을 대상 탭이 스스로 정한 것처럼 세운다 (OSC 0 경로).
+    fn set_title(d: &mut Dispatcher, session: SessionId, title: &str) {
+        d.apply_osc(
+            batch(&[(session, OscEvent::Osc0Title(title.into()))]),
+            1_000,
+        );
+    }
+
+    #[test]
+    fn resolve_send_target_matches_title_substring_case_insensitively() {
+        let (mut d, _host) = dispatcher();
+        let (_ws1, pane1) = create_ws(&mut d, "one");
+        let (_sender_tab, sender) = create_terminal_tab(&mut d, pane1);
+        let (_tab_build, s_build) = create_terminal_tab(&mut d, pane1);
+        set_title(&mut d, sender, "claude");
+        set_title(&mut d, s_build, "Build Shell");
+
+        // 부분일치 + 대소문자 무시.
+        assert_eq!(d.resolve_send_target(sender, "build"), Ok(s_build));
+        assert_eq!(d.resolve_send_target(sender, "UILD SH"), Ok(s_build));
+        assert_eq!(d.resolve_send_target(sender, "Build Shell"), Ok(s_build));
+    }
+
+    #[test]
+    fn resolve_send_target_reaches_background_workspaces() {
+        let (mut d, _host) = dispatcher();
+        let (_ws1, pane1) = create_ws(&mut d, "one");
+        let (_sender_tab, sender) = create_terminal_tab(&mut d, pane1);
+        // 두 번째 워크스페이스가 active 가 되므로 첫 워크스페이스가 백그라운드다.
+        let (_ws2, pane2) = create_ws(&mut d, "two");
+        let (_other_tab, other) = create_terminal_tab(&mut d, pane2);
+        set_title(&mut d, sender, "claude");
+        set_title(&mut d, other, "agent zero");
+
+        // 백그라운드 → active 방향, active → 백그라운드 방향 모두 도달한다.
+        assert_eq!(d.resolve_send_target(sender, "agent"), Ok(other));
+        assert_eq!(d.resolve_send_target(other, "claude"), Ok(sender));
+    }
+
+    #[test]
+    fn resolve_send_target_excludes_the_sender() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (_t1, sender) = create_terminal_tab(&mut d, pane);
+        let (_t2, twin) = create_terminal_tab(&mut d, pane);
+        // 제목이 같은 두 탭 — 송신자를 뺀 나머지가 하나뿐이라 모호하지 않다.
+        set_title(&mut d, sender, "twin");
+        set_title(&mut d, twin, "twin");
+        assert_eq!(d.resolve_send_target(sender, "twin"), Ok(twin));
+        assert_eq!(d.resolve_send_target(twin, "twin"), Ok(sender));
+    }
+
+    #[test]
+    fn resolve_send_target_rejects_no_match_and_ambiguity() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (_t1, sender) = create_terminal_tab(&mut d, pane);
+        let (_t2, _a) = create_terminal_tab(&mut d, pane);
+        let (_t3, _b) = create_terminal_tab(&mut d, pane);
+        set_title(&mut d, sender, "claude");
+
+        assert_eq!(
+            d.resolve_send_target(sender, "nope"),
+            Err(SendTargetError::NoMatch)
+        );
+        // 갓 만든 탭의 기본 제목은 둘 다 "Terminal" — 첫 매치를 고르지 않는다.
+        assert_eq!(
+            d.resolve_send_target(sender, "terminal"),
+            Err(SendTargetError::Ambiguous { count: 2 })
+        );
+    }
+
+    #[test]
+    fn resolve_send_target_skips_exited_and_viewer_tabs() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (_t1, sender) = create_terminal_tab(&mut d, pane);
+        let (_t2, dead) = create_terminal_tab(&mut d, pane);
+        set_title(&mut d, sender, "claude");
+        set_title(&mut d, dead, "build");
+        // 뷰어 탭의 제목도 "build" 로 겹치게 만든다 (경로 마지막 조각이 제목).
+        create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::FolderBrowser {
+                path: Some("/home/u/build".into()),
+            },
+        );
+
+        // 아직 살아 있는 동안은 유일 매치.
+        assert_eq!(d.resolve_send_target(sender, "build"), Ok(dead));
+
+        // 세션이 죽으면 후보에서 빠진다 — 쓸 stdin 이 없다. 뷰어 탭은 제목이
+        // 일치해도 애초에 후보가 아니므로 남는 매치는 0건이다.
+        d.apply_event(SessionEvent::SessionExited {
+            session: dead,
+            code: Some(0),
+        });
+        assert_eq!(
+            d.resolve_send_target(sender, "build"),
+            Err(SendTargetError::NoMatch)
+        );
+    }
+
+    #[test]
+    fn resolve_send_target_is_a_pure_query() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (_t1, sender) = create_terminal_tab(&mut d, pane);
+        let (_t2, other) = create_terminal_tab(&mut d, pane);
+        set_title(&mut d, other, "build");
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        // 성공·NoMatch·Ambiguous 어느 경로도 상태·revision 을 건드리지 않는다.
+        assert_eq!(d.resolve_send_target(sender, "build"), Ok(other));
+        assert_eq!(
+            d.resolve_send_target(sender, "nope"),
+            Err(SendTargetError::NoMatch)
+        );
+        assert_eq!(
+            d.resolve_send_target(sender, ""),
+            Ok(other),
+            "빈 대상은 후보가 하나뿐일 때만 전달된다"
+        );
+        assert_eq!(serde_json::to_value(d.state()).unwrap(), before);
     }
 }

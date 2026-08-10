@@ -9,6 +9,8 @@
 //! - OSC: [`OscRouter`] 에 밀어넣기만 한다 — 모델 반영은 라우터 worker 가 flush
 //!   창당 한 번 한다 (18단계 계획 glue 계약). 리더 스레드에서 Dispatcher lock 을
 //!   잡지 않는 경계가 여기다.
+//! - pane 간 전송(`OSC 777;winmux-send`)만 예외로 라우터를 타지 않는다 — 상태가
+//!   아니라 **액션**이라 코얼레싱할 것이 없다 ([`deliver_send`]).
 
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +18,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
 use winmux_core::command::SessionEvent;
 use winmux_core::osc::OscEvent;
+use winmux_core::send::decode_send_text;
 use winmux_core::session::{Delivery, SessionId, SessionSink};
 
 use crate::router::OscRouter;
@@ -108,6 +111,12 @@ impl SessionSink for SinkHandle {
     }
 
     fn on_osc(&self, event: &OscEvent) {
+        if let OscEvent::Osc777Send { target, text_b64 } = event {
+            // 전송은 상태 델타가 아니라 액션이다 — 배치에 넣으면 flush 창만큼
+            // 늦어지고 코얼레싱(last-wins)이 두 번째 전송을 삼킨다.
+            deliver_send(&self.0.app, self.0.session, target, text_b64);
+            return;
+        }
         // 리더 스레드 핫패스 — 배치에 합치고 깨우기만 한다. 모델 반영은 라우터
         // worker 가 flush 창당 한 번 하며, 여기서 Dispatcher lock 을 잡지 않는다
         // (router.rs 잠금 규율).
@@ -134,4 +143,68 @@ impl SessionSink for SinkHandle {
         });
         publish_state(&self.0.app, &dispatcher);
     }
+}
+
+/// pane 간 텍스트 전송 (에이전트 채널 — `scripts/wsl/skills/winmux-send/SKILL.md`).
+/// `OSC 777;winmux-send;<target>;<base64>` 를 받은 세션이 호출한다.
+///
+/// # 왜 즉시 처리하나
+///
+/// 알림은 **상태**라 flush 창에 모아 last-wins 로 합치는 것이 옳지만, 전송은
+/// **액션**이다. 배치에 넣으면 (1) 창만큼 늦어지고 (2) 같은 창의 두 번째 전송이
+/// 첫 번째를 덮어써 사라진다. 그래서 코얼레싱을 건너뛴다. 상태 변이가 전혀
+/// 없으므로 스냅샷 발행·저장 예약도 하지 않는다 (성공·실패 모두).
+///
+/// # 스레드·잠금
+///
+/// 호출자는 PTY **리더 스레드**다. 여기서 Dispatcher lock 을 잡거나 대상 PTY 에
+/// write 하면 송신자 pane 의 출력이 그동안 멈춘다 (대상이 paused 면 write 는
+/// 무기한 블록될 수도 있다). 그래서 실제 작업은 통째로 blocking 풀로 넘기고
+/// (`commands.rs` 의 write 경로와 같은 규율), 그 안에서도 Dispatcher lock 은
+/// 대상 해석에만 잡았다가 **write 전에 놓는다** (state.rs 잠금 규율).
+///
+/// # 실패
+///
+/// 디코드·대상 해석·write 실패는 전부 stderr 로만 남기고 **송신자 세션에는 아무
+/// 것도 쓰지 않는다** — 진단 문자열이 남의 터미널 화면(그리고 replay 버퍼)에
+/// 섞이면 그게 더 나쁜 오염이다. 송신 측에서 보면 전송은 무음 fire-and-forget 이다.
+fn deliver_send(app: &AppHandle, sender: SessionId, target: &str, text_b64: &str) {
+    let app = app.clone();
+    let target = target.to_owned();
+    let text_b64 = text_b64.to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = match decode_send_text(&text_b64) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("[winmux] send: rejected from session {sender}: {err}");
+                return;
+            }
+        };
+        let Some(state) = app.try_state::<AppState>() else {
+            // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 (on_exit 과 같은 규율).
+            eprintln!("[winmux] send: managed state unavailable; dropped");
+            return;
+        };
+        // 대상 해석은 순수 조회다 — lock 은 조회 동안만 잡고 곧바로 놓는다.
+        let resolved = state
+            .dispatcher
+            .lock()
+            .unwrap()
+            .resolve_send_target(sender, &target);
+        let session = match resolved {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("[winmux] send: {err} (target={target:?}, from session {sender})");
+                return;
+            }
+        };
+        let Some(handle) = state.sessions.get(session) else {
+            // 해석과 write 사이에 탭이 닫힌 경우 — 드물지만 정상 순서다.
+            eprintln!("[winmux] send: target session {session} is gone; dropped");
+            return;
+        };
+        if let Err(err) = handle.write(&bytes) {
+            eprintln!("[winmux] send: write to session {session} failed: {err:#}");
+        }
+    });
 }

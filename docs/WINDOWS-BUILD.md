@@ -632,12 +632,27 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
 `scripts/wsl/*.sh` and `git checkout -- scripts` once so the new `.gitattributes`
 (`*.sh text eol=lf`) re-materializes them with LF endings, then rebuild.
 
-1. **Hook tty fallback** — rewire the hooks from the updated
-   [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md)
-   (the canonical script now tries `/dev/tty` first and then walks up to 8 ancestor
-   processes for a `/dev/pts/*` fd — the approach you field-tested, formalized). Run a
-   real Claude Code session: running → needsInput → idle must route as before, with no
-   `/dev/tty: No such device or address` in the hook's stderr.
+1. **Hook auto-provisioning + tty fallback** — the hooks are no longer wired by hand: on
+   launch the app streams a setup script into `wsl.exe [-d <distro>] -- bash -s` once per
+   distro (contract and manual fallback:
+   [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md)). Start
+   the app on a distro that has never run it and check, inside WSL:
+   `~/.winmux/bin/winmux-notify.sh` exists and is executable, `~/.winmux/setup.log` lists
+   what happened, `~/.winmux/.setup-v2` exists, and `~/.claude/settings.json` now carries
+   the `UserPromptSubmit`/`Notification`/`Stop` hooks **with every pre-existing setting
+   intact**. Then run a real Claude Code session: running → needsInput → idle must route
+   as before, with no `/dev/tty: No such device or address` in the hook's stderr (the
+   canonical script tries `/dev/tty` first and then walks up to 8 ancestor processes for a
+   `/dev/pts/*` fd — the approach you field-tested, formalized). Also confirm:
+   - **idempotence** — restart the app: `setup.log` gains no new lines and
+     `settings.json` is unchanged (the marker short-circuits the whole script).
+   - **already-wired hooks are left alone** — with a hand-wired hook still in place, the
+     provisioner adds nothing for that event (no double OSC per prompt).
+   - **new distro on demand** — create a workspace pinned to a second distro (section 4):
+     that distro gets provisioned right after the workspace is created, without a restart.
+   - **[conditional] Codex** — on a distro with `~/.codex/config.toml`, a root-level
+     `notify` appears (or, if the file already had one, it is untouched and `setup.log`
+     says so); finishing a Codex turn then shows `idle` in the sidebar.
 2. **Markdown polling stops while minimized** — open a markdownViewer tab, minimize the
    window: `fs_stat` polling must stop within one 2s cycle (verify by appending to the
    file while minimized — no re-render happens until restore). Restore: polling resumes
@@ -709,10 +724,12 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
       longer read, and a stale one silently does nothing. Same for any `WMUX_RESET_*` /
       `WMUX_OSC_FLUSH_MS` you set for the section 9 checks.
     - **Claude Code hooks** — the OSC status token is now `winmux:running` /
-      `winmux:needsInput` / `winmux:idle`. Rewire the hooks from the updated
-      [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md);
-      hooks still emitting `wmux:*` land as status-neutral notifications (unread dot, no
-      status change), which is exactly what a missed rewire looks like.
+      `winmux:needsInput` / `winmux:idle`. Auto-provisioning (item 1) wires the new hooks
+      for you, but it never edits an entry that is already there, so a leftover `wmux:*`
+      hook has to be **deleted by hand** from `~/.claude/settings.json`; until it is, it
+      keeps landing as a status-neutral notification (unread dot, no status change) on top
+      of the new ones. The contract is
+      [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md).
     - **Shell history in WSL** — `mv ~/.wmux ~/.winmux` in the distro keeps every tab's
       history (item 9). Without it each respawned tab starts with an empty history.
 
@@ -792,6 +809,49 @@ and check these; nothing here needs a fresh `npm install`.
    not a blue smudge. If Explorer still shows the old icon after a rebuild it is the
    Windows icon cache, not the build: `ie4uinit.exe -show` or a fresh folder view.
 
+### Agent send channel — verification
+
+The agent-facing pane-to-pane send channel (`OSC 777;winmux-send`; contract in
+[`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md), agent-side
+instructions in `scripts/wsl/skills/winmux-send/SKILL.md`). Run the app from a console
+(`npm run tauri dev`) so its stderr is visible — every failure of this channel is logged
+there and **nowhere else**.
+
+Open two terminal tabs. In the one that will receive text, set a title; in the other, send.
+
+```bash
+# receiver
+printf '\033]0;build\007'
+# sender
+printf '\033]777;winmux-send;build;'"$(printf '%s\n' 'echo delivered' | base64 -w0)"'\007' > /dev/tty
+```
+
+1. **Delivery** — `echo delivered` appears in the receiver **and runs** (the payload carries
+   the trailing newline). The sender's own screen shows nothing at all: no echo of the
+   sequence, no confirmation, no error.
+2. **Background workspace** — move the receiver to a second workspace, switch away so it is
+   off screen, and send again from the first workspace: the text must still arrive (switch
+   back to check). This is the point of the channel — it does not go through the frontend.
+3. **Ambiguity refuses to fire** — title a third tab `build-2` and send to `build` again:
+   **neither** tab may receive anything, and the app's stderr says how many matched. Retitle
+   it, confirm delivery resumes.
+4. **No match** — send to `nosuchtab`: nothing arrives anywhere, stderr says so.
+5. **Self-send is impossible** — title the sender itself `build` while the receiver keeps
+   that title too: the send still lands in the receiver (the sender is excluded, so the
+   match stays unique). With the receiver closed, sending to `build` from the sender must
+   deliver nothing.
+6. **Bad payloads are rejected** — send with a non-base64 body
+   (`printf '\033]777;winmux-send;build;not base64!\007' > /dev/tty`) and with a huge one
+   (`head -c 200000 /dev/zero | base64 -w0`): nothing arrives, the sender is unaffected, and
+   the oversize case is discarded without a log line — the decoder refuses anything over the
+   32 KiB text contract, and OSC payloads over 64 KiB never even reach the parser.
+7. **Notifications still work** — with the send channel exercised, run a Claude Code session
+   in one of the tabs and confirm the section 10 item 1 statuses (`running` → `needsInput` →
+   `idle`) still route as before: adding `winmux-send` must not disturb the `notify` contract.
+8. **Skill is installed** — inside WSL, `~/.claude/skills/winmux-send/SKILL.md` exists after
+   the app has provisioned the distro (it is installed by the same setup script, marker
+   `~/.winmux/.setup-v2`), and a Claude Code session in a winmux tab can find it by name.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
@@ -827,7 +887,9 @@ Since stage 22, `.github/workflows/ci.yml` runs the full gate set (including
 commands never link, so this needs no MSVC libraries and also runs on the Linux dev host)
 on every push, and builds **release artifacts for both targets** on a manual
 `workflow_dispatch` (GitHub → Actions → CI → Run workflow) or a `v*` tag: download
-`winmux-aarch64-pc-windows-msvc` from the run's artifacts for the ARM64 device.
+`winmux-aarch64-pc-windows-msvc` from the run's artifacts for the ARM64 device. A `v*` tag
+additionally attaches `winmux-x64.exe` / `winmux-arm64.exe` to a GitHub Release — the
+`workflow_dispatch` path stays workflow-artifacts-only.
 
 Stage 23 (device verification) runs on the ARM64 machine, WSL2 + ARM64 Ubuntu installed:
 1. The artifact runs natively (Task Manager shows no emulation; ARM64 process).

@@ -62,6 +62,13 @@ pub async fn dispatch(
 ) -> Result<CommandOutput, CommandError> {
     // 활동 신호용 판별 — cmd 는 아래 클로저로 move 되므로 먼저 본다.
     let is_workspace_switch = matches!(cmd, Command::SwitchWorkspace { .. });
+    // 새 워크스페이스의 distro 도 먼저 복사해 둔다 (성공 후 프로비저닝 대상).
+    // 부팅 때 없던 distro 가 이 경로로만 들어오므로 여기가 두 번째 호출 지점이다.
+    let created_distro = match &cmd {
+        Command::CreateWorkspace { distro, .. } => Some(distro.clone()),
+        _ => None,
+    };
+    let provision_app = app.clone();
     // 전체를 spawn_blocking 에서: CreateTab 의 셸 스폰(프로세스 생성 — 수십 ms
     // 블로킹)이 Dispatcher lock 아래에서 일어난다 (계획 0-3 — 핫패스와 무간섭
     // 이라 수용). 메인(이벤트 루프) 스레드는 잡지 않는다.
@@ -84,6 +91,11 @@ pub async fn dispatch(
         state.reset.user_input("dispatch");
         if is_workspace_switch {
             state.reset.workspace_switch();
+        }
+        // 워크스페이스가 실제로 생겼을 때만 — 이미 프로비저닝한 distro(부팅 때
+        // 건 것 포함)는 `ensure_provisioned` 의 프로세스 수명 캐시가 걸러 낸다.
+        if let Some(distro) = created_distro {
+            crate::provision::ensure_provisioned(&provision_app, distro.as_deref());
         }
     }
     result

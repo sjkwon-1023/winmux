@@ -92,6 +92,11 @@ impl OscBatch {
                 }
                 merge_message(delta, body);
             }
+            // pane 간 전송은 상태가 아니라 **액션**이라 배치에 담기지 않는다 —
+            // 글루가 라우터에 밀어넣기 전에 가로채 즉시 처리한다 (crate::send).
+            // 여기까지 온다면 배치에 슬롯조차 만들지 않는다: 코얼레싱은 상태
+            // 델타 전용이고, 빈 델타를 만들면 flush 가 헛돌기 때문이다.
+            OscEvent::Osc777Send { .. } => {}
         }
     }
 
@@ -323,6 +328,20 @@ mod tests {
         let mut batch = OscBatch::default();
         batch.merge(1, &OscEvent::Osc7Cwd("/plain/path".into()));
         batch.merge(1, &OscEvent::Osc7Cwd("file://hostonly".into()));
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn send_event_creates_no_batch_entry() {
+        // 전송은 액션이라 코얼레싱 배치를 타지 않는다 (슬롯조차 만들지 않는다).
+        let mut batch = OscBatch::default();
+        batch.merge(
+            1,
+            &OscEvent::Osc777Send {
+                target: "build".into(),
+                text_b64: "aGk=".into(),
+            },
+        );
         assert!(batch.is_empty());
     }
 
