@@ -748,11 +748,14 @@ and check these; nothing here needs a fresh `npm install`.
    - **Windows drive** — pick e.g. `C:\Users\<you>\code`: the root must come out as
      `/mnt/c/Users/<you>/code` and the tab starts there. (This assumes the distro's
      default automount root; a custom `/etc/wsl.conf` shows up as a `cd` failure.)
-   - **Rejected paths** — create one from inside WSL (`mkdir '/tmp/bad:name'`), then pick
-     it through the UNC view: the status line must show a loud path error and **no**
-     workspace may appear. Names containing `:` or `\`, or ending in a dot or space, are
+   - **Rejected paths** — create one from inside WSL (`mkdir '/tmp/badname.'` — note the
+     trailing dot), then pick it through the UNC view: the status line must show a loud
+     path error and **no** workspace may appear. Trailing dot/space and `\` in names are
      refused on purpose — the same rule the viewer tabs use, so a bad name can never be
-     assembled into a different Windows path than the one you clicked.
+     assembled into a different Windows path than the one you clicked. (Do **not** test
+     this with a `:` name: the 9P server shows `:` to Windows as a private-use character,
+     so the picked path contains no literal `:` and passes validation — the name would
+     fail later, at spawn/cwd time, which is acceptable but is not this item.)
 4. **`Ctrl+Shift+N` opens the same picker** — from anywhere (terminal focused included)
    it must open the folder dialog, not focus a sidebar field. Holding the keys down or
    double-pressing must not stack two dialogs. Nothing may leak into the terminal.
