@@ -88,7 +88,8 @@ npm run tauri build -- --no-bundle
 ```
 
 `--no-bundle` skips MSI/NSIS installer packaging (not needed for Spike verification) and leaves
-a plain `winmux-spike.exe` under `apps\spike\src-tauri\target\release\`. This is the binary
+a plain `winmux-spike.exe` under the **workspace root** `target\release\` — same reason as
+section 3: the repo root is the cargo workspace, so `target/` lives there. This is the binary
 [`scripts/win/measure.ps1`](../scripts/win/measure.ps1) expects by default (`-ProcessName
 winmux-spike`, matching `productName` in `src-tauri/tauri.conf.json`).
 
@@ -129,8 +130,15 @@ checklist that exercises this.
 npm run tauri build -- --no-bundle
 ```
 
-Leaves a plain `winmux.exe` under `apps\winmux\src-tauri\target\release\` (distinct from
-spike's `winmux-spike.exe` — the two apps' binaries don't collide).
+Leaves a plain `winmux-app.exe` under the **workspace root** `target\release\` — not under
+`apps\winmux\src-tauri\`, because the repo root is the cargo workspace and that is where
+cargo puts `target/`. The binary is named after the cargo package (`winmux-app`), not after
+`productName`; `--no-bundle` skips the bundling step that would apply the product name.
+
+Cross-compiling adds the triple: `--target aarch64-pc-windows-msvc` writes to
+`target\aarch64-pc-windows-msvc\release\winmux-app.exe`. That is the path
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) uploads, verified by a real
+`workflow_dispatch` run of the `windows-artifacts` job for both targets.
 
 ## 4. `WINMUX_DISTRO` environment variable
 

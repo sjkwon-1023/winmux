@@ -10,7 +10,8 @@ which one is waiting for your input, and which one just finished — without swi
 
 I built it after moving from cmux on macOS to Windows: only the features I actually use, kept
 as small as I could (100MB target, 150MB ceiling, ~129MB measured), plus a folder browser and
-text and markdown viewers for reading while an agent works.
+text and markdown viewers for reading while an agent works. It is Tauri v2 and xterm.js over a
+pure Rust core — the terminal logic has no UI framework dependency and is tested on Linux.
 
 ## Requirements
 
@@ -39,8 +40,12 @@ ConPTY → `wsl.exe` → a login shell. There is no PowerShell or CMD profile.
 
 ## Installing
 
-No releases yet, so build from source. Toolchain setup — rustup on the MSVC ABI, Visual Studio
-Build Tools with the C++ workload, Node.js LTS — and where the `.exe` lands are in
+winmux ships as a single portable `winmux-app.exe` for x64 and ARM64 — no installer, no setup.
+Nothing is published yet; once a version is tagged the binaries appear on the
+[Releases](https://github.com/sjkwon-1023/winmux/releases) page.
+
+Until then, build from source. Toolchain setup — rustup on the MSVC ABI, Visual Studio Build
+Tools with the C++ workload, Node.js LTS — is in
 [`docs/WINDOWS-BUILD.md`](./docs/WINDOWS-BUILD.md).
 
 ```powershell
@@ -50,7 +55,8 @@ npm install
 npm run tauri build -- --no-bundle
 ```
 
-Use `npm run tauri dev` instead to run it with hot reload.
+That leaves `winmux-app.exe` in the repo's `target\release\`. Use `npm run tauri dev` instead
+to run it with hot reload.
 
 ## Setup
 
