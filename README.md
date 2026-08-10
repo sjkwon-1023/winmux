@@ -40,9 +40,12 @@ ConPTY → `wsl.exe` → a login shell. There is no PowerShell or CMD profile.
 
 ## Installing
 
-winmux ships as a single portable `winmux-app.exe` for x64 and ARM64 — no installer, no setup.
-Nothing is published yet; once a version is tagged the binaries appear on the
-[Releases](https://github.com/sjkwon-1023/winmux/releases) page.
+winmux ships as a single portable executable for x64 and ARM64 — no installer, no setup.
+Nothing is published yet; once a version is tagged, `winmux-x64.exe` and `winmux-arm64.exe`
+appear on the [Releases](https://github.com/sjkwon-1023/winmux/releases) page — grab the one
+matching your CPU (WSL2 with a distribution installed is still required, see
+[Requirements](#requirements)). It's unsigned, so Windows SmartScreen will warn on first
+launch — "More info" → "Run anyway".
 
 Until then, build from source. Toolchain setup — rustup on the MSVC ABI, Visual Studio Build
 Tools with the C++ workload, Node.js LTS — is in

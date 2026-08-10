@@ -75,13 +75,21 @@ jobs:
 
   windows-artifacts:
     # 2x 단가 러너 — 매 push 가 아니라 수동/태그에서만. ARM64 실기 테스트용
-    # 아티팩트 산출이 목적이다 (23단계).
+    # 아티팩트 산출이 목적이다 (23단계). 태그 트리거일 때는 추가로 GitHub Release 에 첨부한다.
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
+    # job 단위 최소 권한 — Release 첨부(softprops/action-gh-release)에만 필요, gates job 에는 안 준다.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+        include:
+          - target: x86_64-pc-windows-msvc
+            asset_name: winmux-x64.exe
+          - target: aarch64-pc-windows-msvc
+            asset_name: winmux-arm64.exe
     steps:
       - uses: actions/checkout@v5
 
@@ -111,3 +119,16 @@ jobs:
           # 워크스페이스 루트 target 디렉터리 (레포 루트가 cargo 워크스페이스다).
           path: target/${{ matrix.target }}/release/winmux-app.exe
           if-no-files-found: error
+
+      # 태그 트리거 전용: Release 에 올릴 타깃별 명확한 이름의 복사본.
+      # workflow_dispatch 실행은 위 artifact 업로드(원본 파일명)만 하고 여기서 끝난다.
+      - name: Copy release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cp target/${{ matrix.target }}/release/winmux-app.exe target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}
