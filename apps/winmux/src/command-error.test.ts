@@ -54,6 +54,15 @@ describe("formatCommandError", () => {
     );
   });
 
+  it("formats invalidName with the reason (renameWorkspace)", () => {
+    expect(
+      formatCommandError({
+        type: "invalidName",
+        message: "workspace name must not be empty or whitespace only",
+      }),
+    ).toBe("Invalid name: workspace name must not be empty or whitespace only");
+  });
+
   it("passes through non-contract string payloads", () => {
     expect(formatCommandError("ipc timeout")).toBe("Command failed: ipc timeout");
   });

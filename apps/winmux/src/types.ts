@@ -129,6 +129,9 @@ export type Command =
     }
   | { type: "switchWorkspace"; workspace: WorkspaceId }
   | { type: "closeWorkspace"; workspace: WorkspaceId }
+  /** 워크스페이스 이름만 변경 (사이드바 F2 인라인 편집). 빈/공백뿐인 이름은
+   *  invalidName 에러 — 코어는 받은 값을 그대로 저장하므로 다듬기는 UI 몫이다. */
+  | { type: "renameWorkspace"; workspace: WorkspaceId; name: string }
   | { type: "focusPane"; pane: PaneId }
   /** tab 이 non-null 이면 새 pane 에 그 탭까지 원자 생성 (계획 D5). */
   | { type: "splitPane"; pane: PaneId; direction: SplitDirection; tab: NewTab | null }
@@ -183,4 +186,7 @@ export type CommandError =
   /** 뷰어 경로 형태 불량 (wslpath 검증 사유 문자열). 실존 여부와는 무관하다. */
   | { type: "invalidPath"; message: string }
   /** setViewerScroll 의 scrollTop 이 finite·0 이상이 아니다. */
-  | { type: "invalidScroll"; value: number };
+  | { type: "invalidScroll"; value: number }
+  /** 이름 값 불량 — renameWorkspace 의 빈/공백뿐인 이름 (경로가 아니라
+   *  invalidPath 를 재사용하지 않는다). */
+  | { type: "invalidName"; message: string };

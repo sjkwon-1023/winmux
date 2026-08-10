@@ -4,7 +4,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { keyAction, nextTab, paneInDirection, shortcutLabel, workspaceAtOrdinal } from "./keys";
+import {
+  keyAction,
+  nextTab,
+  nextWorkspace,
+  paneInDirection,
+  shortcutLabel,
+  workspaceAtOrdinal,
+} from "./keys";
 import type { KeySpec, PaneRect } from "./keys";
 
 /** 기본 no-modifier·조합 아님 spec — 테스트마다 필요한 것만 덮어쓴다. */
@@ -60,7 +67,7 @@ describe("keyAction", () => {
     expect(keyAction(spec({ key: "ArrowRight", alt: true, shift: true }))).toBeNull();
   });
 
-  it("Ctrl+Shift+<문자> 6종은 각 전역 단축키로 매핑된다", () => {
+  it("Ctrl+Shift+<문자> 8종은 각 전역 단축키로 매핑된다", () => {
     expect(keyAction(spec({ key: "W", ctrl: true, shift: true }))).toEqual({ type: "closeTab" });
     expect(keyAction(spec({ key: "T", ctrl: true, shift: true }))).toEqual({
       type: "newTab",
@@ -80,14 +87,46 @@ describe("keyAction", () => {
       direction: "horizontal",
     });
     expect(keyAction(spec({ key: "N", ctrl: true, shift: true }))).toEqual({
-      type: "focusNewWorkspace",
+      type: "openWorkspacePicker",
     });
+    expect(keyAction(spec({ key: "[", ctrl: true, shift: true }))).toEqual({
+      type: "cycleWorkspace",
+      delta: -1,
+    });
+    expect(keyAction(spec({ key: "]", ctrl: true, shift: true }))).toEqual({
+      type: "cycleWorkspace",
+      delta: 1,
+    });
+  });
+
+  it("Ctrl+Shift+[ / ] 는 shift 결과 문자({ })로 와도 같은 동작이다", () => {
+    // 레이아웃에 따라 ev.key 가 shift 적용 문자로 온다 — 둘 다 받아야 한다.
+    expect(keyAction(spec({ key: "{", ctrl: true, shift: true }))).toEqual({
+      type: "cycleWorkspace",
+      delta: -1,
+    });
+    expect(keyAction(spec({ key: "}", ctrl: true, shift: true }))).toEqual({
+      type: "cycleWorkspace",
+      delta: 1,
+    });
+  });
+
+  it("F2(무수식)는 활성 워크스페이스 이름 변경이다 — 수식이 붙으면 매칭되지 않는다", () => {
+    expect(keyAction(spec({ key: "F2" }))).toEqual({ type: "renameWorkspace" });
+    expect(keyAction(spec({ key: "F2", ctrl: true }))).toBeNull();
+    expect(keyAction(spec({ key: "F2", shift: true }))).toBeNull();
+    expect(keyAction(spec({ key: "F2", alt: true }))).toBeNull();
+    // IME 조합 중에는 어떤 키도 가로채지 않는다.
+    expect(keyAction(spec({ key: "F2", isComposing: true }))).toBeNull();
+    // 다른 기능키는 전부 터미널 소유다 (F5 는 리로드로도 쓰지 않는다).
+    expect(keyAction(spec({ key: "F1" }))).toBeNull();
+    expect(keyAction(spec({ key: "F5" }))).toBeNull();
   });
 
   it("Ctrl+Shift+<문자> 매칭은 대소문자를 무시한다 — CapsLock·레이아웃 차이 흡수", () => {
     expect(keyAction(spec({ key: "w", ctrl: true, shift: true }))).toEqual({ type: "closeTab" });
     expect(keyAction(spec({ key: "n", ctrl: true, shift: true }))).toEqual({
-      type: "focusNewWorkspace",
+      type: "openWorkspacePicker",
     });
   });
 
@@ -137,6 +176,8 @@ describe("shortcutLabel", () => {
     "splitTopBottom",
     "splitLeftRight",
     "newWorkspace",
+    "prevWorkspace",
+    "nextWorkspace",
   ] as const;
 
   it("툴팁 라벨은 Ctrl+Shift+<대문자> 형식이다", () => {
@@ -146,6 +187,9 @@ describe("shortcutLabel", () => {
     expect(shortcutLabel("splitTopBottom")).toBe("Ctrl+Shift+D");
     expect(shortcutLabel("splitLeftRight")).toBe("Ctrl+Shift+E");
     expect(shortcutLabel("newWorkspace")).toBe("Ctrl+Shift+N");
+    // 문자가 아닌 키는 대문자 변환이 항등이다 — 표기가 그대로 나간다.
+    expect(shortcutLabel("prevWorkspace")).toBe("Ctrl+Shift+[");
+    expect(shortcutLabel("nextWorkspace")).toBe("Ctrl+Shift+]");
   });
 
   it("라벨이 가리키는 키를 실제로 누르면 keyAction 이 매칭된다 — 표시·판정 표류 방지", () => {
@@ -233,5 +277,21 @@ describe("nextTab", () => {
   it("활성 탭이 없거나 목록에 없으면 null", () => {
     expect(nextTab([11, 22], null, 1)).toBeNull();
     expect(nextTab([11, 22], 99, 1)).toBeNull();
+  });
+});
+
+describe("nextWorkspace", () => {
+  it("사이드바 순서로 이웃 워크스페이스를 고르고 끝에서 순환한다", () => {
+    expect(nextWorkspace([1, 2, 3], 1, 1)).toBe(2);
+    expect(nextWorkspace([1, 2, 3], 3, 1)).toBe(1); // wrap
+    expect(nextWorkspace([1, 2, 3], 2, -1)).toBe(1);
+    expect(nextWorkspace([1, 2, 3], 1, -1)).toBe(3); // wrap
+  });
+
+  it("워크스페이스가 0~1개거나 활성이 목록에 없으면 null — 무변경 전환 방지", () => {
+    expect(nextWorkspace([], null, 1)).toBeNull();
+    expect(nextWorkspace([1], 1, 1)).toBeNull();
+    expect(nextWorkspace([1, 2], null, 1)).toBeNull();
+    expect(nextWorkspace([1, 2], 99, -1)).toBeNull();
   });
 });

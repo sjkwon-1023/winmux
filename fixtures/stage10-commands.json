@@ -42,5 +42,6 @@
     "name": "legacy",
     "rootPath": null,
     "distro": null
-  }
+  },
+  { "type": "renameWorkspace", "workspace": 1, "name": "winmux (renamed)" }
 ]

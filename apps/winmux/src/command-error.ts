@@ -21,7 +21,8 @@ function isCommandError(e: unknown): e is CommandError {
     t === "invalidRatio" ||
     t === "kindMismatch" ||
     t === "invalidPath" ||
-    t === "invalidScroll"
+    t === "invalidScroll" ||
+    t === "invalidName"
   );
 }
 
@@ -66,6 +67,8 @@ export function formatCommandError(e: unknown): string {
         return `Invalid path: ${e.message.replace(/\s+/g, " ").trim()}`;
       case "invalidScroll":
         return `Invalid scroll position ${e.value} (must be finite and >= 0)`;
+      case "invalidName":
+        return `Invalid name: ${e.message.replace(/\s+/g, " ").trim()}`;
       default:
         return assertNever(e);
     }

@@ -247,6 +247,74 @@ pub fn reset_ui(state: State<'_, AppState>) {
     state.reset.reset_now();
 }
 
+/// `pick_workspace_folder` 응답 — 고른 폴더를 워크스페이스 생성 인자로 편 형태.
+/// 필드명은 글루 DTO 관례(serde 기본 snake_case, `DirEntryDto` 전례) 그대로다.
+#[derive(serde::Serialize)]
+pub struct PickedFolder {
+    /// 워크스페이스 `rootPath` 로 그대로 쓰는 리눅스 절대 경로.
+    pub linux_path: String,
+    /// `\\wsl.localhost\<distro>\...` 를 골랐을 때의 배포판 이름. 드라이브 경로
+    /// (`C:\...` → `/mnt/c/...`)는 배포판을 알 수 없어 None 이고, 그때는 기존
+    /// 기본값 해석(워크스페이스 distro 미지정 → WINMUX_DISTRO → wsl 기본)을 탄다.
+    pub distro: Option<String>,
+    /// 워크스페이스 이름 기본값 — 고른 폴더의 마지막 세그먼트.
+    pub name: String,
+}
+
+/// 워크스페이스 폴더 선택 (Windows 네이티브 대화상자). 취소는 `Ok(None)` —
+/// 에러가 아니다. 선택된 Windows 경로는 `wslpath::from_windows_path` 로 리눅스
+/// 경로 + 배포판으로 되돌리고, 되돌릴 수 없는 경로(네트워크 UNC 등)는 그 사유를
+/// 그대로 Err 로 올린다 (프론트가 상태 라인에 표시).
+///
+/// 대화상자는 블로킹 모달이라 통째로 `spawn_blocking` 에서 돈다 — 메인(이벤트
+/// 루프) 스레드를 잡으면 대화상자가 떠 있는 동안 앱 전체가 멈춘다. Dispatcher
+/// lock 은 타지 않는다 (선택 결과로 CreateWorkspace 를 보내는 것은 프론트 몫).
+#[cfg(windows)]
+#[tauri::command]
+pub async fn pick_workspace_folder() -> Result<Option<PickedFolder>, String> {
+    let picked = tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Select a workspace folder")
+            .pick_folder()
+    })
+    .await
+    .map_err(|err| format!("pick_workspace_folder task join failed: {err}"))?;
+    let Some(picked) = picked else {
+        return Ok(None); // 사용자 취소 — 조용한 no-op
+    };
+    // 비 UTF-8 Windows 경로는 코어 경로 계약(String)에 실을 수 없다 — 조용히
+    // lossy 변환해 다른 폴더를 가리키게 두지 않고 거부한다.
+    let path = picked
+        .to_str()
+        .ok_or_else(|| format!("selected path is not valid UTF-8: {}", picked.display()))?;
+    let (distro, linux_path) = wslpath::from_windows_path(path)?;
+    Ok(Some(PickedFolder {
+        name: folder_name(&linux_path),
+        linux_path,
+        distro,
+    }))
+}
+
+/// unix(개발 실행)에는 띄울 네이티브 대화상자가 없다 — 조용한 no-op 이나 가짜
+/// 경로로 가리지 않고 명시적으로 실패한다 (`host.rs`·`host_path` 의 cfg 분기와
+/// 같은 규율: Windows 전용 기능은 dev 경로에서 loud 하게 없음을 알린다).
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn pick_workspace_folder() -> Result<Option<PickedFolder>, String> {
+    Err("folder picker is Windows-only".to_owned())
+}
+
+/// 리눅스 경로의 마지막 세그먼트 (빈 세그먼트는 건너뛰고, 루트면 `"/"`) —
+/// 코어의 탭 제목 규칙(`command.rs::path_title`)과 같은 계산이다.
+#[cfg(windows)]
+fn folder_name(linux_path: &str) -> String {
+    linux_path
+        .rsplit('/')
+        .find(|component| !component.is_empty())
+        .unwrap_or("/")
+        .to_owned()
+}
+
 #[tauri::command]
 pub fn get_stats(state: State<'_, AppState>) -> Vec<SessionStatsDto> {
     // 코어 `stats()` 가 레지스트리 lock 을 놓은 채 세션별 stats 를 뜨고 id

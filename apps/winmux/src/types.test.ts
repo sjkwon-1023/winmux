@@ -106,6 +106,10 @@ function commandTag(cmd: Command): string {
     case "closeWorkspace":
       expect(typeof cmd.workspace).toBe("number");
       return cmd.type;
+    case "renameWorkspace":
+      expect(typeof cmd.workspace).toBe("number");
+      expect(cmd.name.trim().length).toBeGreaterThan(0);
+      return cmd.type;
     case "focusPane":
       expect(typeof cmd.pane).toBe("number");
       return cmd.type;
@@ -196,6 +200,9 @@ function errorTag(entry: CommandError): string {
       return entry.type;
     case "invalidScroll":
       expect(typeof entry.value).toBe("number");
+      return entry.type;
+    case "invalidName":
+      expect(typeof entry.message).toBe("string");
       return entry.type;
     default:
       return assertNever(entry);
@@ -314,8 +321,9 @@ describe("stage10-snapshot-empty.json", () => {
 describe("stage10-commands.json", () => {
   it("covers every Command variant with internal tag narrowing", () => {
     const tags = commandsFixture.map(commandTag);
-    // 뒤쪽 createTab 3개는 뷰어 NewTab 3종을 실은 형태(21단계)이고, 마지막
-    // createWorkspace 는 tab 필드 누락 하위호환 형태다 (계획 13-D1).
+    // 뒤쪽 createTab 3개는 뷰어 NewTab 3종을 실은 형태(21단계)이고, 그 뒤
+    // createWorkspace 는 tab 필드 누락 하위호환 형태다 (계획 13-D1). 새 variant
+    // 는 **뒤에 덧붙인다** — 앞에 끼우면 아래 인덱스 단언이 전부 밀린다.
     expect(tags).toEqual([
       "createWorkspace",
       "switchWorkspace",
@@ -333,6 +341,7 @@ describe("stage10-commands.json", () => {
       "createTab",
       "createTab",
       "createWorkspace",
+      "renameWorkspace",
     ]);
   });
 
@@ -344,10 +353,16 @@ describe("stage10-commands.json", () => {
     // 원자 탭 동반 생성 형태 (계획 13-D1).
     expect(create.tab).toEqual({ type: "terminal", cwd: null });
 
-    // 마지막 엔트리는 tab 필드 누락 하위호환 잠금 — 파싱 시 undefined.
+    // 16번째 엔트리는 tab 필드 누락 하위호환 잠금 — 파싱 시 undefined.
     const legacy = commandsFixture[15];
-    if (legacy.type !== "createWorkspace") throw new Error("last must be createWorkspace");
+    if (legacy.type !== "createWorkspace") throw new Error("16th must be createWorkspace");
     expect(legacy.tab).toBeUndefined();
+
+    // 이름 변경 (F2 사이드바 인라인 편집) — workspace + name 두 필드뿐이다.
+    const rename = commandsFixture[16];
+    if (rename.type !== "renameWorkspace") throw new Error("last must be renameWorkspace");
+    expect(rename.workspace).toBe(1);
+    expect(rename.name).toBe("winmux (renamed)");
 
     const split = commandsFixture[4];
     if (split.type !== "splitPane") throw new Error("fifth must be splitPane");
@@ -434,6 +449,7 @@ describe("stage10-outputs.json", () => {
       "kindMismatch",
       "invalidPath",
       "invalidScroll",
+      "invalidName",
     ]);
   });
 });

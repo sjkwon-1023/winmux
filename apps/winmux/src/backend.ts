@@ -145,6 +145,26 @@ export function fsReadChunk(
   return invoke<ArrayBuffer>("fs_read_chunk", { distro, path, offset, len });
 }
 
+// --- 워크스페이스 폴더 선택 --------------------------------------------------
+
+/** pick_workspace_folder 응답 — DTO 필드명은 글루 관례(snake_case) 그대로다. */
+export interface PickedFolder {
+  /** 워크스페이스 rootPath 로 그대로 쓰는 리눅스 절대 경로. */
+  linux_path: string;
+  /** \\wsl.localhost UNC 를 골랐을 때의 배포판. 드라이브 경로(/mnt/c/...)면 null
+   *  이고, 그때는 백엔드의 기존 기본 배포판 해석을 탄다. */
+  distro: string | null;
+  /** 이름 기본값 — 고른 폴더의 마지막 세그먼트. */
+  name: string;
+}
+
+/** Windows 네이티브 폴더 선택 대화상자를 연다. **취소는 null** (에러가 아니다).
+ *  리눅스 경로로 되돌릴 수 없는 선택(네트워크 UNC 등)과 Windows 아닌 dev 실행은
+ *  reject 된다 — 호출자가 상태 라인에 표시한다. */
+export function pickWorkspaceFolder(): Promise<PickedFolder | null> {
+  return invoke<PickedFolder | null>("pick_workspace_folder");
+}
+
 /** state-changed 구독 헬퍼 — 변이마다 전체 스냅샷(revision 포함)이 온다.
  *  stale 판정(revision 가드)은 store 몫이다. */
 export function onStateChanged(

@@ -58,6 +58,15 @@ pub enum Command {
     CloseWorkspace {
         workspace: WorkspaceId,
     },
+    /// 워크스페이스 이름만 바꾼다 (사이드바 인라인 편집 — F2). `name` 이 비어
+    /// 있거나 공백뿐이면 [`CommandError::InvalidName`] — 이름은 사이드바에서
+    /// 워크스페이스를 식별하는 유일한 표시라 빈 카드를 만들지 않는다. 그 외의
+    /// 다듬기(앞뒤 공백 제거)는 하지 않는다: 코어는 받은 값을 그대로 보관하고
+    /// (CreateWorkspace 와 동일), 표시용 정규화는 입력 UI 몫이다.
+    RenameWorkspace {
+        workspace: WorkspaceId,
+        name: String,
+    },
     /// 소속 워크스페이스의 active_pane 을 바꾼다. active_workspace 는 바꾸지
     /// 않는다 — 워크스페이스 전환은 SwitchWorkspace 로 명시한다 (명령 직교성).
     FocusPane {
@@ -221,6 +230,9 @@ pub enum CommandError {
     /// SetViewerScroll 의 scroll_top 이 finite·0 이상이 아니다 (InvalidRatio 와
     /// 같은 loud-fail 방침).
     InvalidScroll { value: f64 },
+    /// 이름 값이 불량하다 — RenameWorkspace 의 빈/공백뿐인 이름. 경로가 아니므로
+    /// InvalidPath 를 재사용하지 않는다 (사유 문자열을 그대로 싣는 형태는 동일).
+    InvalidName { message: String },
 }
 
 impl fmt::Display for CommandError {
@@ -252,6 +264,9 @@ impl fmt::Display for CommandError {
                     f,
                     "invalid scroll offset {value}: must be finite and >= 0"
                 )
+            }
+            CommandError::InvalidName { message } => {
+                write!(f, "invalid name: {message}")
             }
         }
     }
@@ -704,6 +719,24 @@ impl Dispatcher {
                         clear_visible_unread(shown);
                     }
                 }
+                Ok(CommandOutput::Done)
+            }
+
+            Command::RenameWorkspace { workspace, name } => {
+                // 값 검증을 대상 탐색보다 먼저 (ResizeSplit·NavigateFolder 와 같은
+                // 순서) — 실패 시 상태·revision 불변.
+                if name.trim().is_empty() {
+                    return Err(CommandError::InvalidName {
+                        message: "workspace name must not be empty or whitespace only".to_owned(),
+                    });
+                }
+                let ws = self
+                    .state
+                    .workspace_mut(workspace)
+                    .ok_or_else(|| unknown("workspace", workspace.0))?;
+                // 바꾸는 것은 워크스페이스 이름뿐이다 — 탭 제목(OSC 2 소유)은
+                // 건드리지 않는다.
+                ws.name = name;
                 Ok(CommandOutput::Done)
             }
 
@@ -2006,6 +2039,90 @@ mod tests {
         d.dispatch(Command::CloseWorkspace { workspace: ws3 })
             .unwrap();
         assert_eq!(d.state().active_workspace, Some(ws1));
+    }
+
+    #[test]
+    fn rename_workspace_updates_only_the_name() {
+        let (mut d, _host) = dispatcher();
+        let (ws, pane) = create_ws(&mut d, "one");
+        let (tab, _session) = create_terminal_tab(&mut d, pane);
+        let rev = d.state().revision;
+
+        d.dispatch(Command::RenameWorkspace {
+            workspace: ws,
+            name: "renamed".into(),
+        })
+        .unwrap();
+
+        assert_eq!(d.state().workspace(ws).unwrap().name, "renamed");
+        assert_eq!(d.state().revision, rev + 1);
+        // 탭 제목은 워크스페이스 이름과 별개 (OSC 2 소유).
+        assert_eq!(tab_view(&d, tab).title, "Terminal");
+        // 활성 워크스페이스도 그대로 — 이름 변경은 전환이 아니다.
+        assert_eq!(d.state().active_workspace, Some(ws));
+    }
+
+    #[test]
+    fn rename_workspace_reaches_inactive_workspace() {
+        let (mut d, _host) = dispatcher();
+        let (ws1, _) = create_ws(&mut d, "one");
+        let (ws2, _) = create_ws(&mut d, "two");
+        assert_eq!(d.state().active_workspace, Some(ws2));
+
+        d.dispatch(Command::RenameWorkspace {
+            workspace: ws1,
+            name: "background".into(),
+        })
+        .unwrap();
+
+        assert_eq!(d.state().workspace(ws1).unwrap().name, "background");
+        assert_eq!(d.state().workspace(ws2).unwrap().name, "two");
+        assert_eq!(d.state().active_workspace, Some(ws2));
+    }
+
+    #[test]
+    fn rename_workspace_rejects_blank_names_without_state_change() {
+        let (mut d, _host) = dispatcher();
+        let (ws, _pane) = create_ws(&mut d, "one");
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        for name in ["", " ", "\t\n  "] {
+            let err = d
+                .dispatch(Command::RenameWorkspace {
+                    workspace: ws,
+                    name: name.into(),
+                })
+                .unwrap_err();
+            assert!(
+                matches!(err, CommandError::InvalidName { .. }),
+                "{name:?} → {err:?}"
+            );
+        }
+        // 미지 워크스페이스는 UnknownTarget (검증은 이름이 먼저).
+        let err = d
+            .dispatch(Command::RenameWorkspace {
+                workspace: WorkspaceId(999),
+                name: "x".into(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, CommandError::UnknownTarget { .. }), "{err:?}");
+
+        // 실패 dispatch 는 상태·revision 을 건드리지 않는다.
+        assert_eq!(serde_json::to_value(d.state()).unwrap(), before);
+    }
+
+    #[test]
+    fn rename_workspace_keeps_the_given_name_verbatim() {
+        // 앞뒤 공백 다듬기는 코어의 일이 아니다 (입력 UI 몫) — 공백을 **포함한**
+        // 이름은 정상 값이다.
+        let (mut d, _host) = dispatcher();
+        let (ws, _pane) = create_ws(&mut d, "one");
+        d.dispatch(Command::RenameWorkspace {
+            workspace: ws,
+            name: " my  project ".into(),
+        })
+        .unwrap();
+        assert_eq!(d.state().workspace(ws).unwrap().name, " my  project ");
     }
 
     #[test]

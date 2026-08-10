@@ -15,6 +15,10 @@
     { "type": "invalidRatio", "ratio": 1.5 },
     { "type": "kindMismatch", "tab": 7 },
     { "type": "invalidPath", "message": "path must be absolute: \"code/winmux\"" },
-    { "type": "invalidScroll", "value": -1.0 }
+    { "type": "invalidScroll", "value": -1.0 },
+    {
+      "type": "invalidName",
+      "message": "workspace name must not be empty or whitespace only"
+    }
   ]
 }

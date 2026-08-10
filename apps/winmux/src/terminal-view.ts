@@ -25,9 +25,12 @@
 // - Ctrl+V, Ctrl+Shift+V, Shift+Insert: 붙여넣기 (클립보드 → term.paste 단일 경로)
 // - Ctrl+C·Ctrl+Shift+C·Ctrl+Insert (선택 있을 때만): 복사. 선택 없는 Ctrl+C 는
 //   그대로 SIGINT.
+// - Shift+Enter: ESC CR 재작성 (Claude Code 줄바꿈 관례 — 아래 핸들러 주석).
 // - Esc 는 여기서 가로채지 않는다 — 단 **send-mode(전달 대상 선택) 활성 중에만**
 //   workspace-view 의 window keydown capture 가 취소용으로 선점한다 (17단계,
 //   계획 v2 3장 가로채기 목록의 의도적 확장). 평시 Esc 는 그대로 PTY 로 간다.
+//   (현재 send-mode 는 UI 진입점이 없어 휴면이라 이 선점은 실제로 일어나지
+//   않는다 — keys.ts 가로채기 표 참조.)
 //
 // 세션 수명은 dispatcher(CloseTab/ClosePane/CloseWorkspace) 소유다 — dispose 는
 // 뷰만 해제하고 세션을 죽이지 않는다.
@@ -136,7 +139,12 @@ export class TerminalView {
   }
 
   /** 현재 선택 텍스트 — 없으면 빈 문자열 (17단계 전달 소스 캡처).
-   *  무선택 에러 판정은 호출측(pane-view) 몫이다. */
+   *  무선택 에러 판정은 호출측(pane-view) 몫이다.
+   *
+   *  이 메서드와 아래 4개는 pane 간 텍스트 전달(send-mode)의 터미널 측 표면이다.
+   *  **현재 휴면 상태다** — 헤더의 ⤷/⤷⏎ 버튼을 뺀 뒤로 arm 진입점이 UI 에 없어
+   *  아무도 이 경로를 부르지 않는다. 차기 agent-facing 채널이 여기에 재배선될
+   *  예정이라 구현을 그대로 둔다 (pane-view 의 armSend 주석 참조). */
   getSelection(): string {
     return this.term.getSelection();
   }
@@ -323,10 +331,23 @@ export class TerminalView {
    *  붙여넣기는 반드시 preventDefault 로 네이티브 paste 를 막고 클립보드 →
    *  term.paste() 단일 경로로 보낸다 — xterm 기본 처리(\x16 전송)와 네이티브
    *  paste 가 겹치면 무반응 또는 이중 붙여넣기가 된다. 복사는 선택이 있을 때만
-   *  가로채고, 선택 없는 Ctrl+C 는 SIGINT 로 통과시킨다. */
+   *  가로채고, 선택 없는 Ctrl+C 는 SIGINT 로 통과시킨다.
+   *  여기에 Shift+Enter 재작성도 함께 산다 (아래 분기 주석 — 가로채기 목록은
+   *  keys.ts 상단 표가 정본이다). */
   private installCopyPasteKeys(): void {
     this.term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown") return true;
+      // Shift+Enter → ESC CR("\x1b\r") 재작성. 터미널 프로토콜에는 Enter 와
+      // Shift+Enter 를 구분할 방법이 없어 둘 다 CR 로 나가므로, Claude Code 는
+      // 줄바꿈 삽입을 별도 시퀀스로 받는다 — 그 관례가 ESC CR 이고, Claude Code
+      // 의 /terminal-setup 이 VS Code·iTerm2 에 심는 키 매핑과 같은 것을 여기서
+      // 터미널 자체가 제공한다. plain Enter 는 건드리지 않으므로 vim·셸 등 일반
+      // 앱의 개행·실행은 그대로다 (Shift+Enter 를 따로 쓰는 앱은 사실상 없다).
+      if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+        ev.preventDefault();
+        this.enqueueWrite("\x1b\r");
+        return false; // xterm 기본 CR 전송 차단
+      }
       if (ev.key === "Insert") {
         // Windows 고전 조합 — 터미널 앱과 충돌하지 않는다.
         if (ev.shiftKey && !ev.ctrlKey && !ev.altKey) {

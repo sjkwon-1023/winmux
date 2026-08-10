@@ -1,5 +1,5 @@
 // 워크스페이스 사이드바 (13단계 D3·D4) — 카드 리스트 + 하단 "+ New workspace"
-// 인라인 폼.
+// 버튼.
 //
 // 렌더 전략 (18단계 B-6 — 카드 id 키잉 reconcile): reconcilePlan 의 판정대로
 // skip(무변경, DOM 무접촉) / patch(카드 노드 유지 + 텍스트·클래스만 갱신) /
@@ -13,25 +13,29 @@
 // 무관 알림 하나로도 뚫린다 — 그래서 스킵 가드는 skip 판정으로만 남기고, 값이
 // 변한 경우의 기본 경로를 in-place 패치로 바꾼다.
 //
-// 하단 폼은 카드 리스트와 분리된 고정 DOM 이라 어느 판정에서도 재조립 대상이
-// 아니다 — 입력 중 스냅샷이 와도 폼 상태가 날아가지 않는다.
-//
-// 폼 입력은 표준 DOM <input> 이다 — 키 가로채기를 하지 않는다. 폼에 포커스가
-// 있는 동안 키 입력은 xterm 포커스 밖이라 터미널로 새지 않는다. 전역 캡처
-// (keys.ts 가로채기 목록 + main.ts 의 Ctrl+Shift+R 리로드)는 폼 포커스 중에도
-// 그대로 동작하지만 전부 modifier 조합이라 이름·경로 타이핑과 충돌하지 않는다.
-//
-// 폼 열기는 하단 버튼 클릭 외에 Ctrl+Shift+N 으로도 들어온다 — main.ts 글루가
-// focusNewWorkspace() 를 부른다 (dispatch 가 아닌 유일한 키 액션).
-//
 // 상호작용 (계획 D4):
 // - 카드 클릭 = SwitchWorkspace (이미 활성이면 no-op 스킵 — 무변경 revision 잡음 방지).
 // - × = CloseWorkspace. 실행 중인 터미널 세션이 1개라도 있으면 confirm() 을
 //   거친다 — 그 세션들을 죽이는 파괴적 동작이다. 판정은 렌더 캐시가 아니라 클릭
 //   시점의 최신 스냅샷으로 한다 (카드 DOM 이 스킵으로 오래됐을 수 있다).
-// - 제출 = CreateWorkspace { tab: terminal } 원자 생성 (계획 13-D1) — 빈
-//   워크스페이스 프레임 없이 터미널까지 한 번에 뜬다. 성공 시 폼을 닫고,
-//   실패는 dispatchUI 가 상태 라인에 표면화하므로 폼을 유지해 재시도하게 한다.
+// - "+ New workspace" = 폴더 선택 대화상자 (onNewWorkspace 콜백 — 실제 대화상자
+//   호출과 CreateWorkspace dispatch 는 main.ts 글루가 한다. 같은 흐름이
+//   Ctrl+Shift+N 으로도 들어오므로 구현을 한곳에 둔다). 이름·경로·배포판을 손으로
+//   치던 인라인 폼은 없앴다 — 경로는 대화상자가, 이름은 폴더명이 정한다.
+// - F2 = 활성 카드 이름 인라인 편집 (beginRename — main.ts 글루가 부른다).
+//   Enter 확정 = RenameWorkspace dispatch, Esc·blur = 취소.
+//
+// **편집 상태 가드**: 편집 중인 카드는 patch 판정에서 건너뛴다 — 패치가 이름
+// 텍스트를 덮어써도 입력값과 어긋나고, 무엇보다 입력 중 DOM 을 흔들면 IME
+// 조합·커서 위치가 깨진다. 그동안 밀린 갱신은 편집 종료 시 한 번에 만회한다
+// (stopEditing). 멤버십·순서가 바뀌는 rebuild 는 카드 노드 자체가 사라지므로
+// 편집을 취소한다.
+//
+// 편집 입력은 표준 DOM <input> 이다 — 키 가로채기를 하지 않는다. 입력에 포커스가
+// 있는 동안 키 입력은 xterm 포커스 밖이라 터미널로 새지 않는다. 전역 캡처
+// (keys.ts 가로채기 목록 + main.ts 의 Ctrl+Shift+R 리로드)는 편집 중에도 그대로
+// 동작하지만 F2 를 뺀 나머지가 전부 modifier 조합이라 이름 타이핑과 충돌하지
+// 않는다 (편집 중 F2 는 편집을 다시 시작할 뿐이다).
 
 import { shortcutLabel } from "./keys";
 import { hasRunningTerminals, reconcilePlan, sameCard, sidebarModel } from "./sidebar-model";
@@ -43,10 +47,13 @@ type DispatchFn = (cmd: Command) => Promise<CommandOutput | null>;
 
 /** 카드 1개의 DOM 노드 묶음 — in-place 패치 대상. model 은 이 카드가 지금 그리고
  *  있는 모델로, 클릭 핸들러가 stale 클로저 대신 여기서 최신 값을 읽는다.
- *  3줄 구성: head(이름 + unread dot + ×) / status(상태 텍스트 + 메시지) / path. */
+ *  3줄 구성: head(이름 | 이름 편집 입력 + unread dot + ×) / status(상태 텍스트 +
+ *  메시지) / path. */
 interface CardNodes {
   root: HTMLElement;
   name: HTMLSpanElement;
+  /** 이름 인라인 편집 입력 — 평시 hidden, F2 편집 중에만 name 과 자리를 바꾼다. */
+  rename: HTMLInputElement;
   dot: HTMLSpanElement;
   status: HTMLDivElement;
   path: HTMLDivElement;
@@ -69,21 +76,20 @@ function statusText(model: WorkspaceCardModel): string {
 
 export class Sidebar {
   private readonly cardsEl: HTMLDivElement;
-  private readonly formEl: HTMLFormElement;
-  private readonly nameInput: HTMLInputElement;
-  private readonly rootPathInput: HTMLInputElement;
-  private readonly distroInput: HTMLInputElement;
   private lastSnapshot: StateSnapshot | null = null;
   /** 직전 렌더의 카드 모델 (첫 렌더 전 null) — reconcilePlan 의 좌변 (파일 상단). */
   private lastCards: WorkspaceCardModel[] | null = null;
   /** 현재 화면에 붙어 있는 카드 노드 — workspace id 키잉, patch 판정의 대상. */
   private readonly cardNodes = new Map<WorkspaceId, CardNodes>();
-  /** 제출 in-flight 가드 — invoke 대기 중 중복 제출 방지. */
-  private submitting = false;
+  /** 이름 인라인 편집 중인 워크스페이스 (없으면 null) — 편집 상태 가드의 주체. */
+  private editing: WorkspaceId | null = null;
 
   constructor(
     rootEl: HTMLElement,
     private readonly dispatch: DispatchFn,
+    /** "+ New workspace" 버튼 — 폴더 선택 대화상자 흐름 (main.ts 글루 소유,
+     *  Ctrl+Shift+N 과 같은 구현을 탄다). */
+    private readonly onNewWorkspace: () => void,
   ) {
     this.cardsEl = document.createElement("div");
     this.cardsEl.className = "sidebar-cards";
@@ -96,33 +102,10 @@ export class Sidebar {
     newBtn.className = "sidebar-new";
     newBtn.textContent = "+ New workspace";
     // 단축키 표기는 keys.ts 의 shortcutLabel 단일 소스에서 받는다 (표류 방지).
-    newBtn.title = `New workspace (${shortcutLabel("newWorkspace")})`;
+    newBtn.title = `New workspace — pick a folder (${shortcutLabel("newWorkspace")})`;
+    newBtn.addEventListener("click", () => this.onNewWorkspace());
 
-    this.nameInput = this.textInput("name");
-    this.nameInput.required = true;
-    this.rootPathInput = this.textInput("/home/<user>/project (optional)");
-    this.distroInput = this.textInput("WSL distro (optional)");
-
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.className = "sidebar-form-submit";
-    submit.textContent = "Create";
-
-    this.formEl = document.createElement("form");
-    this.formEl.className = "sidebar-form";
-    this.formEl.hidden = true;
-    this.formEl.append(this.nameInput, this.rootPathInput, this.distroInput, submit);
-    this.formEl.addEventListener("submit", (ev) => {
-      ev.preventDefault(); // 페이지 네비게이션 방지 — dispatch 로만 제출한다
-      void this.submitNew();
-    });
-
-    newBtn.addEventListener("click", () => {
-      this.formEl.hidden = !this.formEl.hidden;
-      if (!this.formEl.hidden) this.nameInput.focus();
-    });
-
-    footer.append(newBtn, this.formEl);
+    footer.append(newBtn);
     rootEl.append(this.cardsEl, footer);
   }
 
@@ -134,6 +117,9 @@ export class Sidebar {
     const plan = reconcilePlan(prev, model);
     if (plan === "skip") return;
     if (plan === "rebuild") {
+      // 카드 노드가 통째로 갈리므로 편집 중이던 입력도 사라진다 — 상태만 정리해
+      // 편집 가드가 사라진 노드를 가리키지 않게 한다 (파일 상단 편집 상태 가드).
+      this.editing = null;
       this.cardNodes.clear();
       const nodes = model.map((m) => this.card(m));
       for (const n of nodes) this.cardNodes.set(n.model.workspace, n);
@@ -143,6 +129,8 @@ export class Sidebar {
       model.forEach((next, i) => {
         const before = prev?.[i];
         if (before !== undefined && sameCard(before, next)) return;
+        // 편집 중인 카드는 건드리지 않는다 — 밀린 갱신은 stopEditing 이 만회한다.
+        if (this.editing === next.workspace) return;
         const nodes = this.cardNodes.get(next.workspace);
         if (nodes !== undefined) this.applyCard(nodes, next);
       });
@@ -150,22 +138,63 @@ export class Sidebar {
     this.lastCards = model;
   }
 
-  /** 새 워크스페이스 폼 열기 + name 입력 포커스 (Ctrl+Shift+N — main.ts 글루가
-   *  부른다). 버튼 클릭이 토글인 것과 달리 여기는 항상 여는 방향이다: 단축키를
-   *  다시 눌러 폼이 닫히면 "이름을 치려다 폼이 사라지는" 동작이 된다. */
-  focusNewWorkspace(): void {
-    this.formEl.hidden = false;
-    this.nameInput.focus();
-    // 이미 열려 있고 값이 남아 있는 경우를 위해 선택까지 해 둔다 — 바로 덮어쓸
-    // 수 있다 (폼은 성공 제출 때만 reset 되므로 실패한 입력이 남아 있을 수 있다).
-    this.nameInput.select();
+  /** 활성 워크스페이스 카드의 이름을 인라인 편집으로 바꾼다 (F2 — main.ts 글루가
+   *  부른다). 활성 워크스페이스가 없거나(빈 상태) 그 카드가 아직 없으면 조용한
+   *  no-op 이다. 이미 편집 중이면 값을 다시 채워 재시작한다. */
+  beginRename(): void {
+    const workspace = this.lastSnapshot?.state.activeWorkspace ?? null;
+    if (workspace === null) return;
+    const nodes = this.cardNodes.get(workspace);
+    if (nodes === undefined) return;
+    this.stopEditing(); // 다른 카드를 편집 중이었을 수 있다 (편집 중 워크스페이스 전환)
+    this.editing = workspace;
+    nodes.rename.value = nodes.model.name;
+    nodes.name.hidden = true;
+    nodes.rename.hidden = false;
+    nodes.rename.focus();
+    nodes.rename.select();
   }
 
-  private textInput(placeholder: string): HTMLInputElement {
+  /** 편집 확정 (Enter) — 다듬은 이름을 RenameWorkspace 로 보낸다. 빈/공백뿐인
+   *  값은 코어가 거부하는 값이라 IPC 왕복 대신 편집을 유지하고, 무변경 이름은
+   *  보내지 않는다 (카드 클릭의 "이미 활성이면 no-op" 과 같은 규칙). */
+  private commitRename(nodes: CardNodes): void {
+    const name = nodes.rename.value.trim();
+    if (name.length === 0) {
+      nodes.rename.focus();
+      return;
+    }
+    const { workspace, name: current } = nodes.model;
+    this.stopEditing();
+    if (name === current) return;
+    void this.dispatch({ type: "renameWorkspace", workspace, name });
+  }
+
+  /** 편집 종료 — 입력을 접고 이름 표시를 되돌린다. 편집 중이 아니면 no-op 이라
+   *  확정·취소·blur 가 어떤 순서로 겹쳐도 안전하다. */
+  private stopEditing(): void {
+    const workspace = this.editing;
+    if (workspace === null) return;
+    // 먼저 상태를 내린다 — 아래 hidden 대입이 blur 를 유발해 여기로 재진입할 수
+    // 있고, 그때 두 번째 호출은 no-op 이어야 한다.
+    this.editing = null;
+    const nodes = this.cardNodes.get(workspace);
+    if (nodes === undefined) return;
+    nodes.rename.hidden = true;
+    nodes.name.hidden = false;
+    // 편집 중 스킵된 패치를 여기서 만회한다 — 그 스냅샷의 sameCard 판정은 이미
+    // 지나갔으므로 다음 렌더가 저절로 고쳐 주지 않는다.
+    const latest = this.lastCards?.find((c) => c.workspace === workspace);
+    if (latest !== undefined) this.applyCard(nodes, latest);
+  }
+
+  /** 이름 편집 입력 — 카드 head 안에서 이름 span 과 자리를 바꾼다. */
+  private renameInput(): HTMLInputElement {
     const input = document.createElement("input");
     input.type = "text";
-    input.placeholder = placeholder;
-    // WebView 자동완성·자동교정이 경로/이름 입력을 방해하지 않게 끈다.
+    input.className = "ws-card-rename";
+    input.hidden = true;
+    // WebView 자동완성·자동교정이 이름 입력을 방해하지 않게 끈다.
     input.autocomplete = "off";
     input.spellcheck = false;
     return input;
@@ -184,6 +213,23 @@ export class Sidebar {
     const name = document.createElement("span");
     name.className = "ws-card-name";
 
+    const rename = this.renameInput();
+    rename.addEventListener("keydown", (ev) => {
+      // 편집 중의 키는 이 입력 소유다 — 위로 새어 카드 클릭·전역 판정에 닿지
+      // 않게 막는다 (전역 캡처 리스너는 이보다 먼저 도는 별개 경로다).
+      if (ev.key === "Enter") {
+        ev.stopPropagation();
+        this.commitRename(nodes);
+      } else if (ev.key === "Escape") {
+        ev.stopPropagation();
+        this.stopEditing();
+      }
+    });
+    // 포커스를 잃으면 취소한다 — 확정은 Enter 뿐이다. 취소로 두는 이유: 다른 곳을
+    // 클릭한 사용자가 이름 변경을 의도했다고 볼 수 없고, 편집 상태가 남으면 그
+    // 카드의 패치가 영영 스킵된다.
+    rename.addEventListener("blur", () => this.stopEditing());
+
     // 집계 unread dot — 워크스페이스 안 어느 탭이든 미확인 알림이 있으면 표시.
     const dot = document.createElement("span");
     dot.className = "ws-card-dot";
@@ -200,7 +246,7 @@ export class Sidebar {
       this.onClose(model.workspace);
     });
 
-    head.append(name, dot, close);
+    head.append(name, rename, dot, close);
 
     // 상태 줄 — 텍스트 상태 + 메시지 첫 줄. 상태는 항상 있으므로 이 줄은 감추지
     // 않는다 (경로 줄과 달리 hidden 토글이 없다).
@@ -212,10 +258,12 @@ export class Sidebar {
 
     el.append(head, status, path);
 
-    const nodes: CardNodes = { root: el, name, dot, status, path, model };
+    const nodes: CardNodes = { root: el, name, rename, dot, status, path, model };
     this.applyCard(nodes, model);
 
     el.addEventListener("click", () => {
+      // 편집 중 카드 안의 클릭은 입력 조작이다 — 전환을 보내지 않는다.
+      if (this.editing === nodes.model.workspace) return;
       // 이미 활성이면 no-op 스킵 (계획 D4). in-place 패치로 카드가 살아남는 동안
       // 모델은 바뀌므로 클로저가 아니라 nodes.model 에서 최신 값을 읽는다.
       if (!nodes.model.active) {
@@ -258,32 +306,5 @@ export class Sidebar {
       if (!ok) return;
     }
     void this.dispatch({ type: "closeWorkspace", workspace });
-  }
-
-  private async submitNew(): Promise<void> {
-    if (this.submitting) return;
-    const name = this.nameInput.value.trim();
-    if (name.length === 0) {
-      // required 속성이 빈 값은 막지만 공백뿐인 값은 통과시킨다 — 여기서 거른다.
-      this.nameInput.focus();
-      return;
-    }
-    const rootPath = this.rootPathInput.value.trim();
-    const distro = this.distroInput.value.trim();
-    this.submitting = true;
-    try {
-      const out = await this.dispatch({
-        type: "createWorkspace",
-        name,
-        rootPath: rootPath.length === 0 ? null : rootPath,
-        distro: distro.length === 0 ? null : distro,
-        tab: { type: "terminal", cwd: null },
-      });
-      if (out === null) return; // 실패 — 상태 라인에 표면화됨, 폼 유지 (파일 상단)
-      this.formEl.hidden = true;
-      this.formEl.reset();
-    } finally {
-      this.submitting = false;
-    }
   }
 }

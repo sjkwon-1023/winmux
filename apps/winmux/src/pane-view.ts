@@ -19,7 +19,19 @@
 // send-mode(17단계): 같은 mousedown capture 가 전달 대상 선택 모드 활성 중에는
 // FocusPane 대신 대상 확정(resolve) 경로로 분기한다 — 이때만 예외적으로
 // preventDefault + stopPropagation 한다 (제스처가 순수한 대상 지정이므로 xterm
-// 포커스·선택 개입을 막는다). 소스 캡처는 헤더의 ⤷/⤷⏎ 아이콘이 담당한다.
+// 포커스·선택 개입을 막는다). 소스 캡처는 armSend 가 담당한다.
+//
+// **send-mode 는 현재 휴면이다**: 소스 캡처를 걸던 헤더의 ⤷/⤷⏎ 버튼 2개를 뺐고
+// 다른 arm 진입점을 아직 두지 않아, isActive() 가 언제나 false 라 위 분기도
+// armSend 도 실제로는 타지 않는다. 상태 머신(send-mode.ts)·전달 실행
+// (workspace-view.resolveSend)·터미널 표면(terminal-view)까지 경로 전체를 그대로
+// 남겨 둔 것은 의도다 — 차기 agent-facing 채널이 이 경로에 재배선될 예정이라
+// 지우고 다시 짜지 않는다. 그때 붙일 것은 arm 진입점 하나뿐이다.
+//
+// 헤더 아이콘은 인라인 SVG 다 (폴더·분할 2종) — 유니코드 기호(▤/◫/⊟)는 폰트마다
+// 모양이 갈리고 "무엇을 하는 버튼인지"가 자명하지 않아 그림으로 바꿨다. 마크업은
+// 아래 상수 3개가 전량이고, 전부 이 파일에 박힌 신뢰 소스다 (파일·모델·네트워크
+// 발 문자열이 innerHTML 로 들어오는 경로는 없다 — SVG_* 주석 참조).
 //
 // 탭바 렌더(18단계 B-7): tabStripPlan 판정대로 skip(DOM 무접촉) / patch(탭 버튼
 // 노드를 유지한 채 제목·dot·클래스만 갱신) / rebuild(멤버십·순서 변화 → 재조립)
@@ -79,7 +91,10 @@ export interface ViewerRegistry {
 
 /** send-mode 접근 계약 (17단계) — 소유자는 workspace-view 다. pane-view 는
  *  소스 캡처(arm)·대상 확정(resolve)·활성 판정(isActive)·캡처 실패 표면화
- *  (flashError)만 부른다. 상태 머신 자체는 send-mode.ts (순수). */
+ *  (flashError)만 부른다. 상태 머신 자체는 send-mode.ts (순수).
+ *
+ *  arm 진입점이 UI 에서 빠져 계약 전체가 휴면이다 (파일 상단 주석) — 구현은
+ *  살아 있고 부르는 쪽만 없다. */
 export interface SendController {
   /** 대상 선택 모드 활성 여부 — mousedown 분기 판정. */
   isActive(): boolean;
@@ -103,11 +118,28 @@ interface TabNodes {
 }
 
 /** 버튼 툴팁 — "<기능> (<단축키>)". 단축키 문자열은 keys.ts 의 shortcutLabel
- *  단일 소스에서만 받는다 (키를 바꾸면 툴팁이 따라오도록 — 표류 방지). 단축키가
- *  없는 버튼(⤷ 류)은 이 헬퍼를 쓰지 않고 기능 설명만 단다. */
+ *  단일 소스에서만 받는다 (키를 바꾸면 툴팁이 따라오도록 — 표류 방지). 헤더
+ *  버튼은 현재 전부 단축키를 가지므로 예외 없이 이 헬퍼를 쓴다. */
 function withShortcut(label: string, id: ShortcutId): string {
   return `${label} (${shortcutLabel(id)})`;
 }
+
+// ── 헤더 아이콘 SVG (신뢰 소스 상수) ─────────────────────────────────────
+// 이 3개 문자열은 이 모듈에 하드코딩된 리터럴이다 — **파일·모델·백엔드에서 온
+// 데이터가 아니다**. innerHTML 대입 지점(svgButton)이 받는 값은 오직 여기뿐이라
+// 주입 표면이 없다. 셋 다 같은 규약을 공유한다: viewBox 16×16, stroke 1.5,
+// currentColor(호버·비활성 색을 CSS 가 그대로 지배), fill 없음.
+// 분할 2종은 "사각형을 세로선/가로선으로 이등분" 한 쌍이라 어느 쪽이 좌우/상하
+// 인지 그림만으로 갈린다 (기존 ◫/⊟ 는 폰트에 따라 구분이 안 됐다).
+const SVG_ATTRS =
+  'viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+/** 폴더 — 탭(라벨) 달린 몸통 윤곽선. */
+const SVG_FOLDER = `<svg ${SVG_ATTRS}><path d="M2 12.5V3.5h4l1.5 2H14v7z"/></svg>`;
+/** 좌우 분할 — 사각형 + 세로 이등분선. */
+const SVG_SPLIT_LEFT_RIGHT = `<svg ${SVG_ATTRS}><rect x="2" y="2.75" width="12" height="10.5" rx="1"/><path d="M8 2.75v10.5"/></svg>`;
+/** 상하 분할 — 사각형 + 가로 이등분선 (위와 같은 규약의 페어). */
+const SVG_SPLIT_TOP_BOTTOM = `<svg ${SVG_ATTRS}><rect x="2" y="2.75" width="12" height="10.5" rx="1"/><path d="M2.75 8h10.5"/></svg>`;
 
 /** 값이 같으면 쓰지 않는 텍스트 대입 — textContent 재대입은 값이 같아도 자식
  *  텍스트 노드를 갈아치우므로, 무변경 갱신이 DOM 을 흔들지 않게 한다. */
@@ -151,6 +183,8 @@ export class PaneView {
     private readonly dispatch: DispatchFn,
     private readonly views: ViewRegistry,
     private readonly viewers: ViewerRegistry,
+    /** send-mode 접근 계약 — 현재 arm 진입점이 없어 휴면이다 (파일 상단 주석).
+     *  계약은 유지한다: 차기 agent-facing 채널이 여기에 재배선된다. */
     private readonly send: SendController,
   ) {
     this.root = document.createElement("div");
@@ -188,6 +222,8 @@ export class PaneView {
         // send-mode 대상 확정 (17단계 D2) — FocusPane 대신 resolve 경로. 이
         // 제스처는 순수한 대상 지정이므로 예외적으로 기본 동작·전파를 끊는다
         // (파일 상단 주석). 자기 자신 클릭 = 취소 판정은 send-mode 상태 머신 몫.
+        // 현재는 arm 진입점이 없어 isActive() 가 항상 false 라 이 분기는 죽어
+        // 있다 — 재배선 시 그대로 살아난다 (파일 상단 휴면 주석).
         if (this.send.isActive()) {
           ev.preventDefault();
           ev.stopPropagation();
@@ -228,7 +264,7 @@ export class PaneView {
       })),
       // 폴더 탐색 탭 (21단계) — path null 이면 워크스페이스 rootPath, 그것도
       // 없으면 "/" 로 코어가 해석한다 (terminal 의 cwd 와 대칭).
-      this.iconButton("▤", withShortcut("New folder browser tab", "newFolderTab"), () => ({
+      this.svgButton(SVG_FOLDER, withShortcut("New folder browser tab", "newFolderTab"), () => ({
         type: "createTab",
         pane: this.paneId,
         tab: { type: "folderBrowser", path: null },
@@ -236,45 +272,47 @@ export class PaneView {
       // 브라우저 탭 버튼(◎)은 여기 있었다 — 영구 disabled 라 자리만 차지해
       // 뺐다. v2 에서 기능과 함께 돌아온다.
 
-      // 패널 간 텍스트 전달 (17단계 D2) — "전달"과 "전달 후 실행"을 아이콘부터
-      // 분리한다 (실수 실행 방지, 계획 v2 8장). 단축키 미배정이라 툴팁은 기능
-      // 설명만 (대상 선택이 아직 마우스 제스처 — 키보드화는 v2 후보).
-      this.actionButton("⤷", "Send selection to another pane", () => this.armSend(false)),
-      this.actionButton("⤷⏎", "Send selection & run in another pane", () =>
-        this.armSend(true),
-      ),
+      // 전달 아이콘 2개(⤷ = 전달, ⤷⏎ = 전달 후 실행)도 여기 있었다 — 수동
+      // 마우스 제스처가 실사용 워크플로가 아니라 **버튼만** 뺐다. 뒤에 있던
+      // send-mode 경로(armSend → SendController → workspace-view.resolveSend)는
+      // 전부 그대로다 (파일 상단 휴면 주석) — 차기 agent-facing 채널이 arm 을
+      // 다시 부를 때 버튼 없이 살아난다.
+
       // 분할은 원자 SplitPane — 새 pane 에 terminal 탭까지 한 번에 생성한다
       // (계획 D5: 컴포지션 금지, 중간 스냅샷 1프레임 렌더 방지).
-      this.iconButton("◫", withShortcut("Split left/right", "splitLeftRight"), () => ({
-        type: "splitPane",
-        pane: this.paneId,
-        direction: "horizontal",
-        tab: { type: "terminal", cwd: null },
-      })),
-      this.iconButton("⊟", withShortcut("Split top/bottom", "splitTopBottom"), () => ({
-        type: "splitPane",
-        pane: this.paneId,
-        direction: "vertical",
-        tab: { type: "terminal", cwd: null },
-      })),
+      this.svgButton(
+        SVG_SPLIT_LEFT_RIGHT,
+        withShortcut("Split left/right", "splitLeftRight"),
+        () => ({
+          type: "splitPane",
+          pane: this.paneId,
+          direction: "horizontal",
+          tab: { type: "terminal", cwd: null },
+        }),
+      ),
+      this.svgButton(
+        SVG_SPLIT_TOP_BOTTOM,
+        withShortcut("Split top/bottom", "splitTopBottom"),
+        () => ({
+          type: "splitPane",
+          pane: this.paneId,
+          direction: "vertical",
+          tab: { type: "terminal", cwd: null },
+        }),
+      ),
     );
     return header;
   }
 
-  /** 콜백 실행 버튼 (17단계) — iconButton 은 Command dispatch 전용이라 별도:
-   *  send-mode arm 은 dispatch 가 아니라 로컬 상태 전이다. */
-  private actionButton(label: string, title: string, onClick: () => void): HTMLButtonElement {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = label;
-    btn.title = title;
-    btn.addEventListener("click", onClick);
-    return btn;
-  }
-
-  /** 전달 아이콘 클릭 (17단계 D2) — 이 pane 의 표시 중 터미널에서 선택 텍스트를
+  /** 전달 소스 캡처 (17단계 D2) — 이 pane 의 표시 중 터미널에서 선택 텍스트를
    *  캡처해 대상 선택 모드로 arm 한다. 캡처 불가(빈 pane·뷰어 탭·무선택)는 상태
-   *  라인 one-shot 에러로 표면화한다 — 조용한 no-op 금지. */
+   *  라인 one-shot 에러로 표면화한다 — 조용한 no-op 금지.
+   *
+   *  **호출자가 없다 (휴면)**: 이걸 부르던 헤더의 ⤷/⤷⏎ 버튼을 뺐고 다른 진입점을
+   *  아직 두지 않았다. 차기 agent-facing 채널이 붙일 지점이 정확히 여기라 구현을
+   *  남겨 둔다 (파일 상단 주석). 재배선은 이 메서드를 부르는 것으로 끝난다 —
+   *  아래 계층(SendController → send-mode.ts → workspace-view.resolveSend →
+   *  terminal-view.paste/submit)은 전부 온전하다. */
   private armSend(submit: boolean): void {
     const view = this.shown === null ? undefined : this.views.get(this.shown);
     if (view === undefined) {
@@ -287,6 +325,15 @@ export class PaneView {
       return;
     }
     this.send.arm(this.paneId, text, submit);
+  }
+
+  /** 아이콘 SVG 버튼 — 라벨이 텍스트가 아니라 마크업이라는 점만 iconButton 과
+   *  다르다. svg 인자는 이 모듈 상단의 SVG_* 상수만 받는다 (파일발 문자열이 아닌
+   *  신뢰 소스 — 상단 주석). */
+  private svgButton(svg: string, title: string, command: () => Command): HTMLButtonElement {
+    const btn = this.iconButton("", title, command);
+    btn.innerHTML = svg;
+    return btn;
   }
 
   private iconButton(label: string, title: string, command: () => Command): HTMLButtonElement {

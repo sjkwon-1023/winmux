@@ -73,7 +73,16 @@ body {
 /* ── 워크스페이스 사이드바 (13단계) ──────────────────────────────────── */
 
 #sidebar {
+  /* 폭 고정 — 카드 상태 줄의 텍스트 길이가 사이드바 폭을 밀지 못하게 못 박는다.
+     (재검증 발견: needs input 으로 바뀌며 상태 텍스트가 길어지면 사이드바가
+     넓어져 본문 전체가 리플로우돼 화면이 흔들렸다.) 원인은 flex 아이템의 자동
+     최소 크기다 — min-width:auto 가 nowrap 상태 줄의 min-content(=텍스트 전체
+     폭)로 잡혀 flex-basis 를 밀어낸다. min-width:0 으로 그 경로를 끊고 width 로
+     폭을 확정한다. 넘치는 텍스트는 카드 3줄 각각의 ellipsis 가 자르므로 어떤
+     길이에도 폭은 불변이다. */
   flex: 0 0 220px;
+  width: 220px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -124,6 +133,25 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* 이름 인라인 편집 입력 (F2) — 이름 span 과 같은 자리·같은 폭을 차지한다.
+   평시에는 sidebar.ts 가 hidden 으로 접어 둔다 (노드는 항상 존재). */
+.ws-card-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 2px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+}
+
+.ws-card-rename:focus {
+  outline: none;
 }
 
 /* 워크스페이스 집계 unread dot — 안의 어느 탭이든 미확인 알림이 있으면 표시.
@@ -201,52 +229,6 @@ body {
 
 .sidebar-new:hover {
   border-color: var(--accent);
-}
-
-/* 인라인 새 워크스페이스 폼 (13단계 D4) */
-.sidebar-form {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
-}
-
-/* display:flex 가 hidden 속성(UA display:none)을 이기지 않게 명시 복원 */
-.sidebar-form[hidden] {
-  display: none;
-}
-
-.sidebar-form input {
-  padding: 4px 6px;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  font-size: 12px;
-  font-family: monospace;
-}
-
-.sidebar-form input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.sidebar-form input::placeholder {
-  color: var(--fg-muted);
-}
-
-.sidebar-form-submit {
-  padding: 4px 6px;
-  background: var(--accent);
-  color: #ffffff;
-  border: none;
-  border-radius: 3px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.sidebar-form-submit:hover {
-  filter: brightness(1.15);
 }
 
 /* ── split tree (11단계) ─────────────────────────────────────────────
@@ -801,7 +783,9 @@ body {
 /* ── send-mode 대상 선택 (17단계) ──────────────────────────────────────
    workspace-view 가 #view 에 .send-mode 를 토글한다. pane 전체가 "클릭 = 대상
    확정"임을 커서(crosshair)와 hover 테두리로 최소 표시한다. 셀렉터에 #view id
-   가 들어가 xterm.css 의 cursor(text 등)보다 특이도가 높다 — !important 불요. */
+   가 들어가 xterm.css 의 cursor(text 등)보다 특이도가 높다 — !important 불요.
+   현재는 .send-mode 를 켜는 arm 진입점이 UI 에 없어 이 규칙들이 실제로 매치되지
+   않는다 (휴면 — pane-view.ts 상단 주석). 차기 agent-facing 채널이 재배선한다. */
 
 #view.send-mode .pane,
 #view.send-mode .pane * {

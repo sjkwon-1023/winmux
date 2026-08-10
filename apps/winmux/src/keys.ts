@@ -22,26 +22,39 @@
 // | `Ctrl+Shift+B` | 활성 pane 에 새 폴더 탐색 탭 | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+D` | 활성 pane 상하 분할 + 터미널 탭 | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+E` | 활성 pane 좌우 분할 + 터미널 탭 | keys.ts 판정 + main.ts window keydown capture |
-// | `Ctrl+Shift+N` | 사이드바 새 워크스페이스 이름 입력에 포커스 | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+Shift+N` | 새 워크스페이스 — Windows 폴더 선택 대화상자를 연다 | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+Shift+[` / `Ctrl+Shift+]` | 이전/다음 워크스페이스 (사이드바 순서, 끝에서 순환) | keys.ts 판정 + main.ts window keydown capture |
+// | `F2` | 활성 워크스페이스 이름 변경 (사이드바 카드 인라인 편집) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+R` | WebView 리로드 (F5 는 쓰지 않는다 — main.ts 주석 참조) | main.ts installReloadKey |
 // | `Ctrl+V` / `Ctrl+Shift+V` / `Shift+Insert` | 붙여넣기 (클립보드 → xterm paste) | terminal-view.ts customKeyEventHandler |
 // | `Ctrl+C` / `Ctrl+Shift+C` / `Ctrl+Insert` (선택 있을 때만) | 복사 — 선택 없는 `Ctrl+C` 는 SIGINT 로 통과 | terminal-view.ts customKeyEventHandler |
-// | `Esc` (send-mode 활성 중에만) | 전달 대상 선택 취소 — 평시 Esc 는 PTY 소유 | workspace-view.ts (모드 활성 중에만 설치) |
+// | `Shift+Enter` (터미널 내) | ESC CR 재작성 — Claude Code 줄바꿈 관례 | terminal-view.ts customKeyEventHandler |
+// | `Esc` (send-mode 활성 중에만 — **현재 UI 진입점 없음: 휴면**) | 전달 대상 선택 취소 — 평시 Esc 는 PTY 소유 | workspace-view.ts (모드 활성 중에만 설치) |
 // | `Ctrl+PgUp` / `Ctrl+PgDn` (textViewer 포커스 중에만) | 이전/다음 512KiB 윈도우 | text-view.ts 뷰 내부 keydown |
 // | `Ctrl+Home` / `Ctrl+End` (textViewer 포커스 중에만) | 처음/마지막 윈도우 | text-view.ts 뷰 내부 keydown |
 // | `PgUp` / `PgDn` (textViewer 포커스 중에만) | 행높이 배수 페이지 스크롤 | text-view.ts 뷰 내부 keydown |
 // | `↑↓ Home End PgUp PgDn Enter Backspace` (folderBrowser 포커스 중에만) | 목록 선택 이동·열기·상위 이동 | folder-view.ts 뷰 내부 keydown |
 //
-// modifier 규약: 앱 전역 단축키는 **전부 `Ctrl+Shift` 계열**이다. plain `Ctrl`
-// 조합은 셸 소유로 남긴다 — `Ctrl+W` 는 bash 의 단어 삭제, `Ctrl+D` 는 EOF,
-// `Ctrl+E` 는 행 끝 이동이라 뺏으면 터미널을 망가뜨린다. `Ctrl+Shift+C` ·
-// `Ctrl+Shift+V` 는 복사·붙여넣기 관례라 절대 배정하지 않고(terminal-view 소유),
-// `Ctrl+Shift+R` 은 리로드(main.ts 소유)라 여기서 판정하지 않는다.
+// modifier 규약: 앱 전역 단축키는 **`F2` 하나를 제외하고 전부 `Ctrl+Shift`
+// 계열**이다. plain `Ctrl` 조합은 셸 소유로 남긴다 — `Ctrl+W` 는 bash 의 단어
+// 삭제, `Ctrl+D` 는 EOF, `Ctrl+E` 는 행 끝 이동이라 뺏으면 터미널을 망가뜨린다.
+// `Ctrl+Shift+C` · `Ctrl+Shift+V` 는 복사·붙여넣기 관례라 절대 배정하지 않고
+// (terminal-view 소유), `Ctrl+Shift+R` 은 리로드(main.ts 소유)라 여기서 판정하지
+// 않는다.
+//
+// **`F2` 의 트레이드오프 (명시)**: 무수식 F2 는 터미널 앱이 실제로 쓰는 키다
+// (mc 의 Rename, 기능키 행을 쓰는 TUI) — 가로채면 그 앱들에 F2 가 영영 닿지
+// 않는다. 이 비용을 알고 받아들인 선택이다: "이름 변경 = F2" 는 데스크톱 전반의
+// 관례라 대체 키로는 발견되지 않고, F2 를 쓰는 TUI 는 F5 만큼 흔하지 않다.
+// F5 를 리로드로 쓰지 않은 판단(대체 키 Ctrl+Shift+R 가 있었다)과 결론이 갈리는
+// 자리라 여기 남긴다 — 이름 변경에는 동급의 관례 대체 키가 없다. 되돌린다면
+// 이 표와 CTRL_SHIFT_KEYS 를 함께 고치면 된다 (판정·표시 단일 소스).
 //
 // shift 규약: shift 를 받는 조합은 `Ctrl+Shift+Tab` 과 위 `Ctrl+Shift+<문자>`
-// 6종뿐이다. `Ctrl+Shift+1`·`Alt+Shift+←` 같은 변형은 판정 대상이 아니다(null) —
+// 8종뿐이다. `Ctrl+Shift+1`·`Alt+Shift+←` 같은 변형은 판정 대상이 아니다(null) —
 // shift 는 레이아웃에 따라 다른 문자를 만들 수 있어 보수적으로 목록에 명시된
-// 조합만 가로챈다.
+// 조합만 가로챈다. `[`·`]` 는 그 예외를 정면으로 만나는 자리라 표기 문자와
+// **shift 결과 문자**(`{`·`}`)를 둘 다 매칭한다 (아래 CTRL_SHIFT_KEYS 참조).
 
 import type { PaneId, SplitDirection, TabId, WorkspaceId } from "./types";
 
@@ -73,9 +86,14 @@ export type KeyAction =
   | { type: "newTab"; kind: "terminal" | "folderBrowser" }
   /** 활성 pane 분할 + 새 터미널 탭 (원자 SplitPane — 헤더 분할 아이콘과 동일). */
   | { type: "splitPane"; direction: SplitDirection }
-  /** 사이드바 새 워크스페이스 폼에 포커스 — 유일하게 dispatch 가 아닌 액션이다
-   *  (모델을 바꾸지 않고 UI 포커스만 옮긴다). */
-  | { type: "focusNewWorkspace" };
+  /** 사이드바 순서로 이전/다음 워크스페이스 (끝에서 순환) — 대상 해석은 글루. */
+  | { type: "cycleWorkspace"; delta: 1 | -1 }
+  /** Windows 폴더 선택 대화상자를 열어 새 워크스페이스를 만든다 — 대화상자
+   *  호출·dispatch 는 글루 몫이라 여기서는 액션 이름만 정한다. */
+  | { type: "openWorkspacePicker" }
+  /** 활성 워크스페이스 이름의 인라인 편집 시작 — dispatch 가 아닌 UI 액션이다
+   *  (편집 확정 시점에 글루가 renameWorkspace 를 보낸다). */
+  | { type: "renameWorkspace" };
 
 const ARROW_DIRS: Record<string, PaneDirection | undefined> = {
   ArrowUp: "up",
@@ -94,16 +112,25 @@ export type ShortcutId =
   | "newFolderTab"
   | "splitTopBottom"
   | "splitLeftRight"
-  | "newWorkspace";
+  | "newWorkspace"
+  | "prevWorkspace"
+  | "nextWorkspace";
 
 /** `Ctrl+Shift+<문자>` 단축키 표 (canonical) — 판정(keyAction)과 표시
  *  (shortcutLabel)가 같은 표를 읽으므로 버튼 툴팁이 실제 키와 어긋날 수 없다.
  *  letter 는 소문자 기준이고 매칭은 대소문자를 무시한다 (Shift 가 눌린 keydown 은
  *  `ev.key` 가 대문자로 온다).
  *
+ *  shifted 는 "그 키를 Shift 와 함께 누르면 브라우저가 주는 다른 문자"다 —
+ *  `[`·`]` 는 `ev.key` 가 `{`·`}` 로 오므로 둘 다 받아야 한다. 표기(라벨)는
+ *  언제나 letter 쪽이다.
+ *
  *  action 이 값이 아니라 팩토리인 이유: 호출자에게 표의 객체를 그대로 넘기면
  *  외부 변형이 표를 오염시킬 수 있어, 매 판정마다 새 객체를 만든다. */
-const CTRL_SHIFT_KEYS: Record<ShortcutId, { letter: string; action: () => KeyAction }> = {
+const CTRL_SHIFT_KEYS: Record<
+  ShortcutId,
+  { letter: string; shifted?: string; action: () => KeyAction }
+> = {
   closeTab: { letter: "w", action: () => ({ type: "closeTab" }) },
   newTerminalTab: { letter: "t", action: () => ({ type: "newTab", kind: "terminal" }) },
   newFolderTab: { letter: "b", action: () => ({ type: "newTab", kind: "folderBrowser" }) },
@@ -111,7 +138,17 @@ const CTRL_SHIFT_KEYS: Record<ShortcutId, { letter: string; action: () => KeyAct
   // "horizontal" = 가로 나열(좌|우). 헤더의 ⊟/◫ 아이콘과 같은 값을 보낸다.
   splitTopBottom: { letter: "d", action: () => ({ type: "splitPane", direction: "vertical" }) },
   splitLeftRight: { letter: "e", action: () => ({ type: "splitPane", direction: "horizontal" }) },
-  newWorkspace: { letter: "n", action: () => ({ type: "focusNewWorkspace" }) },
+  newWorkspace: { letter: "n", action: () => ({ type: "openWorkspacePicker" }) },
+  prevWorkspace: {
+    letter: "[",
+    shifted: "{",
+    action: () => ({ type: "cycleWorkspace", delta: -1 }),
+  },
+  nextWorkspace: {
+    letter: "]",
+    shifted: "}",
+    action: () => ({ type: "cycleWorkspace", delta: 1 }),
+  },
 };
 
 /** 버튼 툴팁에 붙일 단축키 표기 — 표시 문자열의 **단일 소스**다. UI 는 이 함수를
@@ -135,11 +172,15 @@ export function keyAction(spec: KeySpec): KeyAction | null {
     // 걸리지 않고 각자의 소유자에게 그대로 흘러간다.
     const letter = spec.key.toLowerCase();
     for (const def of Object.values(CTRL_SHIFT_KEYS)) {
-      if (def.letter === letter) return def.action();
+      if (def.letter === letter || def.shifted === letter) return def.action();
     }
   }
   // 여기부터는 shift 변형을 받지 않는다 (파일 상단 shift 규약).
   if (spec.shift) return null;
+  // F2 = 활성 워크스페이스 이름 변경 (무수식 — 파일 상단의 트레이드오프 참조).
+  if (spec.key === "F2" && !spec.ctrl && !spec.alt) {
+    return { type: "renameWorkspace" };
+  }
   if (spec.ctrl && !spec.alt && DIGIT_KEY.test(spec.key)) {
     return { type: "switchWorkspace", ordinal: Number(spec.key) };
   }
@@ -207,8 +248,26 @@ export function workspaceAtOrdinal(
 /** 탭 순환 대상 — tabs 는 pane 의 탭 순서, active 는 그 pane 의 활성 탭.
  *  끝에서 순환하고, 탭이 0~1개거나 active 가 목록에 없으면 null (no-op). */
 export function nextTab(tabs: TabId[], active: TabId | null, delta: 1 | -1): TabId | null {
-  if (tabs.length < 2 || active === null) return null;
-  const idx = tabs.indexOf(active);
+  return cycle(tabs, active, delta);
+}
+
+/** 워크스페이스 순환 대상 (`Ctrl+Shift+[` / `]`) — workspaces 는 사이드바 순서,
+ *  active 는 현재 활성 워크스페이스. 탭 순환과 같은 규칙이다: 끝에서 순환하고,
+ *  워크스페이스가 0~1개거나 active 가 목록에 없으면 null (조용한 no-op — 하나뿐인
+ *  워크스페이스로 "전환"해 무변경 revision 을 만들지 않는다). */
+export function nextWorkspace(
+  workspaces: WorkspaceId[],
+  active: WorkspaceId | null,
+  delta: 1 | -1,
+): WorkspaceId | null {
+  return cycle(workspaces, active, delta);
+}
+
+/** 안정 ID 목록의 순환 이웃 — nextTab·nextWorkspace 공통 구현 (같은 규칙이
+ *  두 벌로 갈라지지 않게 한다). */
+function cycle(ids: number[], active: number | null, delta: 1 | -1): number | null {
+  if (ids.length < 2 || active === null) return null;
+  const idx = ids.indexOf(active);
   if (idx < 0) return null;
-  return tabs[(idx + delta + tabs.length) % tabs.length];
+  return ids[(idx + delta + ids.length) % ids.length];
 }

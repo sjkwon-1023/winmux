@@ -72,24 +72,47 @@ function child(card: Element, selector: string): HTMLElement {
   return found;
 }
 
+/** 카드의 이름 편집 입력 (F2 대상). */
+function renameInput(card: Element): HTMLInputElement {
+  const found = card.querySelector<HTMLInputElement>(".ws-card-rename");
+  if (found === null) throw new Error("missing .ws-card-rename");
+  return found;
+}
+
+/** 편집 입력에 키를 하나 보낸다 — 실제 리스너(keydown)와 같은 경로. */
+function press(input: HTMLInputElement, key: string): void {
+  input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+}
+
 function mount(): {
   sidebar: Sidebar;
   cards: () => HTMLElement[];
   dispatched: Command[];
+  /** "+ New workspace" 콜백 호출 횟수 — 폴더 선택 흐름은 main.ts 소유라
+   *  사이드바는 콜백만 부른다. */
+  newWorkspaceCalls: () => number;
 } {
   const root = document.createElement("div");
   document.body.replaceChildren(root);
   const dispatched: Command[] = [];
-  const sidebar = new Sidebar(root, async (cmd) => {
-    dispatched.push(cmd);
-    return null;
-  });
+  let newWorkspaceCalls = 0;
+  const sidebar = new Sidebar(
+    root,
+    async (cmd) => {
+      dispatched.push(cmd);
+      return null;
+    },
+    () => {
+      newWorkspaceCalls += 1;
+    },
+  );
   const cardsEl = root.querySelector<HTMLElement>(".sidebar-cards");
   if (cardsEl === null) throw new Error("sidebar-cards not mounted");
   return {
     sidebar,
     cards: () => Array.from(cardsEl.querySelectorAll<HTMLElement>(".ws-card")),
     dispatched,
+    newWorkspaceCalls: () => newWorkspaceCalls,
   };
 }
 
@@ -204,7 +227,91 @@ describe("Sidebar rendering", () => {
   });
 });
 
+describe("Sidebar inline rename (F2)", () => {
+  it("commits with Enter, dispatching renameWorkspace for the active card", () => {
+    const { sidebar, cards, dispatched } = mount();
+    // ws 2 가 활성 — F2 는 활성 카드만 편집한다.
+    sidebar.render(snapshot(1, THREE, 2));
+    const card = cards()[1];
+    const name = child(card, ".ws-card-name");
+    const input = renameInput(card);
+    expect(input.hidden).toBe(true);
+
+    sidebar.beginRename();
+    expect(input.hidden).toBe(false);
+    expect(name.hidden).toBe(true);
+    expect(input.value).toBe("ws 2"); // 현재 이름이 채워진다
+
+    // 앞뒤 공백은 UI 가 다듬어 보낸다 (코어는 받은 값을 그대로 저장한다).
+    input.value = "  renamed  ";
+    press(input, "Enter");
+
+    expect(dispatched).toEqual([{ type: "renameWorkspace", workspace: 2, name: "renamed" }]);
+    // 확정하면 편집이 끝나고 카드가 원래 모습으로 돌아온다.
+    expect(input.hidden).toBe(true);
+    expect(name.hidden).toBe(false);
+  });
+
+  it("cancels with Escape and drops blank names without dispatching", () => {
+    const { sidebar, cards, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 2));
+    const card = cards()[1];
+    const input = renameInput(card);
+
+    sidebar.beginRename();
+    input.value = "typed but abandoned";
+    press(input, "Escape");
+    expect(input.hidden).toBe(true);
+    expect(child(card, ".ws-card-name").textContent).toBe("ws 2");
+    expect(dispatched).toEqual([]);
+
+    // 공백뿐인 이름은 코어가 거부하는 값 — 보내지 않고 편집을 유지한다.
+    sidebar.beginRename();
+    input.value = "   ";
+    press(input, "Enter");
+    expect(dispatched).toEqual([]);
+    expect(input.hidden).toBe(false);
+
+    // 이름이 그대로면 무변경 dispatch 도 보내지 않는다 (카드 클릭 규칙과 동일).
+    input.value = "ws 2";
+    press(input, "Enter");
+    expect(dispatched).toEqual([]);
+    expect(input.hidden).toBe(true);
+  });
+
+  it("skips patching the card being edited and catches up when editing ends", () => {
+    const { sidebar, cards } = mount();
+    sidebar.render(snapshot(1, THREE, 2));
+    const card = cards()[1];
+    const input = renameInput(card);
+    sidebar.beginRename();
+    input.value = "half typed";
+
+    // 편집 중 도착한 스냅샷 — 이 카드는 건드리지 않는다 (입력값·IME 보호).
+    sidebar.render(snapshot(2, [ws(1), ws(2, { agentStatus: "running" }), ws(3)], 2));
+    expect(input.value).toBe("half typed");
+    expect(child(card, ".ws-card-status").textContent).toBe("idle");
+
+    // 편집이 끝나면 밀린 갱신을 한 번에 만회한다 (다음 스냅샷을 기다리지 않는다).
+    press(input, "Escape");
+    expect(child(card, ".ws-card-status").textContent).toBe("running");
+  });
+});
+
 describe("Sidebar interaction across patches", () => {
+  it("delegates the new-workspace button to the picker callback", () => {
+    const { sidebar, newWorkspaceCalls } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    const button = document.querySelector<HTMLElement>(".sidebar-new");
+    if (button === null) throw new Error("missing .sidebar-new");
+
+    button.click();
+
+    // 대화상자 호출·CreateWorkspace dispatch 는 main.ts 소유다 (인라인 폼 없음).
+    expect(newWorkspaceCalls()).toBe(1);
+    expect(document.querySelector(".sidebar-form")).toBeNull();
+  });
+
   it("keeps the switch wiring on patched cards", () => {
     const { sidebar, cards, dispatched } = mount();
     sidebar.render(snapshot(1, THREE, 1));

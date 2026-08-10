@@ -119,6 +119,8 @@ function mount(paneId = 1): Harness {
       return created;
     },
   };
+  // send-mode 스텁 — arm 진입점은 UI 에서 빠졌지만(⤷/⤷⏎ 버튼 제거) resolve
+  // 분기는 살아 있어 프로그램적으로 활성화해 잠근다 (pane-view 상단 휴면 주석).
   const controller: SendController = {
     isActive: () => send.active,
     arm: () => {},
@@ -351,6 +353,9 @@ describe("PaneView tab interaction across patches", () => {
     ]);
   });
 
+  // send-mode 는 arm 진입점(⤷/⤷⏎ 버튼)이 UI 에서 빠져 휴면이지만, 경로 자체는
+  // 그대로 살아 있다 — 버튼에 의존하지 않고 컨트롤러를 프로그램적으로 활성화해
+  // mousedown 분기를 잠근다 (재배선 시 이 계약이 그대로 쓰인다).
   it("resolves the send target instead of focusing while send-mode is armed", () => {
     const { view, tabs, dispatched, send } = mount(3);
     view.update(pane(THREE, 10), false, null, null);
@@ -402,7 +407,7 @@ describe("PaneView viewer seam (21단계)", () => {
     expect(view.shownTab).toBeNull();
   });
 
-  it("dispatches CreateTab{folderBrowser, path: null} from the header folder button", () => {
+  it("dispatches CreateTab{folderBrowser, path: null} from the header SVG folder button", () => {
     const { view, headerButton, dispatched } = mount(4);
     view.update(pane(THREE, 10), true, null, null);
 
@@ -411,5 +416,53 @@ describe("PaneView viewer seam (21단계)", () => {
     expect(dispatched).toEqual([
       { type: "createTab", pane: 4, tab: { type: "folderBrowser", path: null } },
     ]);
+  });
+});
+
+describe("PaneView header buttons", () => {
+  /** 헤더 **직속** 버튼만 (탭 × 는 .pane-tabs 안이라 제외). */
+  function headerButtons(view: PaneView): HTMLButtonElement[] {
+    const header = child(view.root, ".pane-header");
+    return Array.from(header.children).filter(
+      (el): el is HTMLButtonElement => el.tagName === "BUTTON",
+    );
+  }
+
+  it("has exactly the four working buttons — the send pair is retired", () => {
+    const { view } = mount();
+    view.update(pane(THREE, 10), true, null, null);
+
+    const titles = headerButtons(view).map((b) => b.title);
+    expect(titles).toHaveLength(4);
+    expect(titles.filter((t) => t.toLowerCase().includes("send"))).toEqual([]);
+    // 툴팁의 기능 설명 부분만 본다 — 뒤에 붙는 단축키 표기는 keys.ts 소유.
+    expect(titles.map((t) => t.replace(/ \(.*\)$/, ""))).toEqual([
+      "New terminal tab",
+      "New folder browser tab",
+      "Split left/right",
+      "Split top/bottom",
+    ]);
+  });
+
+  it("draws the folder and split icons as inline SVG on one shared 16px grid", () => {
+    const { view } = mount();
+    view.update(pane(THREE, 10), true, null, null);
+
+    const [plus, ...icons] = headerButtons(view);
+    // + 는 텍스트 라벨 그대로다 (판단: 기호가 이미 자명하다).
+    expect(plus.textContent).toBe("+");
+    expect(icons).toHaveLength(3);
+    for (const btn of icons) {
+      const svg = btn.querySelector("svg");
+      expect(svg).not.toBeNull();
+      expect(svg?.getAttribute("viewBox")).toBe("0 0 16 16");
+      expect(svg?.getAttribute("stroke-width")).toBe("1.5");
+      expect(svg?.getAttribute("stroke")).toBe("currentColor");
+    }
+    // 분할 페어는 같은 사각형에 이등분선 방향만 다르다 — 마크업이 실제로 갈리는지.
+    const [, leftRight, topBottom] = icons;
+    expect(leftRight.innerHTML).not.toBe(topBottom.innerHTML);
+    expect(leftRight.querySelector("path")?.getAttribute("d")).toContain("v10.5");
+    expect(topBottom.querySelector("path")?.getAttribute("d")).toContain("h10.5");
   });
 });

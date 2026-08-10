@@ -1,16 +1,23 @@
 // winmux 앱 엔트리 — store 구독 → 좌측 워크스페이스 사이드바
 // (13단계) + 우측 활성 워크스페이스 split tree 렌더 (11~12단계). 분할 렌더·
 // splitter·탭바·클릭 포커스는 workspace-view/pane-view/splitter 가, 카드 리스트·
-// 인라인 폼은 sidebar 가 담당하고, 여기는 부트스트랩과 dispatchUI 래퍼
-// (CommandError 상태 라인 표면화 + focus 보상), 그리고 키보드 3층 이동 글루
+// 이름 인라인 편집은 sidebar 가 담당하고, 여기는 부트스트랩과 dispatchUI 래퍼
+// (CommandError 상태 라인 표면화 + focus 보상), 새 워크스페이스 흐름(폴더 선택
+// 대화상자 → CreateWorkspace — 버튼·단축키 공용), 그리고 키보드 3층 이동 글루
 // (20단계 — 판정은 순수 모듈 keys.ts, 가로채기 목록도 거기가 정본)만 남는다. dev 훅
 // window.__winmux 는 유지한다 — 콘솔에서 raw dispatch/getState 를 직접 부르는
 // 조작 표면 (주의: dispatchUI 를 우회하므로 focus 보상·에러 표면화가 없다).
 
 import { ActivityPing } from "./activity-ping";
-import { dispatch, getState, resetUi, userActivity } from "./backend";
+import { dispatch, getState, pickWorkspaceFolder, resetUi, userActivity } from "./backend";
 import { formatCommandError } from "./command-error";
-import { keyAction, nextTab, paneInDirection, workspaceAtOrdinal } from "./keys";
+import {
+  keyAction,
+  nextTab,
+  nextWorkspace,
+  paneInDirection,
+  workspaceAtOrdinal,
+} from "./keys";
 import type { KeyAction } from "./keys";
 import { Sidebar } from "./sidebar";
 import { Store } from "./store";
@@ -98,15 +105,23 @@ class App {
     (cmd) => this.dispatchUI(cmd),
     this.tracer,
     // send-mode 상태 라인 위임 (17단계) — 지속 프롬프트는 promptText 슬롯,
-    // 캡처·전달 실패는 기존 one-shot 에러 경로를 재사용한다.
+    // 캡처·전달 실패는 기존 one-shot 에러 경로를 재사용한다. (send-mode 는 arm
+    // 진입점이 UI 에서 빠져 휴면이라 실제 유입은 지금 없다 — pane-view 주석.)
     {
       setPrompt: (text) => this.setPrompt(text),
       flashError: (text) => this.showError(text),
     },
   );
-  private readonly sidebar = new Sidebar(requireElement("sidebar"), (cmd) => this.dispatchUI(cmd));
+  private readonly sidebar = new Sidebar(
+    requireElement("sidebar"),
+    (cmd) => this.dispatchUI(cmd),
+    () => void this.openWorkspacePicker(),
+  );
   private errorText: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 폴더 선택 in-flight 가드 — 대화상자가 떠 있는 동안 버튼 연타·키 반복으로
+   *  두 번째 대화상자가 뜨지 않게 한다. */
+  private picking = false;
   /** send-mode 지속 프롬프트 (17단계) — one-shot 에러와 별개 슬롯: 모드 활성
    *  동안 유지되고 해제 시 null 이 되어 상태 라인이 다시 접힌다 (타이머 없음). */
   private promptText: string | null = null;
@@ -163,17 +178,24 @@ class App {
   }
 
   /** 키 액션 해석 — 최신 채택 스냅샷 기준. 대상이 없으면(스냅샷 미도착, 범위
-   *  밖 ordinal, 이미 활성인 워크스페이스, 인접 pane 없음, 탭 0~1개, 닫을 탭
-   *  없음) 전부 조용한 no-op 이다: 키보드 조작은 에러를 띄우지 않는다 (누른 키가
-   *  안 먹는 것 자체가 피드백). 실제 전환·포커스 보상은 dispatchUI 의 기존 경로를
-   *  그대로 탄다 — switchWorkspace 는 사이드바 클릭과 같은 activePane 보상,
+   *  밖 ordinal, 이미 활성인 워크스페이스, 워크스페이스 1개 이하, 인접 pane 없음,
+   *  탭 0~1개, 닫을 탭 없음, 이름 변경할 활성 카드 없음) 전부 조용한 no-op 이다:
+   *  키보드 조작은 에러를 띄우지 않는다 (누른 키가 안 먹는 것 자체가 피드백 —
+   *  단 폴더 선택은 대화상자를 여는 외부 호출이라 실패를 상태 라인에 알린다).
+   *  실제 전환·포커스 보상은 dispatchUI 의 기존 경로를 그대로 탄다 —
+   *  switchWorkspace 는 사이드바 클릭과 같은 activePane 보상,
    *  focusPane/activateTab 은 cmd 대상 보상, createTab/splitPane 은 새 탭 보상,
    *  closeTab 은 닫은 뒤 남는 activePane 보상. */
   private runNavAction(action: KeyAction): void {
-    // 사이드바 포커스는 dispatch 도 스냅샷도 필요 없다 — 워크스페이스가 하나도
-    // 없을 때가 이 키를 가장 필요로 하는 순간이라 스냅샷 가드보다 앞에 둔다.
-    if (action.type === "focusNewWorkspace") {
-      this.sidebar.focusNewWorkspace();
+    // 사이드바 UI 액션 2종은 dispatch 도 스냅샷도 필요 없다 (각자 자기 가드를
+    // 가진다) — 워크스페이스가 하나도 없을 때가 새 워크스페이스 키를 가장
+    // 필요로 하는 순간이라 스냅샷 가드보다 앞에 둔다.
+    if (action.type === "openWorkspacePicker") {
+      void this.openWorkspacePicker();
+      return;
+    }
+    if (action.type === "renameWorkspace") {
+      this.sidebar.beginRename();
       return;
     }
     const snapshot = this.store.snapshot;
@@ -187,6 +209,18 @@ class App {
       void this.dispatchUI({ type: "switchWorkspace", workspace: target });
       return;
     }
+    if (action.type === "cycleWorkspace") {
+      // 사이드바 순서 기준 이전/다음 (끝에서 순환). 워크스페이스가 1개 이하면
+      // null 이라 무변경 전환을 보내지 않는다.
+      const target = nextWorkspace(
+        snapshot.state.workspaces.map((w) => w.id),
+        snapshot.state.activeWorkspace,
+        action.delta,
+      );
+      if (target === null) return;
+      void this.dispatchUI({ type: "switchWorkspace", workspace: target });
+      return;
+    }
     const ws = activeWorkspace(snapshot);
     if (ws === null) return;
     if (action.type === "focusPane") {
@@ -196,7 +230,7 @@ class App {
       return;
     }
     if (action.type === "newTab") {
-      // 헤더의 +/▤ 아이콘과 같은 명령 — cwd/path 는 null 로 두고 코어가
+      // 헤더의 새 탭·폴더 아이콘과 같은 명령 — cwd/path 는 null 로 두고 코어가
       // 워크스페이스 rootPath 로 해석한다 (pane-view 주석 참조).
       const tab =
         action.kind === "terminal"
@@ -206,7 +240,7 @@ class App {
       return;
     }
     if (action.type === "splitPane") {
-      // 헤더의 ⊟/◫ 아이콘과 같은 원자 SplitPane (새 pane + 터미널 탭 동시 생성).
+      // 헤더의 분할 아이콘과 같은 원자 SplitPane (새 pane + 터미널 탭 동시 생성).
       void this.dispatchUI({
         type: "splitPane",
         pane: ws.activePane,
@@ -231,6 +265,38 @@ class App {
     );
     if (target === null) return;
     void this.dispatchUI({ type: "activateTab", tab: target });
+  }
+
+  /** 새 워크스페이스 흐름 (사이드바 버튼 · Ctrl+Shift+N 공용) — Windows 네이티브
+   *  폴더 선택 대화상자를 열고, 고른 폴더로 CreateWorkspace 를 원자 dispatch
+   *  한다 (터미널 탭 동반 — 계획 13-D1). 이름은 폴더명, rootPath 는 변환된 리눅스
+   *  경로, distro 는 UNC 선택이면 그 배포판(드라이브 선택이면 null → 백엔드
+   *  기본값 해석)이다.
+   *
+   *  취소는 조용한 no-op(null 반환)이고, 대화상자 실패·경로 변환 실패는 상태 라인
+   *  one-shot 에러다. dispatch 실패는 dispatchUI 가 이미 표면화하므로 여기서 다시
+   *  다루지 않는다. */
+  private async openWorkspacePicker(): Promise<void> {
+    if (this.picking) return;
+    this.picking = true;
+    try {
+      const picked = await pickWorkspaceFolder();
+      if (picked === null) return;
+      await this.dispatchUI({
+        type: "createWorkspace",
+        name: picked.name,
+        rootPath: picked.linux_path,
+        distro: picked.distro,
+        tab: { type: "terminal", cwd: null },
+      });
+    } catch (err) {
+      // 이 커맨드는 문자열로 reject 하지만(CommandError 가 아니다) 포맷터가
+      // 계약 밖 payload 도 그대로 노출하므로 같은 경로를 쓴다.
+      console.error("pick_workspace_folder failed", err);
+      this.showError(formatCommandError(err));
+    } finally {
+      this.picking = false;
+    }
   }
 
   /** UI 발 dispatch 공통 경로 — 실패 payload 를 formatCommandError 로 요약해

@@ -27,3 +27,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
+# 워크스페이스 폴더 선택 대화상자 (Windows 네이티브 IFileDialog). Windows 백엔드는
+# windows-sys 0.61(위와 같은 버전) 위의 순수 Rust 구현이라 C 툴체인·아키텍처별
+# 바이너리가 없고 ARM64 크로스 빌드에도 추가 준비물이 없다. default features
+# (xdg-portal·wayland)는 Linux 백엔드 전용이라 끈다.
+rfd = { version = "0.17", default-features = false }

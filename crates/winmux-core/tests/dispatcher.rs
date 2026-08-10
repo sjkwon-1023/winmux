@@ -103,7 +103,7 @@ fn outputs_fixture_matches_serialization() {
             session: None,
         },
     ];
-    // 전 CommandError variant 1개씩 (7종).
+    // 전 CommandError variant 1개씩 (8종).
     let errors = vec![
         CommandError::UnknownTarget {
             target: "pane 99".to_string(),
@@ -118,6 +118,9 @@ fn outputs_fixture_matches_serialization() {
             message: "path must be absolute: \"code/winmux\"".to_string(),
         },
         CommandError::InvalidScroll { value: -1.0 },
+        CommandError::InvalidName {
+            message: "workspace name must not be empty or whitespace only".to_string(),
+        },
     ];
 
     let expected = serde_json::json!({ "outputs": outputs, "errors": errors });
@@ -130,10 +133,11 @@ fn commands_fixture_round_trips() {
     let original: serde_json::Value = serde_json::from_str(&text).unwrap();
     let parsed: Vec<Command> = serde_json::from_str(&text).unwrap();
 
-    // 전 Command variant 1개씩(12종) + 뷰어 NewTab 3종을 실은 createTab 3개
-    // (21단계) + createWorkspace 의 tab 필드 누락 하위호환 형태 1개 (마지막
-    // 엔트리) — variant 추가 시 fixture 도 갱신할 것.
-    assert_eq!(parsed.len(), 16);
+    // 전 Command variant 1개씩(13종) + 뷰어 NewTab 3종을 실은 createTab 3개
+    // (21단계) + createWorkspace 의 tab 필드 누락 하위호환 형태 1개 —
+    // variant 추가 시 fixture 도 갱신할 것 (새 variant 는 뒤에 덧붙인다:
+    // 앞에 끼우면 아래 인덱스 단언이 전부 밀린다).
+    assert_eq!(parsed.len(), 17);
 
     // 뷰어 NewTab 잠금 (21단계): folderBrowser 의 path 는 nullable(= 워크스페이스
     // root_path 상속), textViewer·markdownViewer 는 필수다.
@@ -177,6 +181,19 @@ fn commands_fixture_round_trips() {
         matches!(&parsed[15], Command::CreateWorkspace { tab: None, .. }),
         "compat 엔트리가 tab: None 으로 파싱돼야 함: {:?}",
         parsed[15]
+    );
+
+    // 이름 변경 (F2 사이드바 인라인 편집) — workspace + name 두 필드뿐이다.
+    assert!(
+        matches!(
+            &parsed[16],
+            Command::RenameWorkspace {
+                workspace: WorkspaceId(1),
+                name,
+            } if name == "winmux (renamed)"
+        ),
+        "renameWorkspace 엔트리: {:?}",
+        parsed[16]
     );
 
     // 재직렬화는 None 을 "tab": null 로 명시하므로, 원본의 compat 엔트리에
