@@ -22,6 +22,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 기본은 읽기 전용 — 쓰기가 필요한 job(릴리스 첨부)만 job 단위로 넓힌다.
+permissions:
+  contents: read
+
 jobs:
   gates:
     runs-on: ubuntu-24.04

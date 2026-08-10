@@ -34,8 +34,14 @@ use tauri::AppHandle;
 /// 달라져 전원 재실행). 스크립트 본문의 `@SETUP_VERSION@` 자리에 치환된다.
 const SETUP_VERSION: u32 = 2;
 
-/// 프로세스 수명 캐시 — distro 이름(기본 distro 는 `""`) 기준으로 앱 실행당 1회만
-/// 스폰한다. 실패해도 **재claim 하지 않는다**: 실패는 마커를 남기지 않으므로 다음
+/// 프로세스 수명 캐시 — **해석된** distro 이름 기준으로 앱 실행당 1회만 스폰한다.
+/// 기본 distro(None)는 claim 전에 실제 이름으로 해석된다 (보안 리뷰 finding):
+/// `""` 키를 그대로 쓰면 기본 배포판이 어느 워크스페이스의 named distro 와 같은
+/// 물리 distro 일 때 키가 갈려(`""` vs `"Ubuntu"`) 첫 부팅에서 설치 스크립트 두
+/// 개가 동시에 돌고, settings.json read-modify-write 경합으로 훅이 중복 배선되거나
+/// 한쪽 병합이 유실될 수 있다. 해석 실패 시에만 `""` 키로 남는다 — 그 경우
+/// wsl.exe 자체가 없거나 배포판이 없어 run 도 곧 같은 이유로 실패한다.
+/// 실패해도 **재claim 하지 않는다**: 실패는 마커를 남기지 않으므로 다음
 /// 앱 실행에서 재시도되고, 같은 실행 안에서 워크스페이스를 만들 때마다 실패한
 /// wsl.exe 를 다시 띄우는 쪽이 더 나쁘다.
 fn claim(key: &str) -> bool {
@@ -58,11 +64,17 @@ fn claim(key: &str) -> bool {
 /// 남긴 인자다 — 현재 구현은 쓰지 않는다.
 pub fn ensure_provisioned(_app: &AppHandle, distro: Option<&str>) {
     let distro = distro.filter(|d| !d.is_empty()).map(str::to_owned);
-    // None(기본 distro)의 캐시 키는 빈 문자열 — 이름 있는 distro 와 충돌하지 않는다.
-    if !claim(distro.as_deref().unwrap_or_default()) {
-        return;
-    }
     tauri::async_runtime::spawn_blocking(move || {
+        // 해석·claim 을 블로킹 태스크 안에서 한다 — 기본 distro 이름 질의(wsl.exe)
+        // 가 블로킹이고, claim 이 해석된 키를 써야 위 rustdoc 의 이중 프로비저닝을
+        // 막는다. 캐시에 걸러진 태스크는 즉시 반환하는 싼 태스크다.
+        let resolved = match &distro {
+            Some(name) => Some(name.clone()),
+            None => default_distro_name(),
+        };
+        if !claim(resolved.as_deref().unwrap_or_default()) {
+            return;
+        }
         if let Err(err) = run(distro.as_deref()) {
             let target = match &distro {
                 Some(distro) => distro.as_str(),
@@ -75,6 +87,18 @@ pub fn ensure_provisioned(_app: &AppHandle, distro: Option<&str>) {
             );
         }
     });
+}
+
+/// 기본 배포판 이름 해석 — `commands.rs` 의 질의(성공만 OnceLock 캐시)를 공유한다.
+#[cfg(windows)]
+fn default_distro_name() -> Option<String> {
+    crate::commands::default_distro().ok()
+}
+
+/// unix 에는 WSL 기본 배포판 개념이 없다 (`run` 의 no-op 과 같은 대칭).
+#[cfg(not(windows))]
+fn default_distro_name() -> Option<String> {
+    None
 }
 
 /// 설치 스크립트를 `wsl.exe [-d <distro>] -- bash -s` 의 stdin 으로 흘린다.
@@ -369,7 +393,7 @@ ancestor's fd 0/1/2 points at. Reuse that resolution rather than re-inventing on
 | Never yourself | The sending session is excluded from the candidates. |
 | Live terminals only | Only running terminal tabs are candidates — an exited tab or a viewer tab is never a target, even if its title matches. |
 | Encoding | Standard base64 alphabet only (`base64 -w0`). URL-safe `-_`, whitespace and newlines inside the blob are rejected. |
-| Size | 32 KiB after decoding. In practice keep a single send **under ~3 KB**: winmux discards any OSC payload over 4096 bytes before it is ever parsed, and the base64 blob is part of that payload. Send a file path, not a file. |
+| Size | 32 KiB after decoding (the OSC scanner accepts payloads up to 64 KiB, sized for exactly this after base64 expansion). Oversized sends are dropped before parsing, with no error back — send a file path, not a file. |
 | Raw bytes | The decoded bytes go to the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. Include a trailing newline to execute; leave it off to only pre-fill the line. |
 | Silent | There is no reply, no acknowledgement, and no error in your terminal. Failures are logged by the winmux app (its stderr), not by you. |
 
@@ -497,6 +521,11 @@ import re
 import shutil
 import sys
 
+try:
+    import tomllib  # python 3.11+ — Ubuntu 24.04 ships 3.12
+except ModuleNotFoundError:
+    tomllib = None
+
 config_path, notify_cmd = sys.argv[1], sys.argv[2]
 
 COMMENT = "# winmux: notify on turn completion (added automatically; delete these two lines to opt out)"
@@ -513,8 +542,18 @@ if any(re.match(r"\s*notify\s*=", line) for line in lines):
     print("codex: notify already set in %s; left untouched" % config_path)
     raise SystemExit(0)
 
+# Never rewrite a file we cannot parse — same rule as the Claude settings merge.
+if tomllib is not None:
+    try:
+        tomllib.loads(text)
+    except Exception as err:
+        print("codex: %s does not parse as TOML (%s); left untouched" % (config_path, err))
+        raise SystemExit(0)
+
 # notify is a root-table key, so it must be inserted **before the first table header**.
 # Appending at EOF would silently make it a key of whatever table ends the file.
+# The line scan can misread a `[` inside a multiline array or string as a table
+# header, so the merged result is re-parsed below before anything is written.
 insert_at = len(lines)
 for index, line in enumerate(lines):
     if re.match(r"\s*\[", line):
@@ -530,6 +569,25 @@ if tail:
 merged = "\n".join(head + block + tail)
 if not merged.endswith("\n"):
     merged += "\n"
+
+# Write only when the result provably parses AND notify landed in the root table —
+# otherwise refuse untouched (a wrong guess must never corrupt a user config).
+if tomllib is not None:
+    try:
+        parsed = tomllib.loads(merged)
+    except Exception as err:
+        print("codex: refusing to write %s — the insertion would break it (%s); "
+              "add notify to the root table manually" % (config_path, err))
+        raise SystemExit(0)
+    if "notify" not in parsed:
+        print("codex: refusing to write %s — notify would not land in the root table; "
+              "add it manually" % config_path)
+        raise SystemExit(0)
+elif insert_at != len(lines):
+    # Without a parser the insertion point is a guess; only the no-tables case is
+    # unambiguous.
+    print("codex: tomllib unavailable and %s has tables; add notify manually" % config_path)
+    raise SystemExit(0)
 
 tmp = config_path + ".winmux-tmp"
 with open(tmp, "w", encoding="utf-8") as handle:

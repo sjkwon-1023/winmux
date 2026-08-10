@@ -587,7 +587,7 @@ fn resolve_distro(distro: Option<String>) -> Result<String, String> {
 /// 배포판을 설치·복구한 사용자가 재시작 전까지 영구히 막힌다. (초기 경합으로
 /// 질의가 두 번 나갈 수 있으나 결과는 하나로 수렴한다.)
 #[cfg(windows)]
-fn default_distro() -> Result<String, String> {
+pub(crate) fn default_distro() -> Result<String, String> {
     static DEFAULT_DISTRO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     if let Some(cached) = DEFAULT_DISTRO.get() {
         return Ok(cached.clone());

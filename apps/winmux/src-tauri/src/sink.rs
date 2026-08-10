@@ -152,8 +152,10 @@ impl SessionSink for SinkHandle {
 ///
 /// 알림은 **상태**라 flush 창에 모아 last-wins 로 합치는 것이 옳지만, 전송은
 /// **액션**이다. 배치에 넣으면 (1) 창만큼 늦어지고 (2) 같은 창의 두 번째 전송이
-/// 첫 번째를 덮어써 사라진다. 그래서 코얼레싱을 건너뛴다. 상태 변이가 전혀
-/// 없으므로 스냅샷 발행·저장 예약도 하지 않는다 (성공·실패 모두).
+/// 첫 번째를 덮어써 사라진다. 그래서 코얼레싱을 건너뛴다. **모델** 변이가 없으므로
+/// 스냅샷 발행·저장 예약도 하지 않는다 (성공·실패 모두) — 단 리더 루프의 공통 OSC
+/// 계정(`osc_count`·`last_osc = "777-send:<target>"`·replay 버퍼의 원본 시퀀스)은
+/// 다른 OSC 와 똑같이 남는다 (payload 는 요약에 싣지 않아 유출 없음).
 ///
 /// # 스레드·잠금
 ///
@@ -169,10 +171,33 @@ impl SessionSink for SinkHandle {
 /// 것도 쓰지 않는다** — 진단 문자열이 남의 터미널 화면(그리고 replay 버퍼)에
 /// 섞이면 그게 더 나쁜 오염이다. 송신 측에서 보면 전송은 무음 fire-and-forget 이다.
 fn deliver_send(app: &AppHandle, sender: SessionId, target: &str, text_b64: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // 진행 중 전달 상한 (보안 리뷰 finding): 임의 PTY 프로그램이 전송을 고속
+    // 연사하면 태스크가 무한히 쌓여 blocking 풀을 포화시키고, paused 대상에의
+    // write 는 스레드를 무기한 점유할 수 있다. 상한 초과분은 로그와 함께
+    // 폐기한다 — 협력 에이전트의 정상 사용(초당 몇 건)에는 닿지 않는 수치다.
+    const MAX_IN_FLIGHT: usize = 8;
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    if IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT {
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        eprintln!(
+            "[winmux] send: dropped from session {sender}: too many deliveries in flight \
+             (cap {MAX_IN_FLIGHT})"
+        );
+        return;
+    }
     let app = app.clone();
     let target = target.to_owned();
     let text_b64 = text_b64.to_owned();
     tauri::async_runtime::spawn_blocking(move || {
+        // 카운터는 어떤 return 경로에서도 내려가야 한다 — Drop 가드로 묶는다.
+        struct InFlightGuard;
+        impl Drop for InFlightGuard {
+            fn drop(&mut self) {
+                IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        let _guard = InFlightGuard;
         let bytes = match decode_send_text(&text_b64) {
             Ok(bytes) => bytes,
             Err(err) => {
