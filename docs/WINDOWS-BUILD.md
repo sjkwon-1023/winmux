@@ -284,7 +284,7 @@ needed where noted.
 
 This is stage 13's completion gate on top of the automated gates: the workspace sidebar
 — create/switch/close workspaces from the UI (계획 v2 section 17 stage 13; design
-decisions in [`docs/plans/mvp-stage13-plan.md`](plans/mvp-stage13-plan.md)). All
+decisions in [ADR-0004](adr/0004-lifecycle-persistence-reset.md)). All
 interactions are mouse-driven in the sidebar; the dev hook is only needed where noted.
 
 1. **Boot workspace card** — on launch the sidebar shows one card for the boot
@@ -399,6 +399,8 @@ This section collects the batched manual Windows verification for the stages aft
 checkpoint 1, to be run at **checkpoint 2** (after stage 21). Items are appended per
 stage as each lands.
 
+<!-- retired 2026-08-10 — see ADR (agent-facing channel is a v2 follow-up); the checklist below stays as a historical record of what was verified. -->
+
 ### Stage 17 — pane-to-pane text send (계획 v2 section 8)
 
 The pane header gains two send icons: `⤷` (send selection) and `⤷⏎` (send & run).
@@ -444,7 +446,7 @@ mousedown on a pane delivers.
    shell, the full pasted text always lands **before** the single CR (the command that
    runs is the complete pasted text, never a truncated prefix).
 
-### Stage 18 — OSC notification routing + coalescing + keyed reconcile (계획 v2 section 9; contract in [`docs/plans/mvp-stage18-plan.md`](plans/mvp-stage18-plan.md) and [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md))
+### Stage 18 — OSC notification routing + coalescing + keyed reconcile (계획 v2 section 9; contract in [ADR-0006](adr/0006-osc-notification-routing.md) and [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md))
 
 OSC 777/9 agent notifications and OSC 0 (alias "2")/7 are now routed into the Rust model
 through a 100ms-trailing-window coalescer (`OscRouter`), surfacing on three layers: the
@@ -481,7 +483,7 @@ regression once the model fields are dynamic.
    (letting the `~/.bashrc` `PROMPT_COMMAND` snippet from `claude-hook-example.md` emit
    OSC 7), quit and restart the app → the respawned shell's `pwd` matches that directory.
    ConPTY's real-world OSC 7 emission is an **unverified precondition** (plan risk,
-   [`docs/plans/mvp-stage18-plan.md`](plans/mvp-stage18-plan.md) risks section) — if this
+   [ADR-0006](adr/0006-osc-notification-routing.md); verified at checkpoint 2) — if this
    fails it is **not a stage blocker**: fall back to the reduced scope (title/cwd routing
    stays landed, only the restart-respawn behavior is unverified) and revisit the
    file/socket cwd-passing alternative from 계획 v2 section 2 separately; it is independent
@@ -537,7 +539,7 @@ that direction, 0–1 tabs) the app does nothing — silently, with no status-li
    own, and the follow-up is to pick a replacement binding (e.g. `Ctrl+PgUp`/`Ctrl+PgDn`)
    in `keys.ts` and re-run item 3. Record which behavior you observed.
 
-### Stage 21 — viewer tabs (folderBrowser / textViewer / markdownViewer; 계획 v2 "탭 타입별 동작"; contract in [`docs/plans/mvp-stage21-plan.md`](plans/mvp-stage21-plan.md))
+### Stage 21 — viewer tabs (folderBrowser / textViewer / markdownViewer; 계획 v2 "탭 타입별 동작"; contract in [ADR-0008](adr/0008-viewer-tabs.md))
 
 Tabs are no longer terminals only. The pane header's `▤` icon opens a **folderBrowser**
 tab, and clicking a file row there opens a viewer tab in the same pane — a
@@ -713,6 +715,79 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
       status change), which is exactly what a missed rewire looks like.
     - **Shell history in WSL** — `mv ~/.wmux ~/.winmux` in the distro keeps every tab's
       history (item 9). Without it each respawned tab starts with an empty history.
+
+### Post re-verification polish — verification
+
+The re-verification round above passed in full on 2026-08-10. The batch below landed
+right after it: a `Shift+Enter` rewrite for agents, a sidebar reflow fix, a folder-first
+new-workspace flow, and a surface cleanup (send buttons retired, icons redrawn). Rebuild
+and check these; nothing here needs a fresh `npm install`.
+
+1. **`Shift+Enter` inserts a newline in Claude Code** — in a terminal tab running Claude
+   Code, type a word, press `Shift+Enter`: the prompt must grow a second line instead of
+   submitting. Plain `Enter` still submits. The terminal now emits `ESC CR` for that
+   combo itself, so this must work **without** running Claude Code's `/terminal-setup`.
+   Then confirm it is harmless everywhere else: at a bash prompt `Shift+Enter` must
+   behave like a normal `Enter` (runs the line / gives a fresh prompt — no stray escape
+   character left on the line), and in `vim` insert mode it must still open a new line.
+2. **Sidebar width never moves** — with a workspace whose card shows a long status line
+   (run a Claude Code session so the status becomes `needs input — <a long agent
+   message>`), watch the sidebar's right edge across `running` → `needs input` → `idle`
+   transitions: it must stay pinned at 220px and the terminal area must not reflow. Long
+   text is cut with an ellipsis on each of the card's three lines. Also drag the window
+   narrower and confirm the sidebar still holds its width.
+3. **Folder pick creates the workspace immediately** — the sidebar's new-workspace button
+   opens the Windows folder dialog directly; there is no name field to fill in any more.
+   Picking a folder creates the workspace **in one step** (name = folder name, root path =
+   the converted Linux path) with a terminal tab already in it, and the new tab's shell
+   starts in that directory (`pwd`). Cancelling the dialog does nothing at all (no error,
+   no empty workspace). Verify both path shapes:
+   - **WSL filesystem (UNC)** — pick something under `\\wsl.localhost\<distro>\home\...`:
+     the workspace root must come out as the plain Linux path (`/home/...`) and the tab
+     must run in **that distro** even when it is not the default one.
+   - **Windows drive** — pick e.g. `C:\Users\<you>\code`: the root must come out as
+     `/mnt/c/Users/<you>/code` and the tab starts there. (This assumes the distro's
+     default automount root; a custom `/etc/wsl.conf` shows up as a `cd` failure.)
+   - **Rejected paths** — create one from inside WSL (`mkdir '/tmp/bad:name'`), then pick
+     it through the UNC view: the status line must show a loud path error and **no**
+     workspace may appear. Names containing `:` or `\`, or ending in a dot or space, are
+     refused on purpose — the same rule the viewer tabs use, so a bad name can never be
+     assembled into a different Windows path than the one you clicked.
+4. **`Ctrl+Shift+N` opens the same picker** — from anywhere (terminal focused included)
+   it must open the folder dialog, not focus a sidebar field. Holding the keys down or
+   double-pressing must not stack two dialogs. Nothing may leak into the terminal.
+5. **`F2` renames the active workspace** — press `F2`: the active sidebar card's name
+   turns into an inline text box, pre-filled and fully selected. `Enter` commits; `Esc`
+   **and** clicking away both cancel and restore the old name. An all-whitespace name is
+   refused — the box stays open and focused instead of sending anything. Committing an
+   unchanged name sends nothing. While the box has focus, typing must land in the box and
+   not in the terminal.
+   Known trade-off: `F2` no longer reaches TUI apps (e.g. `mc`'s Rename) — confirm that
+   is the only casualty and that `F1`/`F3`… still reach the terminal.
+6. **`Ctrl+Shift+[` / `Ctrl+Shift+]` cycle workspaces** — with three or more workspaces,
+   `]` moves to the next in sidebar order and wraps at the end, `[` moves back and wraps
+   at the start; with a single workspace both are quiet no-ops. Check them on a keyboard
+   layout where `[`/`]` need no modifier and, if you have one handy, on a layout where
+   they do — both the bare characters and their shifted forms (`{`/`}`) are matched.
+7. **Send buttons are gone** — the pane header now has exactly four buttons: new terminal
+   tab, folder browser tab, and the two splits. The `⤷` / `⤷⏎` pair and its
+   target-selection mode (crosshair cursor, status-line prompt, `Esc` to cancel) are
+   **retired**, so `Esc` now always belongs to the terminal: press `Esc` in `vim` and it
+   must leave insert mode on the first press. Clicking a pane always just focuses it.
+   Selection + `Ctrl+Shift+C` copy is untouched. (Agent-facing text passing returns in v2
+   as a designed channel, not as a manual button.)
+8. **Redrawn icons** — the pane header's folder button is now a drawn folder outline, and
+   the two split buttons are a matched pair: one rectangle split by a **vertical** line
+   (left/right) and the same rectangle split by a **horizontal** line (top/bottom). At a
+   glance it must be obvious which is which; click each and confirm the split direction
+   matches its picture. The icons must inherit the header's text colour (including the
+   hover background) and stay crisp at the OS display scaling you use. Tooltips still
+   read `<function> (<shortcut>)`.
+9. **App icon** — the exe, its taskbar button, the window's title-bar corner and
+   `Alt+Tab` must all show the new icon: a blue `W` on a near-black square. Check it at
+   small sizes too (taskbar, 16px file-explorer list view) — the `W` must stay readable,
+   not a blue smudge. If Explorer still shows the old icon after a rebuild it is the
+   Windows icon cache, not the build: `ie4uinit.exe -show` or a fresh folder view.
 
 ## 11. ARM64 cross-build notes
 

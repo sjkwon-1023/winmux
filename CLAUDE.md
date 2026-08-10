@@ -4,59 +4,63 @@ winmux — a lightweight cmux-style terminal for Windows, centered on WSL2 and c
 (Claude Code / Codex). Decisions: `docs/adr/`.
 
 The product plan `터미널-계획-v2.md` (Korean) is **no longer in the tree** — it was removed
-when the repo went public. Roughly 130 "계획 v2 <n>장 / section <n>" citations across the
-source comments, ADRs, and plan docs still point at it; read it out of git history when one
-of them matters (`git show HEAD~1:터미널-계획-v2.md`, or any commit before its removal).
+when the repo went public. Roughly 120 "계획 v2 <n>장 / section <n>" citations across the
+source comments, ADRs, and the remaining plan docs still point at it; read it out of git
+history when one of them matters (`git show HEAD~1:터미널-계획-v2.md`, or any commit before
+its removal).
 
 ## Current state
 
-Spike executed and verified on Windows (2026-08-08); **candidate A adopted** — see
-ADR-0001. The paste bug from ADR-0001 "Known issues" is resolved (Windows Terminal
-copy/paste convention; interception list in `apps/spike/src/terminal-tile.ts`).
-MVP stages 10–12 are **done and Windows-verified** (2026-08-09): stage 10 (data model +
-command dispatcher + stable IDs — ADR-0002) and stages 11–12 (split/tab UI — ADR-0003:
-SplitId addressing, atomic SplitPane{tab}, splitter drag, keep-alive tab views, CloseTab
-auto-collapse, self-healing detach, Ctrl+Shift+R reload). The Windows checklists in
-`docs/WINDOWS-BUILD.md` sections 6–7 stay as regression references.
+**MVP stages 10–22 are complete and Windows-verified**: checkpoint 2 passed 2026-08-09
+(three field defects fixed the same day) and its re-verification round passed in full
+2026-08-10. The manual checklists in `docs/WINDOWS-BUILD.md` sections 6–10 stay as
+regression references. Stage 22 (CI) is live — the gates run on every push, x64 + ARM64
+artifacts build on `workflow_dispatch`. **Remaining: stage 23**, ARM64 device testing
+(`docs/WINDOWS-BUILD.md` §11), which awaits hardware.
 
-Stages 13–16 are **done and Windows-verified** (checkpoint 1 passed 2026-08-09 after
-two field-fix rounds — ADR-0004): workspace sidebar, replay trim + switch tracer,
-persistence (manage-first restore boot, atomic debounced saves), automatic reset
-(gesture-only activity, hidden = unfocused OR invisible, glue `reset_ui`). The hard-won
-ConPTY findings live in ADR-0004: no EOF on child exit (waiter thread) and cursor
-probes in replays (first-attach flag in the attach protocol). Sections 8–9 of
-`docs/WINDOWS-BUILD.md` stay as regression references. UX backlog: per-pane split
-button affordance; 1MiB-replay switch flicker.
+Every decision behind those stages lives in `docs/adr/`: stack adoption (0001),
+stage-10 architecture (0002), split/tab UI (0003), lifecycle + persistence + reset with
+the hard-won ConPTY findings (0004), inter-pane text passing and its UI retirement
+(0005), OSC notification routing (0006), the keyboard model and the canonical
+interception list (0007), viewer tabs (0008). Stage 19 (git branch display) is deferred
+to v2 with `git_branch`/`git_dirty` reserved on the model.
 
-Roadmap (user decision 2026-08-09): proceed straight through stage 21, with **stage 19
-(git branch display) deferred to v2** — the model fields (`git_branch`/`git_dirty`) stay
-reserved and the sidebar hides them while null. Manual Windows testing is batched into
-two checkpoints: after stage 16 (sidebar + teardown latency + persistence + auto reset)
-and after stage 21 (text passing + notifications + keyboard + viewer tabs + full
-regression). Stages 22–23 (ARM64 CI / device testing) come after checkpoint 2.
+One batch landed after re-verification and has **not** been through a Windows round yet
+(Shift+Enter as ESC CR, sidebar reflow fix, folder-first workspace creation, retired send
+buttons, redrawn icons) — its checklist is WINDOWS-BUILD §10's last subsection.
 
-Stages 17–21 are **code-complete, Windows verification pending** (2026-08-09, awaiting
-**checkpoint 2** — `docs/WINDOWS-BUILD.md` §10): stage 17 (inter-pane text passing:
-send/send&run icons, target-pick mode, bracketed-paste delivery guards), stage 18 (OSC
-routing: `notify.rs` merge-cell coalescing + glue `OscRouter` 100ms flush,
-`winmux:<status>` hook contract in `scripts/wsl/claude-hook-example.md`, keyed reconcile
-for sidebar/tab strip with node-identity tests), stage 20 (keyboard navigation:
-Ctrl+1–9 / Alt+arrows / Ctrl+Tab; intercept list canonical in `apps/winmux/src/keys.ts`),
-stage 21 (viewer tabs: folderBrowser/textViewer/markdownViewer, `wslpath` UNC
-validation, fs_* invokes with default-distro resolution, viewer unmount lifecycle).
-Plan files `docs/plans/mvp-stage{17,18,20,21}-plan.md` stay until checkpoint 2 passes,
-then distill into ADRs per ADR-0001's docs governance.
+### Backlog
 
-Checkpoint 2 ran 2026-08-09: **passed** except three field defects, all fixed and
-pushed the same day (hook tty fallback, minimize-aware markdown polling,
-.gitattributes LF) together with the keyboard-first UX batch (global Ctrl+Shift
-shortcuts + tooltips from `keys.ts shortcutLabel`, folder/text viewer keyboard
-navigation, per-tab HISTFILE, window-restore centering) — the batched
-**re-verification checklist is WINDOWS-BUILD §10 last subsection** (user will run it
-together with later verification). RAM at checkpoint 2: ~129MB (inside the 100–150MB
-adoption band; ≤100MB stays a v2 optimization backlog item). Stage 22 (CI) is live:
-first run green, gates on every push, x64+ARM64 artifacts via workflow_dispatch.
-Stage 23 (ARM64 device checklist, WINDOWS-BUILD §11) awaits hardware.
+Accepted deferrals, one line each. None of these block the MVP.
+
+- **Agent-facing pane-send channel (v2)** — the retired stage-17 delivery path returns as
+  a dispatcher/MCP command addressed by tab id, keeping the bracketed-paste refusal and
+  the target acceptance pre-check as contract (ADR-0005). Keyboard targeting for the old
+  manual send mode is absorbed by the retirement — it is not coming back.
+- **≤100MB RAM** — ~129MB at checkpoint 2 sits inside the 100–150MB adoption band
+  (ADR-0001); getting under 100MB is a v2 optimization.
+- **Per-tab shell history GC** — `~/.winmux/history/tab-<id>` files outlive the tabs that
+  created them and nothing prunes them. Open alongside it: whether a tab closed through
+  the kill path writes its `HISTFILE` at all (a `history -a` follow-up if it does not).
+- **`isCommandError`'s variant table is hand-maintained** — the `formatCommandError`
+  switch is compile-time exhaustive via `assertNever`, but the type guard above it is a
+  literal list, so a new `CommandError` variant falls silently through to the raw-JSON
+  path. Force the table from the type.
+- **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
+- **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
+  smaller replay cap, progressive replay, hide-until-parsed.
+- **Per-pane split-button affordance** (ADR-0004) — a first-time user read the header
+  buttons as "split the *selected* pane".
+- **Windows toast notifications** — excluded from stage 18 on dependency/ARM64 scope; the
+  OSC flush point is the natural hook (ADR-0006).
+- **The `◎` browser tab button** was removed from the pane header (permanently disabled,
+  taking up space); it returns in v2 with the feature behind it.
+- **Diagnostic stderr/console logging** kept from checkpoint-1 debugging (activity source,
+  focus/visible, rebuild order) — revisit the noise now that the repo is public.
+- **Reload while minimized** resumes markdown polling until the next minimize/restore
+  cycle — accepted narrow window.
+- **OSC scanner C0 handling** — CAN/SUB abort is implemented; the remaining C0 cases were
+  never reviewed against real terminal behavior (carried from ADR-0001).
 
 ## Layout
 
