@@ -63,7 +63,14 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
             args.push("-d".to_string());
             args.push(distro);
         }
-        args.push("--".to_string());
+        // `--` 가 아니라 `--exec` 인 이유 (실기 버그 2026-08-12): `--` 는 명령을 WSL
+        // **기본 셸을 한 번 거쳐** 실행해 래퍼 스크립트가 셸 평가를 두 번 받는다.
+        // $HOME/$PATH 같은 환경 변수는 바깥 평가에서도 같은 값이라 티가 안 났지만,
+        // 스크립트 안에서 정의하는 변수($RESUME/$cmd)는 바깥 평가가 빈 값으로
+        // 선확장해 resume 블록이 통째로 스킵됐다. --exec 는 argv 를 셸 경유 없이
+        // 그대로 실행한다 (평가 1회) — 기본 셸이 zsh/fish 인 배포판에서 스크립트가
+        // 다른 문법으로 파싱되는 잠재 버그 계열도 함께 제거된다.
+        args.push("--exec".to_string());
         args.extend(bash_argv(req.history_tab));
         SpawnSpec {
             program: "wsl.exe".to_string(),
@@ -93,7 +100,7 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
     }
 }
 
-/// `wsl.exe ... --` 뒤에 붙는 **WSL 안 셸 argv**.
+/// `wsl.exe ... --exec` 뒤에 붙는 **WSL 안 셸 argv** (셸 경유 없는 직접 실행 — spawn_spec 주석).
 ///
 /// 모든 경로가 `WINMUX=1` 을 물고 로그인 셸을 exec 한다 — 탭 안에서 도는 에이전트·
 /// 스크립트가 "여기가 winmux 다"를 스스로 알아야 send 채널·알림 계약을 쓸지 판단할
@@ -240,7 +247,7 @@ mod tests {
                 "/home/me/proj".to_string(),
                 "-d".to_string(),
                 "Ubuntu".to_string(),
-                "--".to_string(),
+                "--exec".to_string(),
                 "bash".to_string(),
                 "-c".to_string(),
                 "printf '\\033]10;#cccccc\\033\\\\\\033]11;#1e1e1e\\033\\\\'; \
@@ -270,7 +277,7 @@ mod tests {
         // 앞부분은 검사하지 않는다 — env WINMUX_DISTRO 가 `-d` 를 덧붙일 수 있다.
         assert!(
             spec.args.ends_with(&[
-                "--".to_string(),
+                "--exec".to_string(),
                 "bash".to_string(),
                 "-c".to_string(),
                 "printf '\\033]10;#cccccc\\033\\\\\\033]11;#1e1e1e\\033\\\\'; \
