@@ -32,7 +32,7 @@ use tauri::AppHandle;
 /// 설치 스크립트 버전. 마커 파일명(`~/.winmux/.setup-v<N>`)에 들어가므로, 스크립트
 /// 내용을 바꿔 기존 사용자에게도 다시 깔아야 할 때 이 값을 올리면 된다 (마커가
 /// 달라져 전원 재실행). 스크립트 본문의 `@SETUP_VERSION@` 자리에 치환된다.
-const SETUP_VERSION: u32 = 2;
+const SETUP_VERSION: u32 = 3;
 
 /// 프로세스 수명 캐시 — **해석된** distro 이름 기준으로 앱 실행당 1회만 스폰한다.
 /// 기본 distro(None)는 claim 전에 실제 이름으로 해석된다 (보안 리뷰 finding):
@@ -197,13 +197,18 @@ fn run(_distro: Option<&str>) -> Result<(), String> {
 /// `winmux-send` 스킬 히어독에도 걸린다: 원본은
 /// `scripts/wsl/skills/winmux-send/SKILL.md` 다.
 ///
+/// `winmux-send.sh` 히어독은 레포에 별도 원본이 없다(여기가 원본이다). 다만 그
+/// `winmux_emit` 는 notify 스크립트와 **같은 tty 해석 규율**이라 한쪽을 고치면
+/// 다른 쪽도 같이 고친다.
+///
 /// 스크립트 자체는 사용자 머신에 남는 산출물이라 주석·출력이 전부 영어다
 /// (레포 컨벤션: 사용자 대면 문자열은 영어).
 const SETUP_SCRIPT: &str = r##"
 # winmux provisioning — streamed into `wsl.exe [-d <distro>] -- bash -s` by the app on
-# first launch, once per distro. It installs the agent notification script, wires the
-# Claude Code hooks described in scripts/wsl/claude-hook-example.md, and installs the
-# winmux-send skill (scripts/wsl/skills/winmux-send/SKILL.md).
+# first launch, once per distro. It installs the agent notification script and the
+# winmux-send helper, wires the Claude Code hooks described in
+# scripts/wsl/claude-hook-example.md, and installs the winmux-send skill
+# (scripts/wsl/skills/winmux-send/SKILL.md).
 #
 # Nothing here may read stdin: that stream is this script itself.
 # Every step is idempotent, and the marker file short-circuits later runs entirely.
@@ -213,6 +218,7 @@ WINMUX_HOME="$HOME/.winmux"
 MARKER="$WINMUX_HOME/.setup-v@SETUP_VERSION@"
 LOG="$WINMUX_HOME/setup.log"
 NOTIFY="$WINMUX_HOME/bin/winmux-notify.sh"
+SEND="$WINMUX_HOME/bin/winmux-send.sh"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 CLAUDE_SKILL_DIR="$HOME/.claude/skills/winmux-send"
 CODEX_CONFIG="$HOME/.codex/config.toml"
@@ -323,7 +329,116 @@ if [ "$status" -ne 0 ] || ! chmod +x "$NOTIFY.tmp" || ! mv -f "$NOTIFY.tmp" "$NO
 fi
 log "notify script installed: $NOTIFY"
 
-# --- 2. winmux-send skill ---------------------------------------------------------------
+# --- 2. winmux-send helper ---------------------------------------------------------------
+# The command-line half of the send channel: agents and scripts call this instead of
+# hand-assembling the OSC 777 sequence and re-inventing the tty resolution. Its winmux_emit
+# is the same discipline as the notify script's — keep the two in sync.
+cat > "$SEND.tmp" <<'WINMUX_SEND_EOF'
+#!/usr/bin/env bash
+# Puts text into another winmux pane's terminal over the OSC 777 send channel.
+#
+# Usage: winmux-send.sh [-l|--literal] <target-title-substring> <text...>
+#   <target-title-substring>  matched case-insensitively against tab titles, across all
+#                             workspaces; the sending pane itself is excluded. It must match
+#                             exactly one live terminal tab or nothing is sent.
+#   <text...>                 every remaining argument, joined with single spaces. A newline
+#                             is appended so the target shell *runs* the line; -l/--literal
+#                             leaves it off, which only pre-fills the target's prompt.
+#
+# Delivery is silent by contract: nothing is echoed back, no failure is reported, and the
+# script exits 0 even when the send goes nowhere. Only a usage error is loud.
+set -euo pipefail
+
+usage() {
+  echo 'usage: winmux-send.sh [-l|--literal] <target-title-substring> <text...>' >&2
+  exit 2
+}
+
+NEWLINE=1
+case "${1:-}" in
+  -l|--literal) NEWLINE=0; shift ;;
+  --) shift ;;
+  -?*) printf 'winmux-send.sh: unknown option: %s\n' "$1" >&2; usage ;;
+esac
+
+# target + at least one word of text.
+[[ $# -ge 2 ]] || usage
+TARGET="$1"
+shift
+TEXT="$*"
+
+# ';' is the field separator of the escape sequence, so a target containing one could never
+# match a title. Refuse it instead of emitting a send that cannot arrive.
+case "$TARGET" in
+  *';'*) echo 'winmux-send.sh: the target must not contain ";"' >&2; exit 2 ;;
+esac
+
+# Not a delivery failure but a broken environment, so this one is loud rather than silent.
+if ! command -v base64 > /dev/null 2>&1; then
+  echo 'winmux-send.sh: base64 not found; install coreutils' >&2
+  exit 1
+fi
+
+# Same tty resolution discipline as ~/.winmux/bin/winmux-notify.sh — keep both copies in
+# step (contract: scripts/wsl/claude-hook-example.md, "tty resolution discipline").
+#   1) /dev/tty — if a controlling TTY exists, this is the right answer.
+#   2) /proc ancestor chain — a process without a controlling TTY (a Claude Code hook, for
+#      one) gets ENXIO from 1). Walk up from itself through its parents, up to 8 hops, and
+#      write to the /dev/pts/* that fd 0/1/2 of an ancestor points at.
+# If neither works, give up silently — the channel promises no delivery report.
+winmux_emit() {
+  local payload="$1"
+
+  if { printf '%s' "$payload" > /dev/tty; } 2>/dev/null; then
+    return 0
+  fi
+
+  local pid=$$ depth=0 fd target stat ppid
+  while [[ "$pid" -gt 1 && "$depth" -lt 8 ]]; do
+    for fd in 0 1 2; do
+      target="$(readlink "/proc/$pid/fd/$fd" 2>/dev/null || true)"
+      [[ "$target" == /dev/pts/* ]] || continue
+      if { printf '%s' "$payload" > "$target"; } 2>/dev/null; then
+        return 0
+      fi
+    done
+    # /proc/<pid>/stat has the form "<pid> (<comm>) <state> <ppid> ...". comm can contain
+    # spaces and parentheses, so cut from after the last ')' and read the ppid that
+    # follows state.
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    [[ -n "$stat" ]] || break
+    stat="${stat##*) }"
+    ppid="${stat#* }"
+    ppid="${ppid%% *}"
+    [[ "$ppid" =~ ^[0-9]+$ ]] || break
+    pid="$ppid"
+    depth=$((depth + 1))
+  done
+
+  return 1
+}
+
+if [[ "$NEWLINE" -eq 1 ]]; then
+  PAYLOAD="$(printf '%s\n' "$TEXT" | base64 -w0)"
+else
+  PAYLOAD="$(printf '%s' "$TEXT" | base64 -w0)"
+fi
+
+# OSC 777 format: ESC ] 777 ; winmux-send ; target ; base64 BEL
+winmux_emit "$(printf '\033]777;winmux-send;%s;%s\007' "$TARGET" "$PAYLOAD")" || true
+
+exit 0
+WINMUX_SEND_EOF
+status=$?
+
+if [ "$status" -ne 0 ] || ! chmod +x "$SEND.tmp" || ! mv -f "$SEND.tmp" "$SEND"; then
+  rm -f "$SEND.tmp"
+  echo "[winmux] setup: cannot install $SEND" >&2
+  exit 1
+fi
+log "send helper installed: $SEND"
+
+# --- 3. winmux-send skill ---------------------------------------------------------------
 # The agent-facing pane-to-pane send channel. Installed as a Claude Code skill so an agent
 # discovers the channel on its own instead of having to be told about it. Byte-identical to
 # scripts/wsl/skills/winmux-send/SKILL.md — change both together.
@@ -336,20 +451,23 @@ fi
 cat > "$CLAUDE_SKILL_DIR/SKILL.md.tmp" <<'WINMUX_SKILL_EOF'
 ---
 name: winmux-send
-description: Send text or a command into another winmux pane's terminal — another agent, a build shell, a REPL — over winmux's OSC 777 send channel. Use when work has to be handed to a pane other than this one, or when replying to an agent running in a different pane. Only works inside a winmux terminal.
+description: Send text or a command into another winmux pane's terminal — another agent, a build shell, a REPL — over winmux's OSC 777 send channel. Use when running inside winmux (the WINMUX env var is set in winmux terminals) and work has to be handed to a pane other than this one, or when replying to an agent running in a different pane. Only works inside a winmux terminal.
 ---
 
 # winmux-send — type into another pane
 
-winmux delivers the bytes you encode here straight into the **stdin of another pane's
-terminal**, exactly as if they had been typed there. Delivery works even when the target
-sits in a background workspace that is not on screen.
+winmux delivers the text you hand it straight into the **stdin of another pane's terminal**,
+exactly as if it had been typed there. Delivery works even when the target sits in a
+background workspace that is not on screen.
+
+**Am I inside winmux?** Every winmux terminal has `WINMUX=1` in its environment, and
+`$WINMUX_TAB` is this tab's own id. Where `$WINMUX` is unset there is no channel to send on.
 
 ## When to use it
 
 - Handing a command to a shell that is already set up somewhere else (a build pane, a
   server pane, a REPL with state).
-- Talking to another coding agent running in its own pane — the bytes land in its prompt.
+- Talking to another coding agent running in its own pane — the text lands in its prompt.
 - Any "run this over there" that would otherwise need the user to switch panes and type.
 
 Do not use it to talk to yourself: the sending session is always excluded.
@@ -371,18 +489,25 @@ string that matches what the hook writes.
 ## Step 2 — send
 
 ```bash
-printf '\033]777;winmux-send;build;'"$(printf '%s\n' 'cargo test' | base64 -w0)"'\007' > /dev/tty
+~/.winmux/bin/winmux-send.sh build 'cargo test'
 ```
 
-Fields: `winmux-send` `;` target `;` base64 of the raw bytes. The trailing `\n` inside the
-inner `printf` is what makes the target shell actually **run** the line — without it the
-text just sits at its prompt.
+That is the whole call. The helper encodes the text, appends the newline that makes the
+target shell **run** the line, and writes the escape sequence to the real terminal device —
+including from a process with no controlling TTY, such as a Claude Code hook.
 
-If `> /dev/tty` fails with `No such device or address`, the shell has no controlling TTY
-(this is what happens inside a Claude Code hook). Resolve the terminal device the way
-`~/.winmux/bin/winmux-notify.sh` already does — read `winmux_emit` in that script: it walks
-up the `/proc/<pid>` parent chain up to 8 hops and writes to the first `/dev/pts/*` that an
-ancestor's fd 0/1/2 points at. Reuse that resolution rather than re-inventing one.
+| Form | Effect |
+|---|---|
+| `winmux-send.sh <target> <text...>` | The text arrives with a trailing newline, so the target **runs** it. |
+| `winmux-send.sh -l <target> <text...>` | Literal — no newline appended. The text only pre-fills the target's prompt. |
+
+Every argument after the target is text, joined with single spaces, so quote anything your
+own shell would otherwise expand. Multi-line text works: quote it and the newlines are
+carried through as they are.
+
+The helper exits 0 whether or not anything was delivered — the channel reports nothing back
+(see the rules below). Only a usage error is loud: missing arguments, or a `;` in the target
+(`;` is the sequence's field separator, so such a target could never match a title).
 
 ## Rules
 
@@ -392,13 +517,31 @@ ancestor's fd 0/1/2 points at. Reuse that resolution rather than re-inventing on
 | Must be unique | 0 matches → nothing is sent. 2+ matches → nothing is sent; winmux never picks the first. Make the title distinctive. |
 | Never yourself | The sending session is excluded from the candidates. |
 | Live terminals only | Only running terminal tabs are candidates — an exited tab or a viewer tab is never a target, even if its title matches. |
-| Encoding | Standard base64 alphabet only (`base64 -w0`). URL-safe `-_`, whitespace and newlines inside the blob are rejected. |
+| Encoding | Standard base64 alphabet only (`base64 -w0`) — the helper does this for you. URL-safe `-_`, whitespace and newlines inside the blob are rejected. |
 | Size | 32 KiB after decoding (the OSC scanner accepts payloads up to 64 KiB, sized for exactly this after base64 expansion). Oversized sends are dropped before parsing, with no error back — send a file path, not a file. |
-| Raw bytes | The decoded bytes go to the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. Include a trailing newline to execute; leave it off to only pre-fill the line. |
+| Raw bytes | The text goes to the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. The trailing newline is what executes it; `-l` leaves it off to only pre-fill the line. |
 | Silent | There is no reply, no acknowledgement, and no error in your terminal. Failures are logged by the winmux app (its stderr), not by you. |
 
 Because it is silent, confirm the effect out of band when it matters — ask the user, or have
 the target pane report back over the same channel.
+
+## Reference — the raw escape sequence
+
+The helper wraps a single OSC sequence. Emit it directly only where the helper is missing
+(winmux installs it once per distro):
+
+```bash
+printf '\033]777;winmux-send;build;'"$(printf '%s\n' 'cargo test' | base64 -w0)"'\007' > /dev/tty
+```
+
+Fields: `winmux-send` `;` target `;` base64 of the raw bytes. The trailing `\n` inside the
+inner `printf` is what makes the target shell run the line — without it the text just sits
+at its prompt.
+
+`> /dev/tty` fails with `No such device or address` wherever the process has no controlling
+TTY (inside a Claude Code hook, for one). Resolving the terminal device from the `/proc`
+ancestor chain in that case is precisely what the helper already does — use it rather than
+re-inventing the walk.
 
 ## Security
 
@@ -418,7 +561,7 @@ if [ "$status" -ne 0 ] || ! mv -f "$CLAUDE_SKILL_DIR/SKILL.md.tmp" "$CLAUDE_SKIL
 fi
 log "winmux-send skill installed: $CLAUDE_SKILL_DIR/SKILL.md"
 
-# --- 3. Claude Code hooks ---------------------------------------------------------------
+# --- 4. Claude Code hooks ---------------------------------------------------------------
 # The merge needs a JSON parser: settings.json is the user's file and existing values must
 # survive untouched, which rules out text munging. Without python3 we stop **before the
 # marker** so the next launch retries instead of leaving a half-provisioned distro behind.
@@ -431,6 +574,7 @@ fi
 if python3 - "$CLAUDE_SETTINGS" "$NOTIFY_CMD" <<'WINMUX_CLAUDE_EOF' >> "$LOG" 2>&1
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -442,9 +586,24 @@ EVENTS = [
     ("Notification", "winmux:needsInput 'needs input'"),
     ("Stop", "winmux:idle done"),
 ]
-# "Already wired" is judged on the script name, not our exact path: a user who wired the
-# document's manual path by hand must not end up with two hooks firing per event.
+# A hook that runs *some* winmux-notify.sh already covers its event: never add a second one.
 MARK = "winmux-notify.sh"
+
+
+def resolve(path):
+    """Compare hook paths by what they point at, not by how they are spelled."""
+    return os.path.normpath(os.path.expanduser(os.path.expandvars(path)))
+
+
+# Our own installed copy. A hook pointing anywhere else runs an older copy of the same
+# contract (the manual path in the document, a hand-wired ~/.claude/hooks/...), so it is
+# migrated onto this one instead of being left to run stale code.
+CANONICAL = resolve(notify_cmd.strip().strip('"').strip("'"))
+
+# Leading word of a hook command: "quoted", 'quoted', or a bare run of non-space characters.
+# Group 1 is the indent, group 2 the word with its quotes — enough to splice the path out
+# and leave the arguments after it exactly as the user wrote them.
+FIRST_WORD = re.compile(r'^(\s*)("[^"]*"|\'[^\']*\'|\S+)')
 
 data = {}
 if os.path.exists(settings_path):
@@ -462,22 +621,42 @@ if not isinstance(hooks, dict):
     raise SystemExit('%s: "hooks" is not an object; left untouched' % settings_path)
 
 
-def wired(groups):
+def entries_of(groups):
+    """Every hook entry of an event, flattened. Malformed shapes are skipped, not repaired."""
     for group in groups:
         if not isinstance(group, dict):
             continue
         for entry in group.get("hooks") or []:
-            if isinstance(entry, dict) and MARK in str(entry.get("command", "")):
-                return True
-    return False
+            if isinstance(entry, dict):
+                yield entry
 
 
-added = []
+migrated, added, kept, foreign = [], [], [], []
 for event, args in EVENTS:
     groups = hooks.setdefault(event, [])
     if not isinstance(groups, list):
         raise SystemExit('%s: hooks.%s is not an array; left untouched' % (settings_path, event))
-    if wired(groups):
+    wired = False
+    for entry in entries_of(groups):
+        command = str(entry.get("command", ""))
+        # Anything that is not one of our scripts belongs to the user and is never touched.
+        if MARK not in command:
+            continue
+        wired = True
+        match = FIRST_WORD.match(command)
+        word = match.group(2) if match else ""
+        if MARK not in word:
+            # The script is there but not as the command's leading word (wrapped in a shell,
+            # piped, ...). Rewriting that safely is guesswork, and it already covers the
+            # event, so it stays exactly as it is.
+            foreign.append(event)
+            continue
+        if resolve(word.strip('"').strip("'")) == CANONICAL:
+            kept.append(event)
+            continue
+        entry["command"] = match.group(1) + notify_cmd + command[match.end():]
+        migrated.append(event)
+    if wired:
         continue
     groups.append(
         {
@@ -487,8 +666,18 @@ for event, args in EVENTS:
     )
     added.append(event)
 
-if not added:
-    print("claude: hooks already wired in %s; left untouched" % settings_path)
+report = []
+for label, events in (
+    ("migrated", migrated),
+    ("added", added),
+    ("already wired", kept),
+    ("left untouched (not the leading word)", foreign),
+):
+    if events:
+        report.append("%s %s" % (label, ", ".join(events)))
+print("claude: %s in %s" % ("; ".join(report) or "nothing to do", settings_path))
+
+if not migrated and not added:
     raise SystemExit(0)
 
 os.makedirs(os.path.dirname(settings_path), exist_ok=True)
@@ -499,7 +688,7 @@ with open(tmp, "w", encoding="utf-8") as handle:
 if os.path.exists(settings_path):
     shutil.copymode(settings_path, tmp)
 os.replace(tmp, settings_path)
-print("claude: wired %s in %s" % (", ".join(added), settings_path))
+print("claude: %s written" % settings_path)
 WINMUX_CLAUDE_EOF
 then
   log "claude: hook wiring done"
@@ -509,7 +698,7 @@ else
   exit 1
 fi
 
-# --- 4. Codex notify --------------------------------------------------------------------
+# --- 5. Codex notify --------------------------------------------------------------------
 # Codex's notify program is run once per completed turn, which maps to winmux:idle.
 # We only ever *add* it: an existing notify key is the user's own integration and stays.
 # A missing config.toml means Codex is not installed here — we do not create one.
@@ -604,7 +793,7 @@ else
   exit 1
 fi
 
-# --- 5. marker --------------------------------------------------------------------------
+# --- 6. marker --------------------------------------------------------------------------
 if ! : > "$MARKER"; then
   echo "[winmux] setup: cannot create the marker $MARKER" >&2
   exit 1

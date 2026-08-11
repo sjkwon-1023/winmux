@@ -95,24 +95,28 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
 
 /// `wsl.exe ... --` 뒤에 붙는 **WSL 안 셸 argv**.
 ///
-/// `history_tab` 이 Some 이면 그 탭 전용 HISTFILE 을 물린 로그인 셸을 띄운다 —
-/// 탭의 안정 ID 는 재시작을 넘어 유지되므로 재시작 후에도 같은 탭의 history 만
+/// 모든 경로가 `WINMUX=1` 을 물고 로그인 셸을 exec 한다 — 탭 안에서 도는 에이전트·
+/// 스크립트가 "여기가 winmux 다"를 스스로 알아야 send 채널·알림 계약을 쓸지 판단할
+/// 수 있기 때문이다 (`winmux-send` 스킬의 자가 인지 조건). `history_tab` 이 Some
+/// 이면 `WINMUX_TAB` 으로 자기 탭 id 까지 알려 주고, 그 탭 전용 HISTFILE 을 물린다
+/// — 탭의 안정 ID 는 재시작을 넘어 유지되므로 재시작 후에도 같은 탭의 history 만
 /// 복원된다 (체크포인트 2 UX 요청). 셸 안에서 `mkdir -p` 로 디렉터리를 만드는 이유
 /// 는 Windows 쪽에서 WSL 파일시스템 경로를 추측하지 않기 위해서이고, `$HOME` 은
 /// 공백이 섞여도 안전하도록 따옴표로 감싼다. `VAR=... exec bash -l` 의 할당은
-/// exec 되는 프로세스의 환경으로 전달되며, **Ubuntu 기본 `.bashrc`/`.profile` 은
-/// HISTSIZE 류만 손대고 HISTFILE 은 덮지 않으므로** 이 env 상속만으로 충분하다.
-/// mkdir 이 실패하면 `&&` 가 끊겨 셸이 그대로 종료된다 — 탭이 exited 로 표시돼
-/// 실패가 드러난다 (조용한 fallback 없음).
+/// exec 되는 프로세스의 환경으로 전달되며(= 그 셸의 자식들에게도 상속된다),
+/// **Ubuntu 기본 `.bashrc`/`.profile` 은 HISTSIZE 류만 손대고 HISTFILE 은 덮지
+/// 않으므로** 이 env 상속만으로 충분하다. mkdir 이 실패하면 `&&` 가 끊겨 셸이
+/// 그대로 종료된다 — 탭이 exited 로 표시돼 실패가 드러난다 (조용한 fallback 없음).
 #[cfg(windows)]
 fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
-    let Some(tab) = history_tab else {
-        return vec!["bash".to_string(), "-l".to_string()];
+    let script = match history_tab {
+        Some(tab) => format!(
+            "mkdir -p \"$HOME/.winmux/history\" \
+             && WINMUX=1 WINMUX_TAB={tab} HISTFILE=\"$HOME/.winmux/history/tab-{tab}\" exec bash -l"
+        ),
+        // 탭 id 를 모르는 경로(히스토리 미할당)에서는 WINMUX 만 — 없는 id 를 지어내지 않는다.
+        None => "WINMUX=1 exec bash -l".to_string(),
     };
-    let script = format!(
-        "mkdir -p \"$HOME/.winmux/history\" \
-         && HISTFILE=\"$HOME/.winmux/history/tab-{tab}\" exec bash -l"
-    );
     vec!["bash".to_string(), "-c".to_string(), script]
 }
 
@@ -157,7 +161,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn history_tab_wraps_bash_with_per_tab_histfile() {
+    fn history_tab_wraps_bash_with_winmux_env_and_per_tab_histfile() {
         let req = ShellSpawnReq {
             cwd: Some("/home/me/proj".to_string()),
             distro: Some("Ubuntu".to_string()),
@@ -178,20 +182,24 @@ mod tests {
                 "bash".to_string(),
                 "-c".to_string(),
                 "mkdir -p \"$HOME/.winmux/history\" \
-                 && HISTFILE=\"$HOME/.winmux/history/tab-7\" exec bash -l"
+                 && WINMUX=1 WINMUX_TAB=7 HISTFILE=\"$HOME/.winmux/history/tab-7\" exec bash -l"
                     .to_string(),
             ]
         );
     }
 
     #[test]
-    fn without_history_tab_the_shell_argv_is_plain_login_bash() {
+    fn without_history_tab_the_shell_still_gets_winmux_but_no_tab_id() {
         let spec = spawn_spec(&ShellSpawnReq::default());
-        // history_tab 이 없으면 기존 그대로 `-- bash -l` (셸 기본 history).
+        // 탭 id 가 없으면 WINMUX 만 물린 로그인 셸 (셸 기본 history 그대로).
         // 앞부분은 검사하지 않는다 — env WINMUX_DISTRO 가 `-d` 를 덧붙일 수 있다.
         assert!(
-            spec.args
-                .ends_with(&["--".to_string(), "bash".to_string(), "-l".to_string()]),
+            spec.args.ends_with(&[
+                "--".to_string(),
+                "bash".to_string(),
+                "-c".to_string(),
+                "WINMUX=1 exec bash -l".to_string(),
+            ]),
             "{:?}",
             spec.args
         );

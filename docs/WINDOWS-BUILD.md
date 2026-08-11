@@ -647,7 +647,10 @@ keyboard-first UX batch need one focused re-verification round. Pull, run
    - **idempotence** — restart the app: `setup.log` gains no new lines and
      `settings.json` is unchanged (the marker short-circuits the whole script).
    - **already-wired hooks are left alone** — with a hand-wired hook still in place, the
-     provisioner adds nothing for that event (no double OSC per prompt).
+     provisioner adds nothing for that event (no double OSC per prompt). (This round ran
+     against setup v2. Since **v3** — marker `~/.winmux/.setup-v3` — a hook that runs a
+     `winmux-notify.sh` from another path is *migrated* onto `~/.winmux/bin/` instead of
+     merely being skipped; still never duplicated. See the provision v3 section below.)
    - **new distro on demand** — create a workspace pinned to a second distro (section 4):
      that distro gets provisioned right after the workspace is created, without a restart.
    - **[conditional] Codex** — on a distro with `~/.codex/config.toml`, a root-level
@@ -856,7 +859,68 @@ printf '\033]777;winmux-send;build;'"$(printf '%s\n' 'echo delivered' | base64 -
    `idle`) still route as before: adding `winmux-send` must not disturb the `notify` contract.
 8. **Skill is installed** — inside WSL, `~/.claude/skills/winmux-send/SKILL.md` exists after
    the app has provisioned the distro (it is installed by the same setup script, marker
-   `~/.winmux/.setup-v2`), and a Claude Code session in a winmux tab can find it by name.
+   `~/.winmux/.setup-v3`), and a Claude Code session in a winmux tab can find it by name.
+
+### Agent integration on real hardware (provision v3) — re-verification
+
+Found on the machine after checkpoint 2: the hooks a user had wired by hand still pointed at
+their own `~/.claude/hooks/winmux-notify.sh`, so the newer provisioned script never ran; an
+agent had no way to tell it was inside winmux; and the send channel had to be re-derived from
+the raw escape sequence every time. Setup version 3 (`~/.winmux/.setup-v3`) addresses all
+three, and the last two items below cover the front-end half of the same batch.
+
+The v3 marker differs from v2, so **an already-provisioned distro re-provisions on the next
+launch** — no manual cleanup. Run the app from a console so its stderr is visible.
+
+1. **Hooks are migrated onto the provisioned script** — before launching, note what
+   `~/.claude/settings.json` has (a hand-wired setup points at `~/.claude/hooks/…`). Launch
+   the app once, then check:
+   - all three of `UserPromptSubmit` / `Notification` / `Stop` now run
+     `"$HOME/.winmux/bin/winmux-notify.sh"`, with the **arguments unchanged** (`winmux:running`,
+     `winmux:needsInput 'needs input'`, `winmux:idle done` — or your customised bodies),
+   - **no event has two winmux hooks**, and every hook that is not ours (other tools, other
+     events such as `PreToolUse`) is byte-for-byte as it was,
+   - `~/.winmux/setup.log` names what happened per event — `migrated` / `added` /
+     `already wired` — and `~/.winmux/.setup-v3` exists,
+   - launching again changes nothing (the marker short-circuits; deleting the marker and
+     relaunching must log `already wired` and leave the file untouched).
+   Then run a Claude Code session in a tab and confirm the section 10 item 1 statuses still
+   route (`running` → `needs input` → `idle`): the migration is only worth anything if the
+   migrated path actually fires. The old `~/.claude/hooks/winmux-notify.sh` is left on disk
+   on purpose — nothing references it any more; delete it by hand if you want it gone.
+2. **`winmux-send.sh` sends without hand-assembling the sequence** — title one tab
+   (`printf '\033]0;build\007'`) and from another tab:
+   ```bash
+   ~/.winmux/bin/winmux-send.sh build 'echo delivered'      # arrives and runs
+   ~/.winmux/bin/winmux-send.sh -l build 'echo prefilled'   # arrives, waits at the prompt
+   ~/.winmux/bin/winmux-send.sh nosuchtab hi; echo "exit=$?" # nothing arrives, exit=0, silent
+   ~/.winmux/bin/winmux-send.sh build; echo "exit=$?"        # usage error on stderr, exit=2
+   ```
+   The sending pane must show no echo of the sequence and no confirmation for the deliveries.
+   Then have a **Claude Code session** in a tab call the helper (ask the agent to send
+   something to `build` — the `winmux-send` skill now points it here): it must arrive from
+   the agent's tool context too, which is the case that has no controlling TTY.
+3. **A tab knows it is winmux** — in a fresh terminal tab, `echo "$WINMUX / $WINMUX_TAB"`
+   prints `1 / <number>`. The number is that tab's id: it is stable across an app restart
+   for the same tab, and two tabs never share one. It must survive into child processes
+   (`bash -c 'echo $WINMUX_TAB'`, and a Claude Code session's Bash tool). Existing per-tab
+   history keeps working — the same wrapper sets `HISTFILE` — so check that a restarted tab
+   still recalls its own history with the up arrow.
+4. **Codex's input box is legible** — run `codex` in a tab: its composer box border, the
+   separator line above it and the dim placeholder text must all be clearly distinguishable
+   from the terminal background (the failure this fixes was a TUI that dissolved into the
+   background). Check the same for another TUI you have handy (`htop`, `mc`) so the palette
+   is not merely tuned to one app, and confirm normal ANSI colours in `ls`/`git diff` still
+   look right.
+5. **The needs-input chime** — with the app focused, click or press a key once (the audio
+   context unlocks on the first gesture), then run a Claude Code session and let it ask a
+   question: a short two-tone chime plays **once** as the workspace turns `needs input`.
+   Then confirm the quiet cases: no sound on `running` or `idle`, no repeat while it stays
+   at `needs input`, and none at all on app start when a restored workspace is already at
+   `needs input`. With two workspaces going to `needs input` in the same snapshot it must
+   still be a single chime. The sound is synthesised in the WebView, so nothing needs to be
+   installed; if it does not play at all, check that the first-gesture unlock happened (the
+   dev console logs a debug line when the audio context is unavailable).
 
 ## 11. ARM64 cross-build notes
 

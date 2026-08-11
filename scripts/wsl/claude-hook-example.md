@@ -17,7 +17,7 @@ named pipe, or Windows helper CLI.
 
 ## Automatic provisioning
 
-**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v2`); this
+**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v3`); this
 document remains the contract and the manual path.**
 
 On launch the app streams a setup script into `wsl.exe [-d <distro>] -- bash -s` for every
@@ -26,15 +26,31 @@ guess at the WSL home path and no dependency on a distro's `interop`/`automount`
 Once per distro it:
 
 - installs the script below at `~/.winmux/bin/winmux-notify.sh` (executable),
+- installs the send helper at `~/.winmux/bin/winmux-send.sh` (executable) — the
+  command-line half of the send channel below, so nothing has to assemble the escape
+  sequence or repeat the tty resolution by hand,
 - installs the `winmux-send` skill at `~/.claude/skills/winmux-send/SKILL.md` (the agent
   send channel below; source: `scripts/wsl/skills/winmux-send/SKILL.md`),
-- merges the three hooks into `~/.claude/settings.json`, keeping every existing value and
-  **skipping any event that already runs a `winmux-notify.sh`** — a hand-wired setup is
-  never duplicated or overwritten,
+- merges the three hooks into `~/.claude/settings.json`, keeping every existing value (see
+  the migration rules below),
 - adds a `notify` key to `~/.codex/config.toml` **only if** that file exists and has no
   `notify` of its own (Codex runs it once per completed turn, which maps to `winmux:idle`);
   a missing file means Codex is not installed there and nothing is created,
 - records what it did in `~/.winmux/setup.log`, then writes the marker.
+
+The hook merge treats each of the three events on its own, and never touches a hook that is
+not one of ours:
+
+| Existing hook for the event | Result | Logged as |
+|---|---|---|
+| Runs `~/.winmux/bin/winmux-notify.sh` (however it is spelled — `$HOME`, `~`, absolute) | Left exactly as it is, custom arguments included | `already wired` |
+| Runs a `winmux-notify.sh` from **another** path (a hand-wired `~/.claude/hooks/…`, an older install) | The **path** is rewritten to `"$HOME/.winmux/bin/winmux-notify.sh"`; the arguments after it stay byte-for-byte | `migrated` |
+| Mentions `winmux-notify.sh` somewhere other than the leading word (`bash ~/…/winmux-notify.sh …`) | Left alone — rewriting that shape would be guesswork, and it already covers the event | `left untouched` |
+| None | A new entry is appended | `added` |
+
+Migration exists because a hand-wired hook points at an older copy of *this* contract, which
+goes stale as the script below changes (the tty fallback, the stdin JSON body). Nothing is
+ever duplicated: an event that has any `winmux-notify.sh` hook never gets a second one.
 
 Any failure leaves the marker unwritten, so the next launch retries. A distro without
 `python3` gets the notify script but no hook merge (the merge has to preserve an existing
@@ -92,7 +108,19 @@ it never goes through the frontend — the Rust side writes the bytes to the tar
 stdin directly.
 
 The skill that teaches an agent to use it is `scripts/wsl/skills/winmux-send/SKILL.md`
-(auto-provisioned to `~/.claude/skills/winmux-send/SKILL.md`).
+(auto-provisioned to `~/.claude/skills/winmux-send/SKILL.md`), and the helper it tells the
+agent to call is `~/.winmux/bin/winmux-send.sh`:
+
+```bash
+~/.winmux/bin/winmux-send.sh build 'cargo test'     # runs the line over there
+~/.winmux/bin/winmux-send.sh -l build 'cargo test'  # literal: only pre-fills the prompt
+```
+
+The helper encodes the text, appends the trailing newline (unless `-l`), and resolves the
+terminal device with the same two-step discipline as `winmux-notify.sh` — so it works from a
+hook too. Delivery stays silent (exit 0 either way); only a usage error is reported.
+
+The sequence the helper emits:
 
 ```
 ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
@@ -123,6 +151,13 @@ ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
   expansion. Pass a path, not
   a file.
 - No state changes, so no snapshot is published and nothing is persisted.
+
+**Environment.** Every winmux terminal exports `WINMUX=1`, and a tab with per-tab history
+also exports `WINMUX_TAB=<tab id>` (its own stable tab id). That is how an agent knows it is
+inside winmux at all — the skill's description keys off `WINMUX` — and the id is the tab's
+self-reference for a reply address. The wrapper that sets them is
+`apps/winmux/src-tauri/src/host.rs::bash_argv`, so they reach the login shell and every
+child of it.
 
 **Security.** Any terminal program on the machine that can write to a pane's PTY can inject
 input into another pane this way. That is intended — winmux assumes your own machine and
@@ -167,7 +202,8 @@ its stdout *is* the PTY, so neither a redirect nor a fallback is needed.)
 ## Example hook script
 
 `~/.claude/hooks/winmux-notify.sh` (must be made executable: `chmod +x`) — auto-provisioning
-installs this same text at `~/.winmux/bin/winmux-notify.sh` instead, so the block below is
+installs this same text at `~/.winmux/bin/winmux-notify.sh` instead, and migrates a hook
+still pointing at the manual path onto that copy (see the table above), so the block below is
 the canonical source for the copy embedded in `apps/winmux/src-tauri/src/provision.rs`
 (**keep the two byte-identical**):
 
