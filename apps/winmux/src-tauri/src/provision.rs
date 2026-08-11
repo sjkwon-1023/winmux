@@ -32,7 +32,7 @@ use tauri::AppHandle;
 /// 설치 스크립트 버전. 마커 파일명(`~/.winmux/.setup-v<N>`)에 들어가므로, 스크립트
 /// 내용을 바꿔 기존 사용자에게도 다시 깔아야 할 때 이 값을 올리면 된다 (마커가
 /// 달라져 전원 재실행). 스크립트 본문의 `@SETUP_VERSION@` 자리에 치환된다.
-const SETUP_VERSION: u32 = 4;
+const SETUP_VERSION: u32 = 5;
 
 /// 프로세스 수명 캐시 — **해석된** distro 이름 기준으로 앱 실행당 1회만 스폰한다.
 /// 기본 distro(None)는 claim 전에 실제 이름으로 해석된다 (보안 리뷰 finding):
@@ -731,7 +731,7 @@ description: List the panes winmux has open, and send text or a command into ano
 
 Inside a winmux terminal `$WINMUX` is set and the `winmux` command is on `PATH`. It delivers
 text straight into **another pane's stdin**, exactly as if it had been typed there, even when
-that pane sits in a background workspace.
+that tab is not the one on screen.
 
 ## 1. Find the target
 
@@ -743,13 +743,16 @@ winmux ls
 TAB     TITLE  WORKSPACE  STATUS   COMMAND
 #176 *  agent  winmux     running  claude
 #181    build  winmux     running  npm run dev
-#204    api    server     running  -
+#204    api    winmux     running  -
 ```
 
 Use `#<id>` from the TAB column — it is the stable address. A title is only whatever the tab
 last set with OSC 0, and a shell prompt hook may rewrite it on every prompt. `*` marks your
 own tab (`$WINMUX_TAB`, also printed by `winmux id`). `COMMAND` is `-` when the tab sits at
 its prompt, `?` when its shell is out of reach (another WSL distro, a Windows shell).
+
+Both halves stop at **your own workspace**: `winmux ls` lists only its tabs, and `winmux send`
+reaches only them — a tab in another workspace is unreachable by title and by id alike.
 
 ## 2. Send
 
@@ -765,7 +768,8 @@ joined with single spaces, so quote anything your own shell would expand.
 
 | Rule | Detail |
 |---|---|
-| Address | `#<id>` is exact. A bare word is instead a case-insensitive substring of a tab title across all workspaces, and must match **exactly one** live terminal tab — on 0 or 2+ matches nothing is sent, and winmux never picks the first. |
+| Address | `#<id>` is exact. A bare word is instead a case-insensitive substring of a tab title, and must match **exactly one** live terminal tab — on 0 or 2+ matches nothing is sent, and winmux never picks the first. |
+| Your workspace only | Candidates stop at the workspace your own tab is in, and so does `winmux ls`. An id from elsewhere resolves to nothing, exactly like an id that does not exist. |
 | Never yourself | Your own tab is excluded from the candidates either way. |
 | Live terminals only | An exited tab or a viewer tab is never a target, whatever its title. |
 | Raw bytes | The text reaches the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. The trailing newline is what runs it; `-l` leaves it off. |

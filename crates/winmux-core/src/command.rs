@@ -8,6 +8,11 @@
 //!
 //! - 대상 id(pane/tab/workspace) 탐색은 **전 워크스페이스 범위** — 안정 ID 는 단일
 //!   카운터 발급이라 전역 유일하다. 미지 id 는 [`CommandError::UnknownTarget`].
+//! - **예외: 에이전트 채널** ([`Dispatcher::resolve_send_target`]·
+//!   [`Dispatcher::list_tabs`])은 요청자의 **워크스페이스 안**으로 범위가 좁혀진다
+//!   (사용자 결정 2026-08-11 — 워크스페이스가 프로젝트 격리 단위라, 채널이 그
+//!   경계를 넘으면 오발사 반경이 프로젝트 밖까지 불필요하게 넓어진다). 이 둘은
+//!   `dispatch` 를 타지 않는 순수 조회라 위 규칙과 독립이다.
 //! - 성공한 dispatch 마다 `revision += 1`. 실패 시 상태·revision 불변 (원자성 —
 //!   각 핸들러는 검증을 전부 마친 뒤에만 변이하고, spawn 은 탭 추가 전에 수행).
 //! - [`Dispatcher::apply_event`] 의 미지 session 은 무해한 no-op (10단계 계획 0-5 —
@@ -595,10 +600,12 @@ impl Dispatcher {
     ///
     /// 규칙 (에이전트 채널 계약 — `scripts/wsl/skills/winmux-send/SKILL.md`):
     ///
+    /// - 후보는 **송신자와 같은 워크스페이스**의 running 터미널 탭뿐이다 (아래
+    ///   "워크스페이스 격리"). 그 워크스페이스가 백그라운드여도 상관없다 — 이 채널의
+    ///   요점은 "지금 화면에 없는 pane 에도 보낼 수 있다"는 것이고, 그 반경이
+    ///   워크스페이스 경계에서 멈출 뿐이다.
     /// - `target` 이 **`#<탭 id>`** 형태면 **id 직지정**이다 (아래 "id 주소지정").
-    /// - 그 외에는 제목 매칭이다. 후보는 **전 워크스페이스**의 running 터미널 탭이다.
-    ///   백그라운드 워크스페이스도 포함한다 — 이 채널의 요점이 "지금 화면에 없는
-    ///   pane 에도 보낼 수 있다"는 것이다.
+    /// - 그 외에는 제목 매칭이다.
     /// - `target` 은 [`Tab::title`] 에 대한 **부분일치·대소문자 무시**다 (대상 탭이
     ///   `OSC 0` 으로 정한 제목).
     /// - **송신자 자신은 제외**한다 (자기 stdin 에 되먹임 금지).
@@ -610,6 +617,23 @@ impl Dispatcher {
     /// 빈 `target` 은 모든 제목에 부분일치하므로, 후보가 정확히 하나일 때만 전달되고
     /// 그 외에는 위 규칙대로 거부된다 (별도 특례를 두지 않는다).
     ///
+    /// # 워크스페이스 격리 (사용자 결정 2026-08-11)
+    ///
+    /// **워크스페이스는 프로젝트 격리 단위다.** 채널이 그 경계를 넘으면, 잘못 겨눈
+    /// 한 줄이 지금 하는 일과 아무 상관없는 프로젝트의 셸에서 실행될 수 있다 —
+    /// 오발사 반경이 격리 단위 밖까지 불필요하게 넓어진다. 그래서 송신자 세션이
+    /// 실린 탭의 워크스페이스를 먼저 찾고([`Self::workspace_index_of_session`]),
+    /// 후보를 그 워크스페이스 하나로 한정한다.
+    ///
+    /// 이 경계는 **제목 매칭과 id 직지정 양쪽에 똑같이** 걸린다: 안정 ID 가 전역
+    /// 유일하다는 사실은 주소의 성질이지 경계를 뚫는 열쇠가 아니므로, 다른
+    /// 워크스페이스의 `#id` 도 [`SendTargetError::NoMatch`] 다. 송신자 세션이 어느
+    /// 탭에도 없으면(이론상 불가 — OSC 를 낸 살아 있는 세션이다) 경계를 정할 수
+    /// 없으므로 조용히 전 워크스페이스로 넓어지지 않고 역시 NoMatch 다.
+    ///
+    /// 열거([`Self::list_tabs`])도 같은 경계를 쓴다 — 보이는 것과 닿는 것이 어긋나면
+    /// 에이전트가 목록에서 고른 대상이 말없이 실패한다.
+    ///
     /// # id 주소지정 (`#<u64>`)
     ///
     /// `#` 뒤가 **10진 숫자만으로 이루어져 `u64` 로 파싱될 때에만** id 모드다. 그
@@ -618,9 +642,9 @@ impl Dispatcher {
     /// 길을 죽이지 않기 위해서다.
     ///
     /// id 모드의 판정은 위 제목 규칙과 같은 가드를 그대로 쓰되 결과가 이분법이다:
-    /// 그 id 의 탭이 존재하고 running 터미널이며 송신자 자신이 아니면 배달,
-    /// 아니면 [`SendTargetError::NoMatch`] 다. 안정 ID 는 전역 유일하므로
-    /// [`SendTargetError::Ambiguous`] 가 나올 수 없다.
+    /// 그 id 의 탭이 **송신자의 워크스페이스에** 존재하고 running 터미널이며 송신자
+    /// 자신이 아니면 배달, 아니면 [`SendTargetError::NoMatch`] 다. 안정 ID 는 전역
+    /// 유일하므로 [`SendTargetError::Ambiguous`] 가 나올 수 없다.
     ///
     /// 에이전트는 자기 탭 id 를 `WINMUX_TAB` 환경변수로 알고 있고, 열거
     /// ([`Self::list_tabs`])가 상대의 id 를 준다 — 제목이 겹치거나 자주 바뀌는
@@ -630,30 +654,33 @@ impl Dispatcher {
         sender: SessionId,
         target: &str,
     ) -> Result<SessionId, SendTargetError> {
+        // 격리 경계부터 정한다 — 못 정하면 아무 데도 보내지 않는다 (rustdoc
+        // "워크스페이스 격리").
+        let Some(wi) = self.workspace_index_of_session(sender) else {
+            return Err(SendTargetError::NoMatch);
+        };
         if let Some(tab) = parse_tab_id_target(target) {
-            return self.resolve_send_target_by_id(sender, tab);
+            return self.resolve_send_target_by_id(wi, sender, tab);
         }
         // 한국어 등 대소문자가 없는 문자도 그대로 통과하도록 Unicode lowercase 를 쓴다.
         let needle = target.to_lowercase();
         let mut first = None;
         let mut count = 0usize;
-        for ws in &self.state.workspaces {
-            for pane in ws.panes.values() {
-                for tab in &pane.tabs {
-                    let TabKind::Terminal {
-                        pty_session: Some(session),
-                        status: TerminalStatus::Running,
-                        ..
-                    } = &tab.kind
-                    else {
-                        continue;
-                    };
-                    if *session == sender || !tab.title.to_lowercase().contains(&needle) {
-                        continue;
-                    }
-                    count += 1;
-                    first.get_or_insert(*session);
+        for pane in self.state.workspaces[wi].panes.values() {
+            for tab in &pane.tabs {
+                let TabKind::Terminal {
+                    pty_session: Some(session),
+                    status: TerminalStatus::Running,
+                    ..
+                } = &tab.kind
+                else {
+                    continue;
+                };
+                if *session == sender || !tab.title.to_lowercase().contains(&needle) {
+                    continue;
                 }
+                count += 1;
+                first.get_or_insert(*session);
             }
         }
         match count {
@@ -666,77 +693,92 @@ impl Dispatcher {
     /// id 직지정 경로 ([`Self::resolve_send_target`] 의 `#<u64>` 모드). 안정 ID 는
     /// 전역 유일하므로 판정이 이분법이다 — 조건을 하나라도 어기면
     /// [`SendTargetError::NoMatch`] 이고 `Ambiguous` 는 발생하지 않는다.
+    ///
+    /// `wi` 는 호출자가 이미 정한 **송신자의 워크스페이스** 인덱스다 — 순회가 그
+    /// 하나로 제한되므로 다른 워크스페이스의 id 는 "없는 id" 와 같은 취급을 받는다
+    /// (전역 유일한 id 로도 경계를 넘지 못한다는 계약의 구현 지점).
     fn resolve_send_target_by_id(
         &self,
+        wi: usize,
         sender: SessionId,
         target: TabId,
     ) -> Result<SessionId, SendTargetError> {
-        for ws in &self.state.workspaces {
-            for pane in ws.panes.values() {
-                for tab in &pane.tabs {
-                    if tab.id != target {
-                        continue;
-                    }
-                    // 제목 경로와 같은 가드: running 터미널 + 세션 보유 + 송신자 아님.
-                    let TabKind::Terminal {
-                        pty_session: Some(session),
-                        status: TerminalStatus::Running,
-                        ..
-                    } = &tab.kind
-                    else {
-                        return Err(SendTargetError::NoMatch);
-                    };
-                    if *session == sender {
-                        return Err(SendTargetError::NoMatch);
-                    }
-                    return Ok(*session);
+        for pane in self.state.workspaces[wi].panes.values() {
+            for tab in &pane.tabs {
+                if tab.id != target {
+                    continue;
                 }
+                // 제목 경로와 같은 가드: running 터미널 + 세션 보유 + 송신자 아님.
+                let TabKind::Terminal {
+                    pty_session: Some(session),
+                    status: TerminalStatus::Running,
+                    ..
+                } = &tab.kind
+                else {
+                    return Err(SendTargetError::NoMatch);
+                };
+                if *session == sender {
+                    return Err(SendTargetError::NoMatch);
+                }
+                return Ok(*session);
             }
         }
         Err(SendTargetError::NoMatch)
     }
 
-    /// 열려 있는 **모든 탭**의 메타데이터 열거 — 순수 조회다 (상태·revision 불변).
+    /// **요청자와 같은 워크스페이스**에 열려 있는 탭의 메타데이터 열거 — 순수
+    /// 조회다 (상태·revision 불변).
     ///
-    /// 에이전트 질의 채널(`winmux-query;list-tabs`)의 데이터 원천이다. 전
-    /// 워크스페이스를 훑고, 터미널이 아닌 **뷰어 탭도 포함**한다 — 에이전트가
-    /// "무엇이 열려 있나"를 보는 창이지 "어디로 보낼 수 있나" 목록이 아니기
-    /// 때문이다. 보낼 수 있는지는 [`TabInfo::status`] 로 드러난다.
+    /// 에이전트 질의 채널(`winmux-query;list-tabs`)의 데이터 원천이다. 범위는
+    /// 전송([`Self::resolve_send_target`])의 워크스페이스 격리를 그대로 따른다 —
+    /// 열거는 실질적으로 "어디로 보낼 수 있나"의 후보 목록이라, 두 표면의 경계가
+    /// 어긋나면 에이전트가 목록에서 고른 대상이 무음으로 실패한다. `requester`
+    /// 세션이 어느 탭에도 없으면 경계를 정할 수 없으므로 **빈 목록**이다.
     ///
-    /// 순서는 워크스페이스 순 → pane id 순 → 탭 순(pane 안의 표시 순서)이다.
+    /// 터미널이 아닌 **뷰어 탭도 포함**한다 — 에이전트가 "무엇이 열려 있나"를 보는
+    /// 창이지 "어디로 보낼 수 있나" 목록이 아니기 때문이다. 보낼 수 있는지는
+    /// [`TabInfo::status`] 로 드러난다.
+    ///
+    /// 순서는 pane id 순 → 탭 순(pane 안의 표시 순서)이다.
+    ///
+    /// [`TabInfo`] 의 `workspace_id`/`workspace_name` 은 그대로 유지한다: 이제 모든
+    /// 행이 같은 값을 갖지만 "내가 어느 워크스페이스에 있나"라는 문맥이고, 회신
+    /// 스키마를 깎으면 이미 배포된 CLI 가 깨진다 (JSON 출구 계약 불변).
     ///
     /// 여기 실리는 것은 **모델이 아는 메타데이터뿐**이다. 각 탭에서 실제로 도는
     /// 명령 같은 것은 코어가 모르고(무 I/O), 필요하면 상위 계층이 `/proc` 에서
     /// 채운다.
-    pub fn list_tabs(&self) -> Vec<TabInfo> {
+    pub fn list_tabs(&self, requester: SessionId) -> Vec<TabInfo> {
         let mut out = Vec::new();
-        for ws in &self.state.workspaces {
-            for pane in ws.panes.values() {
-                for tab in &pane.tabs {
-                    let (kind, status) = match &tab.kind {
-                        TabKind::Terminal { status, .. } => (
-                            "terminal",
-                            match status {
-                                TerminalStatus::Running => "running",
-                                TerminalStatus::Exited { .. } => "exited",
-                            },
-                        ),
-                        // 뷰어 탭에는 프로세스가 없다 — 세 번째 상태로 구분한다.
-                        TabKind::FolderBrowser { .. } => ("folderBrowser", "viewer"),
-                        TabKind::TextViewer { .. } => ("textViewer", "viewer"),
-                        TabKind::MarkdownViewer { .. } => ("markdownViewer", "viewer"),
-                    };
-                    out.push(TabInfo {
-                        tab: tab.id.0,
-                        title: tab.title.clone(),
-                        workspace_id: ws.id.0,
-                        workspace_name: ws.name.clone(),
-                        pane: pane.id.0,
-                        active: pane.active_tab == Some(tab.id),
-                        kind,
-                        status,
-                    });
-                }
+        let Some(wi) = self.workspace_index_of_session(requester) else {
+            return out;
+        };
+        let ws = &self.state.workspaces[wi];
+        for pane in ws.panes.values() {
+            for tab in &pane.tabs {
+                let (kind, status) = match &tab.kind {
+                    TabKind::Terminal { status, .. } => (
+                        "terminal",
+                        match status {
+                            TerminalStatus::Running => "running",
+                            TerminalStatus::Exited { .. } => "exited",
+                        },
+                    ),
+                    // 뷰어 탭에는 프로세스가 없다 — 세 번째 상태로 구분한다.
+                    TabKind::FolderBrowser { .. } => ("folderBrowser", "viewer"),
+                    TabKind::TextViewer { .. } => ("textViewer", "viewer"),
+                    TabKind::MarkdownViewer { .. } => ("markdownViewer", "viewer"),
+                };
+                out.push(TabInfo {
+                    tab: tab.id.0,
+                    title: tab.title.clone(),
+                    workspace_id: ws.id.0,
+                    workspace_name: ws.name.clone(),
+                    pane: pane.id.0,
+                    active: pane.active_tab == Some(tab.id),
+                    kind,
+                    status,
+                });
             }
         }
         out
@@ -1285,6 +1327,14 @@ impl Dispatcher {
             }
         }
         None
+    }
+
+    /// `session` 이 실린 탭이 속한 **워크스페이스 인덱스** — 에이전트 채널
+    /// ([`Self::resolve_send_target`]·[`Self::list_tabs`])의 격리 경계 기준점이다.
+    /// 역매핑은 [`Self::locate_session`] 을 그대로 재사용하고 pane·tab 위치만
+    /// 버린다. 미지 세션은 None — 호출자가 각각 NoMatch·빈 목록으로 닫는다.
+    fn workspace_index_of_session(&self, session: SessionId) -> Option<usize> {
+        self.locate_session(session).map(|(wi, _, _)| wi)
     }
 
     /// `tab` 을 소유한 (워크스페이스 인덱스, pane id, tab 인덱스).
@@ -3590,8 +3640,10 @@ mod tests {
         assert_eq!(d.resolve_send_target(sender, "Build Shell"), Ok(s_build));
     }
 
+    /// 격리 반증 (사용자 결정 2026-08-11): 제목이 정확히 일치해도 다른 워크스페이스의
+    /// 탭에는 닿지 않는다. 예전 계약("전 워크스페이스 도달")을 뒤집은 테스트다.
     #[test]
-    fn resolve_send_target_reaches_background_workspaces() {
+    fn resolve_send_target_is_confined_to_the_senders_workspace() {
         let (mut d, _host) = dispatcher();
         let (_ws1, pane1) = create_ws(&mut d, "one");
         let (_sender_tab, sender) = create_terminal_tab(&mut d, pane1);
@@ -3601,9 +3653,41 @@ mod tests {
         set_title(&mut d, sender, "claude");
         set_title(&mut d, other, "agent zero");
 
-        // 백그라운드 → active 방향, active → 백그라운드 방향 모두 도달한다.
-        assert_eq!(d.resolve_send_target(sender, "agent"), Ok(other));
-        assert_eq!(d.resolve_send_target(other, "claude"), Ok(sender));
+        // 백그라운드 → active, active → 백그라운드 어느 방향도 경계를 넘지 못한다.
+        assert_eq!(
+            d.resolve_send_target(sender, "agent"),
+            Err(SendTargetError::NoMatch)
+        );
+        assert_eq!(
+            d.resolve_send_target(other, "claude"),
+            Err(SendTargetError::NoMatch)
+        );
+
+        // 회귀 대조군: 같은 워크스페이스 안에서는 (그 워크스페이스가 백그라운드여도)
+        // 그대로 도달한다 — 좁아진 것은 반경뿐이다.
+        let (_peer_tab, peer) = create_terminal_tab(&mut d, pane1);
+        set_title(&mut d, peer, "agent one");
+        assert_eq!(d.resolve_send_target(sender, "agent"), Ok(peer));
+    }
+
+    /// 송신자 세션이 어느 탭에도 없으면(이론상 불가) 경계를 정할 수 없다 — 조용히
+    /// 전 워크스페이스로 넓어지지 않고 NoMatch·빈 목록으로 닫힌다.
+    #[test]
+    fn agent_channel_closes_for_a_session_that_belongs_to_no_tab() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (target_tab, _target) = create_terminal_tab(&mut d, pane);
+        let ghost: SessionId = 9_999;
+
+        assert_eq!(
+            d.resolve_send_target(ghost, "terminal"),
+            Err(SendTargetError::NoMatch)
+        );
+        assert_eq!(
+            d.resolve_send_target(ghost, &format!("#{}", target_tab.0)),
+            Err(SendTargetError::NoMatch)
+        );
+        assert!(d.list_tabs(ghost).is_empty());
     }
 
     #[test]
@@ -3696,23 +3780,30 @@ mod tests {
 
     // ---- id 주소지정 (`#<탭 id>`) ----
 
+    /// 격리 반증: 안정 ID 가 전역 유일하다는 사실은 주소의 성질이지 경계를 뚫는
+    /// 열쇠가 아니다 — 다른 워크스페이스의 `#id` 는 "없는 id" 와 같은 취급이다.
     #[test]
-    fn resolve_send_target_by_tab_id_hits_across_workspaces() {
+    fn resolve_send_target_by_tab_id_stops_at_the_workspace_boundary() {
         let (mut d, _host) = dispatcher();
         let (_ws1, pane1) = create_ws(&mut d, "one");
         let (_sender_tab, sender) = create_terminal_tab(&mut d, pane1);
+        let (peer_tab, peer) = create_terminal_tab(&mut d, pane1);
         let (_decoy_tab, _decoy) = create_terminal_tab(&mut d, pane1);
-        // 두 번째 워크스페이스가 active 가 되므로 첫 워크스페이스는 백그라운드다 —
-        // id 주소지정도 제목 매칭과 같이 전 워크스페이스를 훑는다.
+        // 두 번째 워크스페이스가 active 가 되므로 첫 워크스페이스는 백그라운드다.
         let (_ws2, pane2) = create_ws(&mut d, "two");
-        let (other_tab, other) = create_terminal_tab(&mut d, pane2);
+        let (other_tab, _other) = create_terminal_tab(&mut d, pane2);
 
         assert_eq!(
             d.resolve_send_target(sender, &format!("#{}", other_tab.0)),
-            Ok(other)
+            Err(SendTargetError::NoMatch)
         );
-        // 대조군: 세 탭의 기본 제목이 모두 "Terminal" 이라 제목으로는 모호하다.
-        // 같은 상황에서도 id 는 유일하게 꽂힌다 — 그것이 이 주소 형태의 요점이다.
+        // 회귀 대조군: 같은 워크스페이스 안의 세 탭은 기본 제목이 모두 "Terminal"
+        // 이라 제목으로는 모호하다. 그 상황에서도 id 는 유일하게 꽂힌다 — 그것이
+        // 이 주소 형태의 요점이고, 격리는 그 요점을 건드리지 않는다.
+        assert_eq!(
+            d.resolve_send_target(sender, &format!("#{}", peer_tab.0)),
+            Ok(peer)
+        );
         assert_eq!(
             d.resolve_send_target(sender, "terminal"),
             Err(SendTargetError::Ambiguous { count: 2 })
@@ -3814,8 +3905,10 @@ mod tests {
 
     // ---- 탭 열거 (질의 채널) ----
 
+    /// 격리 반증 + 필드 계약: 요청자에게는 **자기 워크스페이스의 탭만** 보이고,
+    /// 반대편 요청자에게는 반대편 탭만 보인다. 워크스페이스 문맥 필드는 유지된다.
     #[test]
-    fn list_tabs_enumerates_every_workspace_with_exact_fields() {
+    fn list_tabs_is_scoped_to_the_requesters_workspace_with_exact_fields() {
         let (mut d, _host) = dispatcher();
         let (ws1, pane1) = create_ws(&mut d, "alpha");
         let (t_sender, sender) = create_terminal_tab(&mut d, pane1);
@@ -3827,7 +3920,8 @@ mod tests {
                 path: "/home/u/notes.md".into(),
             },
         );
-        // 두 번째 워크스페이스 — 백그라운드가 되는 첫 워크스페이스도 열거된다.
+        // 두 번째 워크스페이스가 active 가 되므로 alpha 는 백그라운드다 — 요청자가
+        // 백그라운드에 있어도 자기 워크스페이스는 온전히 열거된다.
         let (ws2, pane2) = create_ws(&mut d, "beta");
         let (t_other, other) = create_terminal_tab(&mut d, pane2);
         set_title(&mut d, sender, "claude");
@@ -3838,11 +3932,11 @@ mod tests {
             code: Some(1),
         });
 
-        let tabs = d.list_tabs();
-        // 워크스페이스 순 → pane id 순 → 탭 순. 뷰어 탭도 빠짐없이 실린다.
+        let tabs = d.list_tabs(sender);
+        // pane id 순 → 탭 순. 뷰어 탭도 빠짐없이 실리고, beta 의 탭은 빠진다.
         assert_eq!(
             tabs.iter().map(|t| t.tab).collect::<Vec<_>>(),
-            vec![t_sender.0, t_dead.0, viewer.0, t_other.0]
+            vec![t_sender.0, t_dead.0, viewer.0]
         );
         assert_eq!(
             tabs[0],
@@ -3867,9 +3961,11 @@ mod tests {
         assert_eq!(tabs[2].title, "notes.md");
         // 마지막 생성 탭이 그 pane 의 active_tab 이다.
         assert!(tabs[2].active, "뷰어가 pane1 의 active_tab");
+
+        // 반대편 요청자는 beta 만 본다 — 경계는 요청자마다 따로 그어진다.
         assert_eq!(
-            tabs[3],
-            TabInfo {
+            d.list_tabs(other),
+            vec![TabInfo {
                 tab: t_other.0,
                 title: "agent".into(),
                 workspace_id: ws2.0,
@@ -3878,7 +3974,7 @@ mod tests {
                 active: true,
                 kind: "terminal",
                 status: "running",
-            }
+            }]
         );
     }
 
@@ -3900,11 +3996,12 @@ mod tests {
                 path: "/home/u/a.txt".into(),
             },
         );
-        // 분할한 pane 의 탭도 같은 열거에 들어온다.
+        // 분할한 pane 의 탭도 같은 열거에 들어온다 — 격리 경계는 워크스페이스지
+        // pane 이 아니다 (요청자는 pane_b 에 있고 pane 의 탭들도 보인다).
         let (pane_b, _split) = split_empty(&mut d, pane, SplitDirection::Horizontal);
-        let (t_term, _s) = create_terminal_tab(&mut d, pane_b);
+        let (t_term, requester) = create_terminal_tab(&mut d, pane_b);
 
-        let tabs = d.list_tabs();
+        let tabs = d.list_tabs(requester);
         assert_eq!(
             tabs.iter().map(|t| (t.pane, t.kind)).collect::<Vec<_>>(),
             vec![
@@ -3924,12 +4021,15 @@ mod tests {
     #[test]
     fn list_tabs_is_a_pure_query_and_serializes_camel_case() {
         let (mut d, _host) = dispatcher();
-        assert!(d.list_tabs().is_empty(), "워크스페이스가 없으면 빈 목록");
+        assert!(
+            d.list_tabs(999).is_empty(),
+            "워크스페이스가 없으면(=요청자를 찾을 수 없으면) 빈 목록"
+        );
         let (ws, pane) = create_ws(&mut d, "ws");
-        let (tab, _s) = create_terminal_tab(&mut d, pane);
+        let (tab, requester) = create_terminal_tab(&mut d, pane);
         let before = serde_json::to_value(d.state()).unwrap();
 
-        let tabs = d.list_tabs();
+        let tabs = d.list_tabs(requester);
         assert_eq!(serde_json::to_value(d.state()).unwrap(), before);
         // JSON 출구 계약 — camelCase 키에 평평한 u64 id.
         assert_eq!(

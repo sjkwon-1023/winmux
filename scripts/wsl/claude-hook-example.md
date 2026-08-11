@@ -17,7 +17,7 @@ named pipe, or Windows helper CLI.
 
 ## Automatic provisioning
 
-**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v4`); this
+**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v5`); this
 document remains the contract and the manual path.**
 
 On launch the app streams a setup script into `wsl.exe [-d <distro>] -- bash -s` for every
@@ -108,9 +108,19 @@ Detailed rules:
 
 The agent-facing way to put text into **another pane's terminal**. This is the designed
 successor to the retired manual send mode ([ADR-0005](../../docs/adr/0005-inter-pane-text-passing.md)):
-it is addressed by tab id or title, it works while the target sits in a background workspace,
-and it never goes through the frontend — the Rust side writes the bytes to the target
-session's stdin directly.
+it is addressed by tab id or title, it works while the target is off screen (a background tab,
+or a whole background workspace), and it never goes through the frontend — the Rust side writes
+the bytes to the target session's stdin directly.
+
+**The channel is confined to the sender's workspace.** A workspace is the project isolation
+unit, so a channel that crossed it would give a mis-aimed line a blast radius reaching shells
+that have nothing to do with the work in hand (user decision 2026-08-11). The confinement
+applies to **both** addressing modes and to the query channel below: a tab in another
+workspace matches neither its title nor its globally unique `#id`, and does not appear in
+`winmux ls`. Ids stay globally unique — uniqueness is a property of the address, not a key
+past the boundary. If the sender's session cannot be mapped back to a tab at all (it always
+can — it is a live session that just emitted the OSC), there is no boundary to draw and
+nothing is sent.
 
 The skill that teaches an agent to use it is `scripts/wsl/skills/winmux-send/SKILL.md`
 (auto-provisioned to `~/.claude/skills/winmux-send/SKILL.md`), and the command it tells the
@@ -135,24 +145,26 @@ ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
 | Field | Contract |
 |---|---|
 | `winmux-send` | Literal kind marker. Everything else after `777;` keeps its old meaning. |
-| `<target>` | `#<decimal>` addresses a **tab id** exactly. Anything else is matched **case-insensitively as a substring** of a tab's title (the title the target set with `OSC 0`), across **all** workspaces. |
+| `<target>` | `#<decimal>` addresses a **tab id** exactly. Anything else is matched **case-insensitively as a substring** of a tab's title (the title the target set with `OSC 0`). Either way the candidates are the running terminal tabs of the **sender's own workspace**. |
 | `<base64>` | Standard base64 (`A-Za-z0-9+/`, optional `=` padding) of the raw bytes. No URL-safe alphabet, no embedded whitespace or newline. |
 
 | Situation | Result |
 |---|---|
-| Exactly one running terminal tab matches | Its stdin receives the decoded bytes verbatim |
+| Exactly one running terminal tab **in the sender's workspace** matches | Its stdin receives the decoded bytes verbatim |
 | No match | Nothing is sent |
 | Two or more matches | Nothing is sent — the first match is **never** picked |
 | The sender's own tab matches | It is excluded before counting |
+| The only match is in another workspace | Nothing is sent — it was never a candidate |
 | Decoded size > 32 KiB | Rejected |
 | Malformed base64 / missing text field | Rejected |
 
 **Id addressing.** `#<target>` is an id only when everything after `#` is decimal digits that
 parse as a `u64`; `#build`, `#`, `#1.2` and an out-of-range number all fall back to title
 matching, so a tab whose title starts with `#` stays reachable by title. An id resolves to
-one tab or to none — `Ambiguous` cannot happen, because ids are unique across the app. The
-tab's own id is in its `WINMUX_TAB` (below), and `winmux ls` lists everyone else's; a title
-is the weaker address because a prompt hook may rewrite it on every prompt.
+one tab or to none — `Ambiguous` cannot happen, because ids are unique across the app; an id
+belonging to another workspace resolves to none, exactly like an id that does not exist. The
+tab's own id is in its `WINMUX_TAB` (below), and `winmux ls` lists the rest of its workspace;
+a title is the weaker address because a prompt hook may rewrite it on every prompt.
 
 - **Nothing is written back to the sender**, on success or failure — a diagnostic in someone
   else's terminal (and in its replay buffer) is worse pollution than a missed send. Failures
@@ -176,15 +188,18 @@ convention *prepends* to `PATH` (`PATH="$HOME/bin:$PATH"`) rather than reassigni
 **Security.** Any terminal program on the machine that can write to a pane's PTY can inject
 input into another pane this way. That is intended — winmux assumes your own machine and
 cooperating agents — and this channel is a convenience, **not** a privilege boundary. The
-size cap, the unique-match requirement and the self-exclusion are misfire guards, not
-security controls.
+size cap, the unique-match requirement, the self-exclusion and the workspace confinement are
+misfire guards, not security controls: they bound the blast radius of a *mistake*, and none
+of them stops a program that is already free to write to the target's PTY itself.
 
 ## Agent query channel — `OSC 777;winmux-query`
 
 The read half of the agent channel: it answers "what tabs are open?" so an agent can pick a
-target id instead of guessing at a title. Unlike the notify and send channels this one has a
-**reply**, and because the OSC stream is one-way (into the app) the reply is a **file the
-sender names in the request**.
+target id instead of guessing at a title. It shares the send channel's **workspace
+confinement** — it enumerates the requester's own workspace and nothing else, because a list
+that reached further would offer targets the send half refuses. Unlike the notify and send
+channels this one has a **reply**, and because the OSC stream is one-way (into the app) the
+reply is a **file the sender names in the request**.
 
 ```
 ESC ] 777 ; winmux-query ; <kind> ; <base64 reply path> BEL
@@ -216,10 +231,11 @@ The reply for `list-tabs`:
 
 | Field | Meaning |
 |---|---|
-| `tabs` | Every open tab, all workspaces, in workspace → pane → tab order. Viewer tabs are included: this answers "what is open", not "what can I send to". |
+| `tabs` | Every open tab **of the requester's workspace**, in pane → tab order. Viewer tabs are included: this answers "what is open", not "what can I send to". |
+| `workspaceId` / `workspaceName` | The requester's own workspace — the same value on every row, kept because it names the context the list is scoped to (the reply schema did not change with the confinement). |
 | `kind` | `terminal` \| `folderBrowser` \| `textViewer` \| `markdownViewer` |
 | `status` | `running` \| `exited` (terminals) \| `viewer` (a tab with no process). Only `running` terminals are send targets. |
-| `self_tab` | The requester's own tab id, or `null` when the app cannot map the session back to a tab. |
+| `self_tab` | The requester's own tab id, or `null` when the app cannot map the session back to a tab. That case also empties `tabs`: with no workspace to scope to, there is nothing to enumerate. |
 
 - **The file appears only when it is complete.** The app writes `<path>.partial` and renames
   it into place, so a reader that waits for the path to exist never sees half-written JSON —

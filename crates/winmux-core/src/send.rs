@@ -31,7 +31,8 @@
 //!
 //! 같은 머신에서 pane 의 PTY 로 바이트를 흘릴 수 있는 어떤 터미널 프로그램이든 이
 //! 채널로 다른 pane 에 입력을 넣을 수 있다. 본인 머신·협력 에이전트를 전제한 의도된
-//! 기능이며, 상한·유일 매치·자기 제외가 오발사 가드다 (권한 경계가 아니다).
+//! 기능이며, 상한·유일 매치·자기 제외·워크스페이스 격리가 오발사 가드다 (권한 경계가
+//! 아니다).
 
 use std::fmt;
 
@@ -68,7 +69,10 @@ impl std::error::Error for SendDecodeError {}
 /// ([`Dispatcher::resolve_send_target`](crate::command::Dispatcher::resolve_send_target)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTargetError {
-    /// 제목이 일치하는 running 터미널 탭이 없다 (자기 자신은 애초에 제외된다).
+    /// 후보 중 대상이 없다 — 제목·`#id` 가 일치하는 running 터미널 탭이 없거나,
+    /// 일치하는 탭이 **송신자의 워크스페이스 밖**이라 애초에 후보가 아니었다
+    /// (워크스페이스 격리 — `resolve_send_target` 의 같은 이름 절). 자기 자신도
+    /// 애초에 제외된다.
     NoMatch,
     /// 둘 이상 일치 — **첫 매치를 고르지 않는다**. 엉뚱한 pane 에 명령이 들어가는
     /// 것보다 아무 데도 안 가는 쪽이 낫다 (오발사 방지).

@@ -7,7 +7,7 @@ description: List the panes winmux has open, and send text or a command into ano
 
 Inside a winmux terminal `$WINMUX` is set and the `winmux` command is on `PATH`. It delivers
 text straight into **another pane's stdin**, exactly as if it had been typed there, even when
-that pane sits in a background workspace.
+that tab is not the one on screen.
 
 ## 1. Find the target
 
@@ -19,13 +19,16 @@ winmux ls
 TAB     TITLE  WORKSPACE  STATUS   COMMAND
 #176 *  agent  winmux     running  claude
 #181    build  winmux     running  npm run dev
-#204    api    server     running  -
+#204    api    winmux     running  -
 ```
 
 Use `#<id>` from the TAB column — it is the stable address. A title is only whatever the tab
 last set with OSC 0, and a shell prompt hook may rewrite it on every prompt. `*` marks your
 own tab (`$WINMUX_TAB`, also printed by `winmux id`). `COMMAND` is `-` when the tab sits at
 its prompt, `?` when its shell is out of reach (another WSL distro, a Windows shell).
+
+Both halves stop at **your own workspace**: `winmux ls` lists only its tabs, and `winmux send`
+reaches only them — a tab in another workspace is unreachable by title and by id alike.
 
 ## 2. Send
 
@@ -41,7 +44,8 @@ joined with single spaces, so quote anything your own shell would expand.
 
 | Rule | Detail |
 |---|---|
-| Address | `#<id>` is exact. A bare word is instead a case-insensitive substring of a tab title across all workspaces, and must match **exactly one** live terminal tab — on 0 or 2+ matches nothing is sent, and winmux never picks the first. |
+| Address | `#<id>` is exact. A bare word is instead a case-insensitive substring of a tab title, and must match **exactly one** live terminal tab — on 0 or 2+ matches nothing is sent, and winmux never picks the first. |
+| Your workspace only | Candidates stop at the workspace your own tab is in, and so does `winmux ls`. An id from elsewhere resolves to nothing, exactly like an id that does not exist. |
 | Never yourself | Your own tab is excluded from the candidates either way. |
 | Live terminals only | An exited tab or a viewer tab is never a target, whatever its title. |
 | Raw bytes | The text reaches the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. The trailing newline is what runs it; `-l` leaves it off. |

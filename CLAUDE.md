@@ -49,6 +49,10 @@ Accepted deferrals, one line each. None of these block the MVP.
   showing `?` for a tab whose shell is in another distro or a Windows shell** (it is read
   from this distro's `/proc`). Keyboard targeting for the old manual send mode stays absorbed
   by the stage-17 retirement — it is not coming back.
+- **Cross-workspace send/`ls` would need an explicit opt-in** — both halves of the agent
+  channel stop at the requester's own workspace (2026-08-11 decision, ADR-0005 addendum); if
+  reaching another project's pane ever becomes a real need it arrives as a named opt-in, never
+  as the default radius.
 - **≤100MB RAM** — ~129MB at checkpoint 2 sits inside the 100–150MB adoption band
   (ADR-0001); getting under 100MB is a v2 optimization.
 - **Per-tab shell history GC** — `~/.winmux/history/tab-<id>` files outlive the tabs that

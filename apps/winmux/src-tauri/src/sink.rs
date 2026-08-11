@@ -275,7 +275,8 @@ struct QueryReply<'a> {
 }
 
 /// 에이전트 질의 채널 (`OSC 777;winmux-query;<kind>;<base64 회신 경로>`) —
-/// 열려 있는 탭 목록을 요청자가 지정한 `/tmp` 파일로 회신한다.
+/// **요청자와 같은 워크스페이스**의 탭 목록을 요청자가 지정한 `/tmp` 파일로
+/// 회신한다 (범위 결정은 코어 몫 — [`winmux_core::command::Dispatcher::list_tabs`]).
 ///
 /// # 왜 즉시 처리하나
 ///
@@ -334,7 +335,9 @@ fn deliver_query(app: &AppHandle, requester: SessionId, kind: &str, reply_b64: &
         // 전에 놓는다.
         let (tabs, self_tab, distro) = {
             let dispatcher = state.dispatcher.lock().unwrap();
-            let tabs = dispatcher.list_tabs();
+            // 열거 범위는 코어가 요청자 세션에서 워크스페이스를 되짚어 정한다
+            // (전송과 같은 격리 경계 — `Dispatcher::list_tabs`).
+            let tabs = dispatcher.list_tabs(requester);
             let (self_tab, distro) = requester_tab_and_distro(dispatcher.state(), requester);
             (tabs, self_tab, distro)
         };

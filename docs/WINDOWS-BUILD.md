@@ -838,9 +838,14 @@ printf '\033]777;winmux-send;build;'"$(printf '%s\n' 'echo delivered' | base64 -
 1. **Delivery** — `echo delivered` appears in the receiver **and runs** (the payload carries
    the trailing newline). The sender's own screen shows nothing at all: no echo of the
    sequence, no confirmation, no error.
-2. **Background workspace** — move the receiver to a second workspace, switch away so it is
-   off screen, and send again from the first workspace: the text must still arrive (switch
-   back to check). This is the point of the channel — it does not go through the frontend.
+2. **Off screen still arrives; another workspace does not** — first the reach: in the
+   receiver's pane switch to a different tab so the receiver sits in the background, and send
+   again. The text must still arrive (switch back to check) — this is the point of the
+   channel, it does not go through the frontend. Then the boundary: move the receiver to a
+   **second workspace** and send from the first. **Nothing may arrive**, addressed by title or
+   by `#<id>` alike, and the app's stderr reports no match (workspace confinement, user
+   decision 2026-08-11 — a workspace is the project isolation unit, so the channel stops at
+   it).
 3. **Ambiguity refuses to fire** — title a third tab `build-2` and send to `build` again:
    **neither** tab may receive anything, and the app's stderr says how many matched. Retitle
    it, confirm delivery resumes.
@@ -922,16 +927,17 @@ launch** — no manual cleanup. Run the app from a console so its stderr is visi
    installed; if it does not play at all, check that the first-gesture unlock happened (the
    dev console logs a debug line when the audio context is unavailable).
 
-### Query channel + winmux CLI (provision v4) — verification
+### Query channel + winmux CLI, workspace-scoped (provision v5) — verification
 
 The agent channel gained a read half (`OSC 777;winmux-query`, contract in
 [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md)) and a single
-CLI in front of both halves. Setup version 4 (`~/.winmux/.setup-v4`) installs
+CLI in front of both halves, and **both halves are confined to the requester's own workspace**
+(user decision 2026-08-11). Setup version 5 (`~/.winmux/.setup-v5`) installs
 `~/.winmux/bin/winmux`, turns the v3 `winmux-send.sh` into a wrapper around `winmux send`, and
-rewrites the `winmux-send` skill around the CLI. The v4 marker differs from v3, so **an
-already-provisioned distro re-provisions on the next launch** — no manual cleanup. Run the app
-from a console (`npm run tauri dev`) so its stderr is visible: every failure of these channels
-is logged there and **nowhere else**.
+rewrites the `winmux-send` skill around the CLI with the workspace-scoped rules. The v5 marker
+differs from v4, so **an already-provisioned distro re-provisions on the next launch** — no
+manual cleanup. Run the app from a console (`npm run tauri dev`) so its stderr is visible:
+every failure of these channels is logged there and **nowhere else**.
 
 1. **The CLI is installed and on `PATH`** — in a **new** terminal tab (an existing tab was
    spawned by the previous build and has the old environment):
@@ -940,19 +946,23 @@ is logged there and **nowhere else**.
    winmux id              # this tab's id, the same number as $WINMUX_TAB
    winmux --help          # three usage lines plus the addressing and COMMAND notes
    ```
-   Confirm `~/.winmux/.setup-v4` exists and `~/.winmux/setup.log` names the CLI install, and
+   Confirm `~/.winmux/.setup-v5` exists and `~/.winmux/setup.log` names the CLI install, and
    that per-tab history still works (up arrow recalls this tab's own history — the same
    wrapper sets `PATH` and `HISTFILE`, so a mistake there breaks both).
-2. **`winmux ls` lists every tab** — open several tabs across **two workspaces**, give a
-   couple of them titles (`printf '\033]0;build\007'`), open a viewer tab (a folder or a
-   markdown file), and let one tab's terminal exit. Then from any tab:
+2. **`winmux ls` lists this workspace's tabs and no others** — open several tabs across
+   **two workspaces**, give a couple of them titles (`printf '\033]0;build\007'`), open a
+   viewer tab (a folder or a markdown file), and let one tab's terminal exit. Then from a tab
+   in each workspace in turn:
    ```bash
    winmux ls
    ```
-   - every tab appears, background workspace included, grouped workspace → pane → tab,
+   - every tab **of the workspace you ran it in** appears, grouped pane → tab, including tabs
+     that are not the ones currently on screen,
+   - **no tab of the other workspace appears** — run it from both sides and confirm the two
+     tables are disjoint,
    - `STATUS` is `running` / `exited` / `viewer` and matches what the tabs actually are,
    - the row for the tab you ran it in carries `*` in the `TAB` column,
-   - `WORKSPACE` shows each tab's workspace name.
+   - `WORKSPACE` shows your own workspace's name, the same on every row.
    The sending pane shows no escape sequence and no stray output — only the table.
 3. **The `COMMAND` column** — in one tab start something long-running (`sleep 300`, `htop`,
    a Claude Code session) and leave another sitting at its prompt, then run `winmux ls` from a
@@ -971,7 +981,10 @@ is logged there and **nowhere else**.
    ```
    Take the ids from `winmux ls`. Quoting matters — an unquoted `#181` is a shell comment.
    Send to the id of the **viewer** tab and of the **exited** tab: both must deliver nothing.
-   Send to your own id: nothing arrives (self-exclusion).
+   Send to your own id: nothing arrives (self-exclusion). Finally take an id from the **other
+   workspace** (read it from a `winmux ls` run over there, since your own listing no longer
+   shows it) and send to it: nothing arrives either — a globally unique id is still not a key
+   past the workspace boundary.
 5. **The old helper still works** — `~/.winmux/bin/winmux-send.sh build 'echo compat'` and its
    `-l` form behave exactly as in the v3 round above; the file is now two lines.
 6. **Timeout outside winmux** — in a plain WSL terminal (Windows Terminal, not winmux):
