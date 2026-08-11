@@ -33,10 +33,17 @@ buttons, redrawn icons) — its checklist is WINDOWS-BUILD §10's last subsectio
 
 Accepted deferrals, one line each. None of these block the MVP.
 
-- **Agent-facing pane-send channel (v2)** — the retired stage-17 delivery path returns as
-  a dispatcher/MCP command addressed by tab id, keeping the bracketed-paste refusal and
-  the target acceptance pre-check as contract (ADR-0005). Keyboard targeting for the old
-  manual send mode is absorbed by the retirement — it is not coming back.
+- **Agent-facing pane-send channel** — **landed 2026-08-11 as a shell CLI**, not MCP (user
+  decision: MCP is heavy, and it is a v2 browser-surface question instead). `winmux send`
+  addresses a target by stable tab id (`'#181'`) as well as by title, and `winmux ls`
+  enumerates the tabs over a query channel (`OSC 777;winmux-query`, reply written to a
+  `/tmp` file the caller names). Contract in `scripts/wsl/claude-hook-example.md`, agent
+  surface in `scripts/wsl/skills/winmux-send/SKILL.md`, verification in WINDOWS-BUILD §10.
+  Still open: **reading a pane's scrollback** (enumeration is metadata only — an opt-in
+  design is needed before any output leaves a pane), and `winmux ls`'s **`COMMAND` column
+  showing `?` for a tab whose shell is in another distro or a Windows shell** (it is read
+  from this distro's `/proc`). Keyboard targeting for the old manual send mode stays absorbed
+  by the stage-17 retirement — it is not coming back.
 - **≤100MB RAM** — ~129MB at checkpoint 2 sits inside the 100–150MB adoption band
   (ADR-0001); getting under 100MB is a v2 optimization.
 - **Per-tab shell history GC** — `~/.winmux/history/tab-<id>` files outlive the tabs that

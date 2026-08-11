@@ -558,14 +558,17 @@ fn read_chunk(
 /// Windows 는 `\\wsl.localhost\<distro>\...` UNC 로 조립하고, unix(개발 실행)는
 /// 형태 검증만 한 뒤 리눅스 경로를 직접 쓴다 (distro 는 의미가 없다). 스폰 쪽
 /// `host.rs::spawn_spec` 의 cfg 분기와 같은 대칭이다.
+///
+/// 뷰어 읽기 경로와 질의 회신 쓰기 경로(`sink.rs`)가 공유한다 — 같은 distro
+/// 해석·같은 UNC 조립을 두 벌 두지 않기 위해서다.
 #[cfg(windows)]
-fn host_path(distro: Option<String>, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn host_path(distro: Option<String>, path: &str) -> Result<PathBuf, String> {
     let distro = resolve_distro(distro)?;
     Ok(PathBuf::from(wslpath::to_unc(&distro, path)?))
 }
 
 #[cfg(not(windows))]
-fn host_path(_distro: Option<String>, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn host_path(_distro: Option<String>, path: &str) -> Result<PathBuf, String> {
     wslpath::validate_linux_path(path)?;
     Ok(PathBuf::from(path))
 }

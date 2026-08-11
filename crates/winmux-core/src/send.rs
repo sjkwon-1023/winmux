@@ -7,6 +7,11 @@
 //! [`Dispatcher::resolve_send_target`](crate::command::Dispatcher::resolve_send_target),
 //! 실제 stdin 쓰기는 글루가 한다.
 //!
+//! 같은 base64 규약을 쓰는 질의 채널([`OscEvent::Osc777Query`](crate::osc::OscEvent::Osc777Query))
+//! 의 **회신 경로** 검증([`decode_reply_path`])도 여기 둔다 — 디코더를 재사용하고,
+//! 열거 데이터 자체는 [`Dispatcher::list_tabs`](crate::command::Dispatcher::list_tabs)
+//! 가 만든다.
+//!
 //! # 왜 base64 인가
 //!
 //! OSC payload 는 `;` 로 필드를 나누고 BEL/ST 로 끝난다 — 개행·제어문자·세미콜론이
@@ -129,6 +134,72 @@ pub fn decode_send_text(text_b64: &str) -> Result<Vec<u8>, SendDecodeError> {
         }
     }
     Ok(out)
+}
+
+/// 회신 파일 경로가 반드시 놓여야 하는 디렉터리 접두. 아래 [`decode_reply_path`]
+/// 의 보안 근거 참조.
+pub const REPLY_PATH_PREFIX: &str = "/tmp/";
+
+/// 질의 회신 경로([`OscEvent::Osc777Query`](crate::osc::OscEvent::Osc777Query) 의
+/// 세 번째 필드) 디코드 실패.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplyPathError {
+    /// base64 payload 자체가 불량하다 ([`decode_send_text`] 와 같은 규약).
+    Decode(SendDecodeError),
+    /// 디코드 결과가 UTF-8 이 아니다. 전송 텍스트와 달리 회신 경로는 **경로 문자열**
+    /// 이므로 바이트열을 그대로 받지 않는다.
+    NotUtf8,
+    /// 리눅스 절대 경로 형태가 불량하다 (사유는 `wslpath::validate_linux_path`).
+    InvalidPath(String),
+    /// [`REPLY_PATH_PREFIX`] 밖의 경로.
+    OutsideTmp,
+}
+
+impl fmt::Display for ReplyPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplyPathError::Decode(err) => write!(f, "reply path: {err}"),
+            ReplyPathError::NotUtf8 => write!(f, "reply path is not valid UTF-8"),
+            ReplyPathError::InvalidPath(reason) => write!(f, "reply path: {reason}"),
+            ReplyPathError::OutsideTmp => write!(
+                f,
+                "reply path must start with {REPLY_PATH_PREFIX:?} (only {REPLY_PATH_PREFIX} is writable for replies)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReplyPathError {}
+
+/// 질의의 **회신 파일 경로**를 base64 payload 에서 되돌린다 (순수 함수 — I/O 없음).
+///
+/// 통과 조건은 셋 다 필수다:
+///
+/// 1. [`decode_send_text`] 와 같은 base64 규약 (표준 알파벳, 상한 재사용).
+/// 2. 디코드 결과가 **UTF-8** — 경로 문자열로 쓸 것이므로 바이트열을 받지 않는다.
+/// 3. `wslpath::validate_linux_path` 통과 + **`/tmp/` 접두**
+///    ([`REPLY_PATH_PREFIX`]).
+///
+/// # 보안 — 왜 `/tmp/` 로 가두는가
+///
+/// 회신은 **파일 쓰기**다. 내용은 앱이 만든 메타데이터 JSON 뿐이라 내용 자체로는
+/// 위험이 없지만, 경로까지 임의로 열어 주면 이 PTY 에 바이트를 흘릴 수 있는
+/// 아무 프로그램이나 `~/.bashrc`·`~/.claude/settings.json` 같은 dotfile 을 이
+/// 채널로 **덮어쓸 수 있는 표면**이 된다 (쓰기 시점의 실행 주체는 winmux 앱이다).
+/// `/tmp/` 한 곳으로 가두면 그 표면이 임시 디렉터리 안으로 닫힌다. 접두 검사
+/// 앞의 `validate_linux_path` 가 `..`·백슬래시·NUL 을 이미 거부하므로
+/// `/tmp/../home/u/.bashrc` 같은 우회도 성립하지 않는다.
+///
+/// 이것은 오발사·유탄 방지 가드이며 권한 경계가 아니다 (모듈 doc 의 "보안" 참조 —
+/// 같은 머신·협력 에이전트를 전제한다).
+pub fn decode_reply_path(reply_b64: &str) -> Result<String, ReplyPathError> {
+    let bytes = decode_send_text(reply_b64).map_err(ReplyPathError::Decode)?;
+    let path = String::from_utf8(bytes).map_err(|_| ReplyPathError::NotUtf8)?;
+    crate::wslpath::validate_linux_path(&path).map_err(ReplyPathError::InvalidPath)?;
+    if !path.starts_with(REPLY_PATH_PREFIX) {
+        return Err(ReplyPathError::OutsideTmp);
+    }
+    Ok(path)
 }
 
 /// base64 표준 알파벳 1글자 → 6bit 값. 알파벳 밖(패딩 `=` 포함)은 None.
@@ -264,6 +335,98 @@ mod tests {
         ));
     }
 
+    // ---- 질의 회신 경로 (decode_reply_path) ----
+
+    #[test]
+    fn reply_path_accepts_tmp_paths() {
+        // `printf '%s' '/tmp/winmux-tabs-42.json' | base64 -w0` 형태.
+        assert_eq!(
+            decode_reply_path("L3RtcC93aW5tdXgtdGFicy00Mi5qc29u"),
+            Ok("/tmp/winmux-tabs-42.json".to_owned())
+        );
+        assert_eq!(
+            decode_reply_path("L3RtcC9kaXIvcmVwbHkuanNvbg=="),
+            Ok("/tmp/dir/reply.json".to_owned())
+        );
+        // 비 ASCII 파일명도 UTF-8 이면 통과한다 ("/tmp/한글.json").
+        assert_eq!(
+            decode_reply_path("L3RtcC/tlZzquIAuanNvbg=="),
+            Ok("/tmp/한글.json".to_owned())
+        );
+    }
+
+    #[test]
+    fn reply_path_rejects_paths_outside_tmp() {
+        // 홈·dotfile 은 물론, `/tmp` 로 시작하기만 하는 형제 디렉터리도 거부한다.
+        for (b64, what) in [
+            ("L2hvbWUvdS8uYmFzaHJj", "/home/u/.bashrc"),
+            ("L3RtcGZvby94", "/tmpfoo/x"),
+            ("L3RtcA==", "/tmp"),
+        ] {
+            assert_eq!(
+                decode_reply_path(b64),
+                Err(ReplyPathError::OutsideTmp),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn reply_path_rejects_traversal_before_the_prefix_check() {
+        // `..` 는 접두 검사에 닿기 전에 validate_linux_path 가 거부한다 —
+        // `/tmp/` 로 시작하는 문자열로 밖을 가리키는 우회가 성립하지 않는다.
+        let err = decode_reply_path("L3RtcC8uLi9ob21lL3UvLmJhc2hyYw==").unwrap_err();
+        assert!(
+            matches!(&err, ReplyPathError::InvalidPath(reason) if reason.contains("'..'")),
+            "{err:?}"
+        );
+        // 백슬래시 밀수(Windows 구분자)도 같은 자리에서 막힌다.
+        let err = decode_reply_path("L3RtcC9hXC4uXC4uXHg=").unwrap_err();
+        assert!(
+            matches!(&err, ReplyPathError::InvalidPath(reason) if reason.contains("backslash")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn reply_path_rejects_relative_paths() {
+        let err = decode_reply_path("dG1wL3JlbC5qc29u").unwrap_err();
+        assert!(
+            matches!(&err, ReplyPathError::InvalidPath(reason) if reason.contains("absolute")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn reply_path_requires_utf8() {
+        // 전송 텍스트와 달리 회신 경로는 바이트열을 받지 않는다.
+        assert_eq!(decode_reply_path("//8A"), Err(ReplyPathError::NotUtf8));
+    }
+
+    #[test]
+    fn reply_path_rejects_malformed_base64() {
+        assert_eq!(
+            decode_reply_path("aG-s"),
+            Err(ReplyPathError::Decode(SendDecodeError::InvalidBase64))
+        );
+        // 빈 payload 는 빈 문자열 → 절대 경로가 아니므로 형태에서 걸린다.
+        assert!(matches!(
+            decode_reply_path(""),
+            Err(ReplyPathError::InvalidPath(_))
+        ));
+    }
+
+    #[test]
+    fn reply_path_checks_shape_only() {
+        // 코어는 I/O 를 하지 않는다 — 실존·쓰기 가능 여부는 검사하지 않으며
+        // 디렉터리 경로("/tmp/")도 형태로는 통과한다 (쓰기 실패는 글루가 본다).
+        assert_eq!(
+            decode_reply_path("L3RtcC8="),
+            Ok(REPLY_PATH_PREFIX.to_owned())
+        );
+        assert_eq!(decode_reply_path("L3RtcC94"), Ok("/tmp/x".to_owned()));
+    }
+
     #[test]
     fn error_messages_are_english_one_liners() {
         // 사용자 대면(앱 로그) 문자열 — 영어 규약.
@@ -282,6 +445,22 @@ mod tests {
         assert_eq!(
             SendTargetError::Ambiguous { count: 3 }.to_string(),
             "3 running terminal tabs match the target; the target must be unique"
+        );
+        assert_eq!(
+            ReplyPathError::NotUtf8.to_string(),
+            "reply path is not valid UTF-8"
+        );
+        assert_eq!(
+            ReplyPathError::Decode(SendDecodeError::InvalidBase64).to_string(),
+            "reply path: payload is not standard base64"
+        );
+        assert_eq!(
+            ReplyPathError::InvalidPath("path must be absolute: \"x\"".into()).to_string(),
+            "reply path: path must be absolute: \"x\""
+        );
+        assert_eq!(
+            ReplyPathError::OutsideTmp.to_string(),
+            "reply path must start with \"/tmp/\" (only /tmp/ is writable for replies)"
         );
     }
 }

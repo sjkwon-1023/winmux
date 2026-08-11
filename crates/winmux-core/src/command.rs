@@ -335,6 +335,32 @@ pub struct StateSnapshot<'a> {
     pub state: &'a AppState,
 }
 
+/// 탭 하나의 열거용 메타데이터 ([`Dispatcher::list_tabs`]).
+///
+/// **JSON 출구 전용 DTO** 다 — 에이전트 질의(`winmux-query;list-tabs`)의 회신
+/// 형태이고, 스냅샷 모델([`AppState`])의 직렬화 계약과는 무관하다. 그래서 id 들이
+/// newtype 이 아니라 평평한 `u64` 이고, `kind`/`status` 는 열거 대신 문자열이다:
+/// 이 표면의 소비자는 프론트가 아니라 셸·에이전트라 읽어서 바로 쓸 수 있는 형태가
+/// 낫고, 모델 enum 을 그대로 노출하면 모델 변경이 곧 외부 계약 파손이 된다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabInfo {
+    /// 탭의 안정 ID — `#<id>` 전송 주소이자 터미널의 `WINMUX_TAB` 값이다.
+    pub tab: u64,
+    pub title: String,
+    pub workspace_id: u64,
+    pub workspace_name: String,
+    pub pane: u64,
+    /// 이 탭이 소속 pane 의 active_tab 인가 (= 그 pane 에서 화면에 보이는 탭).
+    /// 워크스페이스 자체가 백그라운드일 수 있으므로 "지금 눈에 보인다"는 뜻은 아니다.
+    pub active: bool,
+    /// 탭 종류 — 모델 [`TabKind`] 의 camelCase 이름
+    /// (`terminal` | `folderBrowser` | `textViewer` | `markdownViewer`).
+    pub kind: &'static str,
+    /// `running` | `exited` (터미널) | `viewer` (프로세스가 없는 뷰어 탭).
+    pub status: &'static str,
+}
+
 /// 상태 소유자. 모든 구조 변이는 [`Dispatcher::dispatch`] 를 경유한다.
 pub struct Dispatcher {
     state: AppState,
@@ -569,8 +595,10 @@ impl Dispatcher {
     ///
     /// 규칙 (에이전트 채널 계약 — `scripts/wsl/skills/winmux-send/SKILL.md`):
     ///
-    /// - 후보는 **전 워크스페이스**의 running 터미널 탭이다. 백그라운드 워크스페이스도
-    ///   포함한다 — 이 채널의 요점이 "지금 화면에 없는 pane 에도 보낼 수 있다"는 것이다.
+    /// - `target` 이 **`#<탭 id>`** 형태면 **id 직지정**이다 (아래 "id 주소지정").
+    /// - 그 외에는 제목 매칭이다. 후보는 **전 워크스페이스**의 running 터미널 탭이다.
+    ///   백그라운드 워크스페이스도 포함한다 — 이 채널의 요점이 "지금 화면에 없는
+    ///   pane 에도 보낼 수 있다"는 것이다.
     /// - `target` 은 [`Tab::title`] 에 대한 **부분일치·대소문자 무시**다 (대상 탭이
     ///   `OSC 0` 으로 정한 제목).
     /// - **송신자 자신은 제외**한다 (자기 stdin 에 되먹임 금지).
@@ -581,11 +609,30 @@ impl Dispatcher {
     ///
     /// 빈 `target` 은 모든 제목에 부분일치하므로, 후보가 정확히 하나일 때만 전달되고
     /// 그 외에는 위 규칙대로 거부된다 (별도 특례를 두지 않는다).
+    ///
+    /// # id 주소지정 (`#<u64>`)
+    ///
+    /// `#` 뒤가 **10진 숫자만으로 이루어져 `u64` 로 파싱될 때에만** id 모드다. 그
+    /// 파싱이 실패하면(`#build`·`#`·`#1.2`·범위 초과 숫자) 아무 일도 없었던 것처럼
+    /// **제목 매칭으로 되돌아간다** — 제목이 `#` 로 시작하는 탭을 제목으로 부르는
+    /// 길을 죽이지 않기 위해서다.
+    ///
+    /// id 모드의 판정은 위 제목 규칙과 같은 가드를 그대로 쓰되 결과가 이분법이다:
+    /// 그 id 의 탭이 존재하고 running 터미널이며 송신자 자신이 아니면 배달,
+    /// 아니면 [`SendTargetError::NoMatch`] 다. 안정 ID 는 전역 유일하므로
+    /// [`SendTargetError::Ambiguous`] 가 나올 수 없다.
+    ///
+    /// 에이전트는 자기 탭 id 를 `WINMUX_TAB` 환경변수로 알고 있고, 열거
+    /// ([`Self::list_tabs`])가 상대의 id 를 준다 — 제목이 겹치거나 자주 바뀌는
+    /// 상황에서도 흔들리지 않는 주소가 이 형태다.
     pub fn resolve_send_target(
         &self,
         sender: SessionId,
         target: &str,
     ) -> Result<SessionId, SendTargetError> {
+        if let Some(tab) = parse_tab_id_target(target) {
+            return self.resolve_send_target_by_id(sender, tab);
+        }
         // 한국어 등 대소문자가 없는 문자도 그대로 통과하도록 Unicode lowercase 를 쓴다.
         let needle = target.to_lowercase();
         let mut first = None;
@@ -614,6 +661,85 @@ impl Dispatcher {
             1 => Ok(first.expect("count 1 이면 매치가 기록돼 있다")),
             count => Err(SendTargetError::Ambiguous { count }),
         }
+    }
+
+    /// id 직지정 경로 ([`Self::resolve_send_target`] 의 `#<u64>` 모드). 안정 ID 는
+    /// 전역 유일하므로 판정이 이분법이다 — 조건을 하나라도 어기면
+    /// [`SendTargetError::NoMatch`] 이고 `Ambiguous` 는 발생하지 않는다.
+    fn resolve_send_target_by_id(
+        &self,
+        sender: SessionId,
+        target: TabId,
+    ) -> Result<SessionId, SendTargetError> {
+        for ws in &self.state.workspaces {
+            for pane in ws.panes.values() {
+                for tab in &pane.tabs {
+                    if tab.id != target {
+                        continue;
+                    }
+                    // 제목 경로와 같은 가드: running 터미널 + 세션 보유 + 송신자 아님.
+                    let TabKind::Terminal {
+                        pty_session: Some(session),
+                        status: TerminalStatus::Running,
+                        ..
+                    } = &tab.kind
+                    else {
+                        return Err(SendTargetError::NoMatch);
+                    };
+                    if *session == sender {
+                        return Err(SendTargetError::NoMatch);
+                    }
+                    return Ok(*session);
+                }
+            }
+        }
+        Err(SendTargetError::NoMatch)
+    }
+
+    /// 열려 있는 **모든 탭**의 메타데이터 열거 — 순수 조회다 (상태·revision 불변).
+    ///
+    /// 에이전트 질의 채널(`winmux-query;list-tabs`)의 데이터 원천이다. 전
+    /// 워크스페이스를 훑고, 터미널이 아닌 **뷰어 탭도 포함**한다 — 에이전트가
+    /// "무엇이 열려 있나"를 보는 창이지 "어디로 보낼 수 있나" 목록이 아니기
+    /// 때문이다. 보낼 수 있는지는 [`TabInfo::status`] 로 드러난다.
+    ///
+    /// 순서는 워크스페이스 순 → pane id 순 → 탭 순(pane 안의 표시 순서)이다.
+    ///
+    /// 여기 실리는 것은 **모델이 아는 메타데이터뿐**이다. 각 탭에서 실제로 도는
+    /// 명령 같은 것은 코어가 모르고(무 I/O), 필요하면 상위 계층이 `/proc` 에서
+    /// 채운다.
+    pub fn list_tabs(&self) -> Vec<TabInfo> {
+        let mut out = Vec::new();
+        for ws in &self.state.workspaces {
+            for pane in ws.panes.values() {
+                for tab in &pane.tabs {
+                    let (kind, status) = match &tab.kind {
+                        TabKind::Terminal { status, .. } => (
+                            "terminal",
+                            match status {
+                                TerminalStatus::Running => "running",
+                                TerminalStatus::Exited { .. } => "exited",
+                            },
+                        ),
+                        // 뷰어 탭에는 프로세스가 없다 — 세 번째 상태로 구분한다.
+                        TabKind::FolderBrowser { .. } => ("folderBrowser", "viewer"),
+                        TabKind::TextViewer { .. } => ("textViewer", "viewer"),
+                        TabKind::MarkdownViewer { .. } => ("markdownViewer", "viewer"),
+                    };
+                    out.push(TabInfo {
+                        tab: tab.id.0,
+                        title: tab.title.clone(),
+                        workspace_id: ws.id.0,
+                        workspace_name: ws.name.clone(),
+                        pane: pane.id.0,
+                        active: pane.active_tab == Some(tab.id),
+                        kind,
+                        status,
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// adopt 된 상태의 터미널 탭 하나에 새 셸을 재스폰한다 — manage-first 부팅의
@@ -1311,6 +1437,20 @@ fn unknown(kind: &str, id: u64) -> CommandError {
     CommandError::UnknownTarget {
         target: format!("{kind} {id}"),
     }
+}
+
+/// 전송 대상 문자열이 `#<u64>` 형태면 탭 id 로 파싱한다
+/// ([`Dispatcher::resolve_send_target`] 의 id 모드 판정).
+///
+/// `#` 뒤는 **10진 숫자만** 받는다 — `+5`·공백처럼 `u64::from_str` 이 관대하게
+/// 받아 주는 형태까지 id 로 삼으면 "무엇이 id 이고 무엇이 제목인가"의 경계가
+/// 흐려진다. 파싱이 실패하면 None 이고, 호출자는 제목 매칭으로 되돌아간다.
+fn parse_tab_id_target(target: &str) -> Option<TabId> {
+    let digits = target.strip_prefix('#')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u64>().ok().map(TabId)
 }
 
 #[cfg(test)]
@@ -3552,5 +3692,258 @@ mod tests {
             "빈 대상은 후보가 하나뿐일 때만 전달된다"
         );
         assert_eq!(serde_json::to_value(d.state()).unwrap(), before);
+    }
+
+    // ---- id 주소지정 (`#<탭 id>`) ----
+
+    #[test]
+    fn resolve_send_target_by_tab_id_hits_across_workspaces() {
+        let (mut d, _host) = dispatcher();
+        let (_ws1, pane1) = create_ws(&mut d, "one");
+        let (_sender_tab, sender) = create_terminal_tab(&mut d, pane1);
+        let (_decoy_tab, _decoy) = create_terminal_tab(&mut d, pane1);
+        // 두 번째 워크스페이스가 active 가 되므로 첫 워크스페이스는 백그라운드다 —
+        // id 주소지정도 제목 매칭과 같이 전 워크스페이스를 훑는다.
+        let (_ws2, pane2) = create_ws(&mut d, "two");
+        let (other_tab, other) = create_terminal_tab(&mut d, pane2);
+
+        assert_eq!(
+            d.resolve_send_target(sender, &format!("#{}", other_tab.0)),
+            Ok(other)
+        );
+        // 대조군: 세 탭의 기본 제목이 모두 "Terminal" 이라 제목으로는 모호하다.
+        // 같은 상황에서도 id 는 유일하게 꽂힌다 — 그것이 이 주소 형태의 요점이다.
+        assert_eq!(
+            d.resolve_send_target(sender, "terminal"),
+            Err(SendTargetError::Ambiguous { count: 2 })
+        );
+    }
+
+    #[test]
+    fn resolve_send_target_by_tab_id_rejects_unknown_exited_viewer_and_self() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (sender_tab, sender) = create_terminal_tab(&mut d, pane);
+        let (dead_tab, dead) = create_terminal_tab(&mut d, pane);
+        let viewer_tab = create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::FolderBrowser {
+                path: Some("/home/u/build".into()),
+            },
+        );
+
+        // 없는 id.
+        assert_eq!(
+            d.resolve_send_target(sender, "#9999"),
+            Err(SendTargetError::NoMatch)
+        );
+        // 뷰어 탭 — 쓸 stdin 이 없다.
+        assert_eq!(
+            d.resolve_send_target(sender, &format!("#{}", viewer_tab.0)),
+            Err(SendTargetError::NoMatch)
+        );
+        // 자기 자신 — 되먹임 금지.
+        assert_eq!(
+            d.resolve_send_target(sender, &format!("#{}", sender_tab.0)),
+            Err(SendTargetError::NoMatch)
+        );
+        // 살아 있는 동안은 히트하고, 세션이 죽으면 같은 id 가 NoMatch 가 된다.
+        assert_eq!(
+            d.resolve_send_target(sender, &format!("#{}", dead_tab.0)),
+            Ok(dead)
+        );
+        d.apply_event(SessionEvent::SessionExited {
+            session: dead,
+            code: Some(0),
+        });
+        assert_eq!(
+            d.resolve_send_target(sender, &format!("#{}", dead_tab.0)),
+            Err(SendTargetError::NoMatch)
+        );
+    }
+
+    #[test]
+    fn resolve_send_target_falls_back_to_title_when_the_hash_is_not_a_number() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (_t1, sender) = create_terminal_tab(&mut d, pane);
+        let (_t2, hashed) = create_terminal_tab(&mut d, pane);
+        // 제목이 `#` 로 시작하는 탭 — id 모드가 이 길을 죽이면 안 된다.
+        set_title(&mut d, sender, "claude");
+        set_title(&mut d, hashed, "#abc channel");
+
+        for target in ["#abc", "#", "#1.2", "#-3", "#+4", "# 5"] {
+            assert_eq!(
+                parse_tab_id_target(target),
+                None,
+                "{target:?} 는 id 로 파싱되지 않는다"
+            );
+        }
+        // 그래서 `#abc` 는 제목 매칭으로 흘러 그 탭에 도달한다.
+        assert_eq!(d.resolve_send_target(sender, "#abc"), Ok(hashed));
+        // u64 범위를 넘는 숫자도 파싱 실패 → 제목 매칭(일치 없음)으로 떨어진다.
+        assert_eq!(parse_tab_id_target("#99999999999999999999999"), None);
+        assert_eq!(
+            d.resolve_send_target(sender, "#99999999999999999999999"),
+            Err(SendTargetError::NoMatch)
+        );
+        // 대조군: 숫자만 있으면 id 모드다.
+        assert_eq!(parse_tab_id_target("#42"), Some(TabId(42)));
+        assert_eq!(parse_tab_id_target("#007"), Some(TabId(7)));
+    }
+
+    #[test]
+    fn resolve_send_target_by_tab_id_is_a_pure_query() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (_t1, sender) = create_terminal_tab(&mut d, pane);
+        let (other_tab, other) = create_terminal_tab(&mut d, pane);
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        assert_eq!(
+            d.resolve_send_target(sender, &format!("#{}", other_tab.0)),
+            Ok(other)
+        );
+        assert_eq!(
+            d.resolve_send_target(sender, "#9999"),
+            Err(SendTargetError::NoMatch)
+        );
+        assert_eq!(serde_json::to_value(d.state()).unwrap(), before);
+    }
+
+    // ---- 탭 열거 (질의 채널) ----
+
+    #[test]
+    fn list_tabs_enumerates_every_workspace_with_exact_fields() {
+        let (mut d, _host) = dispatcher();
+        let (ws1, pane1) = create_ws(&mut d, "alpha");
+        let (t_sender, sender) = create_terminal_tab(&mut d, pane1);
+        let (t_dead, dead) = create_terminal_tab(&mut d, pane1);
+        let viewer = create_viewer_tab(
+            &mut d,
+            pane1,
+            NewTab::MarkdownViewer {
+                path: "/home/u/notes.md".into(),
+            },
+        );
+        // 두 번째 워크스페이스 — 백그라운드가 되는 첫 워크스페이스도 열거된다.
+        let (ws2, pane2) = create_ws(&mut d, "beta");
+        let (t_other, other) = create_terminal_tab(&mut d, pane2);
+        set_title(&mut d, sender, "claude");
+        set_title(&mut d, dead, "build");
+        set_title(&mut d, other, "agent");
+        d.apply_event(SessionEvent::SessionExited {
+            session: dead,
+            code: Some(1),
+        });
+
+        let tabs = d.list_tabs();
+        // 워크스페이스 순 → pane id 순 → 탭 순. 뷰어 탭도 빠짐없이 실린다.
+        assert_eq!(
+            tabs.iter().map(|t| t.tab).collect::<Vec<_>>(),
+            vec![t_sender.0, t_dead.0, viewer.0, t_other.0]
+        );
+        assert_eq!(
+            tabs[0],
+            TabInfo {
+                tab: t_sender.0,
+                title: "claude".into(),
+                workspace_id: ws1.0,
+                workspace_name: "alpha".into(),
+                pane: pane1.0,
+                active: false,
+                kind: "terminal",
+                status: "running",
+            }
+        );
+        // 죽은 터미널은 status 로 드러난다 (목록에서 사라지지 않는다).
+        assert_eq!(tabs[1].status, "exited");
+        assert_eq!(tabs[1].kind, "terminal");
+        assert_eq!(tabs[1].title, "build");
+        // 뷰어 탭 — 프로세스가 없으므로 세 번째 상태. 제목은 경로의 basename.
+        assert_eq!(tabs[2].kind, "markdownViewer");
+        assert_eq!(tabs[2].status, "viewer");
+        assert_eq!(tabs[2].title, "notes.md");
+        // 마지막 생성 탭이 그 pane 의 active_tab 이다.
+        assert!(tabs[2].active, "뷰어가 pane1 의 active_tab");
+        assert_eq!(
+            tabs[3],
+            TabInfo {
+                tab: t_other.0,
+                title: "agent".into(),
+                workspace_id: ws2.0,
+                workspace_name: "beta".into(),
+                pane: pane2.0,
+                active: true,
+                kind: "terminal",
+                status: "running",
+            }
+        );
+    }
+
+    #[test]
+    fn list_tabs_covers_every_tab_kind_and_pane() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::FolderBrowser {
+                path: Some("/home/u/proj".into()),
+            },
+        );
+        create_viewer_tab(
+            &mut d,
+            pane,
+            NewTab::TextViewer {
+                path: "/home/u/a.txt".into(),
+            },
+        );
+        // 분할한 pane 의 탭도 같은 열거에 들어온다.
+        let (pane_b, _split) = split_empty(&mut d, pane, SplitDirection::Horizontal);
+        let (t_term, _s) = create_terminal_tab(&mut d, pane_b);
+
+        let tabs = d.list_tabs();
+        assert_eq!(
+            tabs.iter().map(|t| (t.pane, t.kind)).collect::<Vec<_>>(),
+            vec![
+                (pane.0, "folderBrowser"),
+                (pane.0, "textViewer"),
+                (pane_b.0, "terminal"),
+            ]
+        );
+        assert_eq!(
+            tabs.iter().map(|t| t.active).collect::<Vec<_>>(),
+            vec![false, true, true],
+            "pane 마다 자기 active_tab 이 따로 있다"
+        );
+        assert_eq!(tabs[2].tab, t_term.0);
+    }
+
+    #[test]
+    fn list_tabs_is_a_pure_query_and_serializes_camel_case() {
+        let (mut d, _host) = dispatcher();
+        assert!(d.list_tabs().is_empty(), "워크스페이스가 없으면 빈 목록");
+        let (ws, pane) = create_ws(&mut d, "ws");
+        let (tab, _s) = create_terminal_tab(&mut d, pane);
+        let before = serde_json::to_value(d.state()).unwrap();
+
+        let tabs = d.list_tabs();
+        assert_eq!(serde_json::to_value(d.state()).unwrap(), before);
+        // JSON 출구 계약 — camelCase 키에 평평한 u64 id.
+        assert_eq!(
+            serde_json::to_value(&tabs[0]).unwrap(),
+            serde_json::json!({
+                "tab": tab.0,
+                "title": "Terminal",
+                "workspaceId": ws.0,
+                "workspaceName": "ws",
+                "pane": pane.0,
+                "active": true,
+                "kind": "terminal",
+                "status": "running",
+            })
+        );
     }
 }

@@ -35,6 +35,16 @@ pub enum OscEvent {
     /// 전제한 의도된 기능이며, 오발사 가드는 상한(32KiB)·유일 매치·자기 제외
     /// 셋뿐이다 — 권한 경계가 아니다.
     Osc777Send { target: String, text_b64: String },
+    /// OSC 777 — `winmux-query;<kind>;<base64>` 형식의 **질의** 요청 (에이전트
+    /// 채널). `kind` 는 질의 종류(예: `list-tabs`), 세 번째 필드는 **회신 파일
+    /// 경로**의 base64 다 — 경로 검증·디코드는 [`crate::send::decode_reply_path`]
+    /// 가 맡는다.
+    ///
+    /// 전송(`winmux-send`)과 같은 규율이다: 상태 델타가 아니라 **액션**이라
+    /// 코얼레싱 배치에 담기지 않고, 두 필드가 모두 있어야만 이벤트가 된다
+    /// (`777;winmux-query;list-tabs` 는 형식 불일치로 떨어진다 — 회신 주소 없는
+    /// 질의를 조용히 성공시키지 않는다).
+    Osc777Query { kind: String, reply_b64: String },
 }
 
 /// payload 상한 (bytes). 초과하는 시퀀스는 통째로 폐기한다 — 악성/폭주 입력 방어.
@@ -215,6 +225,13 @@ fn parse_payload(payload: &[u8]) -> Option<OscEvent> {
                     let text_b64 = parts.next()?.to_string();
                     Some(OscEvent::Osc777Send { target, text_b64 })
                 }
+                "winmux-query" => {
+                    // `winmux-send` 와 동일한 규율 — 두 필드 필수(`?`). 회신 경로
+                    // 필드가 없는 질의는 답을 받을 곳이 없으므로 이벤트가 되지 않는다.
+                    let kind = parts.next()?.to_string();
+                    let reply_b64 = parts.next()?.to_string();
+                    Some(OscEvent::Osc777Query { kind, reply_b64 })
+                }
                 _ => None,
             }
         }
@@ -382,6 +399,50 @@ mod tests {
     }
 
     #[test]
+    fn osc777_query_parsed() {
+        assert_eq!(
+            scan(b"\x1b]777;winmux-query;list-tabs;L3RtcC9yZXBseS5qc29u\x07"),
+            vec![OscEvent::Osc777Query {
+                kind: "list-tabs".into(),
+                reply_b64: "L3RtcC9yZXBseS5qc29u".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn osc777_query_st_terminated_and_split() {
+        // ST 종결 + 청크 분할에서도 같은 계약 (전송과 같은 스캐너 경로).
+        let mut s = OscScanner::new();
+        assert_eq!(s.feed(b"\x1b]777;winmux-qu"), vec![]);
+        assert_eq!(
+            s.feed(b"ery;list-tabs;aGk=\x1b\\"),
+            vec![OscEvent::Osc777Query {
+                kind: "list-tabs".into(),
+                reply_b64: "aGk=".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn osc777_query_without_reply_field_ignored() {
+        // 회신 경로 필드가 없으면 이벤트가 되지 않는다 (답을 보낼 곳이 없다).
+        assert_eq!(scan(b"\x1b]777;winmux-query;list-tabs\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]777;winmux-query\x07"), vec![]);
+    }
+
+    #[test]
+    fn osc777_query_keeps_unknown_kind_verbatim() {
+        // 질의 종류의 해석은 상위 계층 몫이다 — 파서는 필드만 나눈다.
+        assert_eq!(
+            scan(b"\x1b]777;winmux-query;whatever;aGk=\x07"),
+            vec![OscEvent::Osc777Query {
+                kind: "whatever".into(),
+                reply_b64: "aGk=".into()
+            }]
+        );
+    }
+
+    #[test]
     fn osc777_notify_contract_unchanged_by_send_kind() {
         // winmux-send 추가가 기존 notify 계약을 건드리지 않는지 (회귀 잠금).
         assert_eq!(
@@ -394,6 +455,8 @@ mod tests {
         // 비슷하지만 다른 kind 는 여전히 무시된다.
         assert_eq!(scan(b"\x1b]777;winmux-sendx;t;aGk=\x07"), vec![]);
         assert_eq!(scan(b"\x1b]777;send;t;aGk=\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]777;winmux-queryx;t;aGk=\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]777;query;t;aGk=\x07"), vec![]);
     }
 
     #[test]

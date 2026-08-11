@@ -58,6 +58,14 @@ impl OscEventPayload {
                 title: target.clone(),
                 body: String::new(),
             },
+            // 질의(winmux-query)도 전송과 같이 MVP 앱의 기능이다 — 관측만 되게
+            // 종류만 싣는다 (회신 경로는 프론트 표시에 쓸모가 없다).
+            OscEvent::Osc777Query { kind, .. } => Self {
+                id,
+                kind: "777-query",
+                title: kind.clone(),
+                body: String::new(),
+            },
         }
     }
 }

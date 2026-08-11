@@ -17,7 +17,7 @@ named pipe, or Windows helper CLI.
 
 ## Automatic provisioning
 
-**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v3`); this
+**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v4`); this
 document remains the contract and the manual path.**
 
 On launch the app streams a setup script into `wsl.exe [-d <distro>] -- bash -s` for every
@@ -26,11 +26,15 @@ guess at the WSL home path and no dependency on a distro's `interop`/`automount`
 Once per distro it:
 
 - installs the script below at `~/.winmux/bin/winmux-notify.sh` (executable),
-- installs the send helper at `~/.winmux/bin/winmux-send.sh` (executable) — the
-  command-line half of the send channel below, so nothing has to assemble the escape
-  sequence or repeat the tty resolution by hand,
+- installs the **`winmux` CLI** at `~/.winmux/bin/winmux` (executable) — the command-line
+  half of the send and query channels below (`winmux ls` / `winmux send` / `winmux id`), so
+  nothing has to assemble an escape sequence or repeat the tty resolution by hand. Every
+  winmux terminal has `~/.winmux/bin` prepended to `PATH`
+  (`apps/winmux/src-tauri/src/host.rs::bash_argv`), so inside a tab it is just `winmux`,
+- replaces the old `~/.winmux/bin/winmux-send.sh` (setup v3) with a two-line wrapper that
+  execs `winmux send "$@"`, so anything still pointing at that path keeps working,
 - installs the `winmux-send` skill at `~/.claude/skills/winmux-send/SKILL.md` (the agent
-  send channel below; source: `scripts/wsl/skills/winmux-send/SKILL.md`),
+  send and query channels below; source: `scripts/wsl/skills/winmux-send/SKILL.md`),
 - merges the three hooks into `~/.claude/settings.json`, keeping every existing value (see
   the migration rules below),
 - adds a `notify` key to `~/.codex/config.toml` **only if** that file exists and has no
@@ -70,6 +74,7 @@ winmux interprets four kinds of sequences.
 | `OSC 777;notify;winmux:needsInput;<body>` | Waiting for user input | `needsInput` | yes |
 | `OSC 777;notify;winmux:idle;<body>` | Work finished | `idle` | yes |
 | `OSC 777;winmux-send;<target>;<base64>` | Text delivered to another pane's stdin (next section) | unchanged | no |
+| `OSC 777;winmux-query;<kind>;<base64>` | Metadata answered into a file the sender names (section after that) | unchanged | no |
 | Any other `OSC 777` / every `OSC 9` | Status-neutral notification | **unchanged** | yes |
 | `OSC 0` (and the alias `OSC 2`) | Tab title | unchanged | no |
 | `OSC 7` `file://host/path` | Tab cwd (respawn location on restart) | unchanged | no |
@@ -95,32 +100,33 @@ Detailed rules:
   mis-splits the fields, so the emitting side substitutes it.
 - A restart resets all notifications and statuses (a dead session's needsInput does not
   survive a restart — 계획 v2 section 11).
-- `winmux-send` is the one `OSC 777` that is **not** a notification: it changes no state at
-  all, raises no dot, and is not coalesced into the 100ms flush window. It is an action, and
-  it has its own section below.
+- `winmux-send` and `winmux-query` are the two `OSC 777`s that are **not** notifications:
+  they change no state at all, raise no dot, and are not coalesced into the 100ms flush
+  window. They are actions, and each has its own section below.
 
 ## Agent send channel — `OSC 777;winmux-send`
 
 The agent-facing way to put text into **another pane's terminal**. This is the designed
 successor to the retired manual send mode ([ADR-0005](../../docs/adr/0005-inter-pane-text-passing.md)):
-it is addressed by tab title, it works while the target sits in a background workspace, and
-it never goes through the frontend — the Rust side writes the bytes to the target session's
-stdin directly.
+it is addressed by tab id or title, it works while the target sits in a background workspace,
+and it never goes through the frontend — the Rust side writes the bytes to the target
+session's stdin directly.
 
 The skill that teaches an agent to use it is `scripts/wsl/skills/winmux-send/SKILL.md`
-(auto-provisioned to `~/.claude/skills/winmux-send/SKILL.md`), and the helper it tells the
-agent to call is `~/.winmux/bin/winmux-send.sh`:
+(auto-provisioned to `~/.claude/skills/winmux-send/SKILL.md`), and the command it tells the
+agent to call is `winmux send`:
 
 ```bash
-~/.winmux/bin/winmux-send.sh build 'cargo test'     # runs the line over there
-~/.winmux/bin/winmux-send.sh -l build 'cargo test'  # literal: only pre-fills the prompt
+winmux send '#181' 'cargo test'     # runs the line in tab 181
+winmux send -l '#181' 'cargo test'  # literal: only pre-fills the prompt
+winmux send build 'cargo test'      # by title substring instead of id
 ```
 
-The helper encodes the text, appends the trailing newline (unless `-l`), and resolves the
+The CLI encodes the text, appends the trailing newline (unless `-l`), and resolves the
 terminal device with the same two-step discipline as `winmux-notify.sh` — so it works from a
 hook too. Delivery stays silent (exit 0 either way); only a usage error is reported.
 
-The sequence the helper emits:
+The sequence it emits:
 
 ```
 ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
@@ -129,7 +135,7 @@ ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
 | Field | Contract |
 |---|---|
 | `winmux-send` | Literal kind marker. Everything else after `777;` keeps its old meaning. |
-| `<target>` | Matched **case-insensitively as a substring** of a tab's title (the title the target set with `OSC 0`), across **all** workspaces. |
+| `<target>` | `#<decimal>` addresses a **tab id** exactly. Anything else is matched **case-insensitively as a substring** of a tab's title (the title the target set with `OSC 0`), across **all** workspaces. |
 | `<base64>` | Standard base64 (`A-Za-z0-9+/`, optional `=` padding) of the raw bytes. No URL-safe alphabet, no embedded whitespace or newline. |
 
 | Situation | Result |
@@ -140,6 +146,13 @@ ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
 | The sender's own tab matches | It is excluded before counting |
 | Decoded size > 32 KiB | Rejected |
 | Malformed base64 / missing text field | Rejected |
+
+**Id addressing.** `#<target>` is an id only when everything after `#` is decimal digits that
+parse as a `u64`; `#build`, `#`, `#1.2` and an out-of-range number all fall back to title
+matching, so a tab whose title starts with `#` stays reachable by title. An id resolves to
+one tab or to none — `Ambiguous` cannot happen, because ids are unique across the app. The
+tab's own id is in its `WINMUX_TAB` (below), and `winmux ls` lists everyone else's; a title
+is the weaker address because a prompt hook may rewrite it on every prompt.
 
 - **Nothing is written back to the sender**, on success or failure — a diagnostic in someone
   else's terminal (and in its replay buffer) is worse pollution than a missed send. Failures
@@ -152,18 +165,81 @@ ESC ] 777 ; winmux-send ; <target> ; <base64> BEL
   a file.
 - No state changes, so no snapshot is published and nothing is persisted.
 
-**Environment.** Every winmux terminal exports `WINMUX=1`, and a tab with per-tab history
-also exports `WINMUX_TAB=<tab id>` (its own stable tab id). That is how an agent knows it is
-inside winmux at all — the skill's description keys off `WINMUX` — and the id is the tab's
-self-reference for a reply address. The wrapper that sets them is
-`apps/winmux/src-tauri/src/host.rs::bash_argv`, so they reach the login shell and every
-child of it.
+**Environment.** Every winmux terminal exports `WINMUX=1` and prepends `~/.winmux/bin` to
+`PATH`; a tab with per-tab history also exports `WINMUX_TAB=<tab id>` (its own stable tab id).
+That is how an agent knows it is inside winmux at all — the skill's description keys off
+`WINMUX` — and the id is the tab's self-reference for a reply address. The wrapper that sets
+them is `apps/winmux/src-tauri/src/host.rs::bash_argv`, so they reach the login shell and
+every child of it. The `PATH` entry survives the login shell because the Debian/Ubuntu rc
+convention *prepends* to `PATH` (`PATH="$HOME/bin:$PATH"`) rather than reassigning it.
 
 **Security.** Any terminal program on the machine that can write to a pane's PTY can inject
 input into another pane this way. That is intended — winmux assumes your own machine and
 cooperating agents — and this channel is a convenience, **not** a privilege boundary. The
 size cap, the unique-match requirement and the self-exclusion are misfire guards, not
 security controls.
+
+## Agent query channel — `OSC 777;winmux-query`
+
+The read half of the agent channel: it answers "what tabs are open?" so an agent can pick a
+target id instead of guessing at a title. Unlike the notify and send channels this one has a
+**reply**, and because the OSC stream is one-way (into the app) the reply is a **file the
+sender names in the request**.
+
+```
+ESC ] 777 ; winmux-query ; <kind> ; <base64 reply path> BEL
+```
+
+| Field | Contract |
+|---|---|
+| `winmux-query` | Literal kind marker. |
+| `<kind>` | The question. `list-tabs` is the only one the app answers; any other value is ignored (so a newer CLI against an older app simply gets no reply, and vice versa). |
+| `<base64 reply path>` | Standard base64 of an absolute Linux path that **must start with `/tmp/`**. Both fields are required — `777;winmux-query;list-tabs` with no path is not a query at all, since there is nowhere to answer. |
+
+**`/tmp/` is enforced, and that is the whole security story of this channel.** The reply is a
+file *write performed by the winmux app*. The content is only metadata the app already owns,
+but leaving the path free would make this channel a way for anything that can write to a PTY
+to overwrite `~/.bashrc` or `~/.claude/settings.json`. Confining it to `/tmp/` closes that
+surface. Path validation (`crate::send::decode_reply_path`) rejects `..`, backslashes and NUL
+*before* the prefix check, so `/tmp/../home/u/.bashrc` does not get through either. Like the
+send channel's guards this is a misfire guard, not a privilege boundary.
+
+The reply for `list-tabs`:
+
+```json
+{"tabs": [{"tab": 181, "title": "build", "workspaceId": 1, "workspaceName": "winmux",
+           "pane": 3, "active": true, "kind": "terminal", "status": "running"}],
+ "self_tab": 176}
+```
+
+| Field | Meaning |
+|---|---|
+| `tabs` | Every open tab, all workspaces, in workspace → pane → tab order. Viewer tabs are included: this answers "what is open", not "what can I send to". |
+| `kind` | `terminal` \| `folderBrowser` \| `textViewer` \| `markdownViewer` |
+| `status` | `running` \| `exited` (terminals) \| `viewer` (a tab with no process). Only `running` terminals are send targets. |
+| `self_tab` | The requester's own tab id, or `null` when the app cannot map the session back to a tab. |
+
+- **The file appears only when it is complete.** The app writes `<path>.partial` and renames
+  it into place, so a reader that waits for the path to exist never sees half-written JSON —
+  which matters because a write that crosses the 9P boundary from Windows into WSL does not
+  land in one piece. The rename stays inside the same directory, so it never crosses a
+  filesystem boundary.
+- **Failure is silent, exactly like send.** A bad path, an unknown kind, a serialization or
+  write failure — all of it goes to the app's stderr and **nothing** is written back to the
+  requester's terminal. The reply file never appearing is the only signal the requester gets,
+  which is why `winmux ls` times out (2s) rather than waiting forever.
+- No state changes: no snapshot is published, nothing is persisted, and the query is not
+  coalesced into the 100ms notification flush window (two queries in one window must both be
+  answered).
+- Queries share one in-flight cap with sends (8 concurrent) — they contend for the same
+  blocking thread pool, so one counter guards both.
+
+`winmux ls` is the CLI half. It `mktemp`s a name under `/tmp`, removes the placeholder, emits
+the query, polls for the path to appear (0.05s, giving up at 2s), renders the JSON as a table,
+and deletes the file. **The `COMMAND` column is not part of the reply** — the app has no idea
+what runs inside a tab. The CLI fills it from `/proc` on its own side by finding the process
+whose environment has `WINMUX_TAB=<id>` and reading its terminal's foreground process group,
+which is why a tab whose shell lives in another WSL distro or in a Windows shell shows `?`.
 
 ## tty resolution discipline — direct `/dev/tty` → ancestor pts fallback
 

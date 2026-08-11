@@ -922,6 +922,78 @@ launch** — no manual cleanup. Run the app from a console so its stderr is visi
    installed; if it does not play at all, check that the first-gesture unlock happened (the
    dev console logs a debug line when the audio context is unavailable).
 
+### Query channel + winmux CLI (provision v4) — verification
+
+The agent channel gained a read half (`OSC 777;winmux-query`, contract in
+[`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md)) and a single
+CLI in front of both halves. Setup version 4 (`~/.winmux/.setup-v4`) installs
+`~/.winmux/bin/winmux`, turns the v3 `winmux-send.sh` into a wrapper around `winmux send`, and
+rewrites the `winmux-send` skill around the CLI. The v4 marker differs from v3, so **an
+already-provisioned distro re-provisions on the next launch** — no manual cleanup. Run the app
+from a console (`npm run tauri dev`) so its stderr is visible: every failure of these channels
+is logged there and **nowhere else**.
+
+1. **The CLI is installed and on `PATH`** — in a **new** terminal tab (an existing tab was
+   spawned by the previous build and has the old environment):
+   ```bash
+   command -v winmux      # /home/<you>/.winmux/bin/winmux — no path needed
+   winmux id              # this tab's id, the same number as $WINMUX_TAB
+   winmux --help          # three usage lines plus the addressing and COMMAND notes
+   ```
+   Confirm `~/.winmux/.setup-v4` exists and `~/.winmux/setup.log` names the CLI install, and
+   that per-tab history still works (up arrow recalls this tab's own history — the same
+   wrapper sets `PATH` and `HISTFILE`, so a mistake there breaks both).
+2. **`winmux ls` lists every tab** — open several tabs across **two workspaces**, give a
+   couple of them titles (`printf '\033]0;build\007'`), open a viewer tab (a folder or a
+   markdown file), and let one tab's terminal exit. Then from any tab:
+   ```bash
+   winmux ls
+   ```
+   - every tab appears, background workspace included, grouped workspace → pane → tab,
+   - `STATUS` is `running` / `exited` / `viewer` and matches what the tabs actually are,
+   - the row for the tab you ran it in carries `*` in the `TAB` column,
+   - `WORKSPACE` shows each tab's workspace name.
+   The sending pane shows no escape sequence and no stray output — only the table.
+3. **The `COMMAND` column** — in one tab start something long-running (`sleep 300`, `htop`,
+   a Claude Code session) and leave another sitting at its prompt, then run `winmux ls` from a
+   third:
+   - the busy tab names the command, the idle tab shows `-`,
+   - a tab running in **another WSL distro** (make a workspace with a different distro) shows
+     `?`, and so does a tab running a Windows shell — this is the documented limit of reading
+     `/proc` from one distro, not a bug,
+   - an `exited` tab and a viewer tab show `-` (nothing runs in them by definition).
+4. **`#<id>` addressing beats titles** — give **two** tabs the same title (`build`), then:
+   ```bash
+   winmux send build 'echo ambiguous'   # nothing arrives; stderr says how many matched
+   winmux send '#181' 'echo by id'      # arrives in tab 181 only, and runs
+   winmux send -l '#181' 'echo literal' # arrives, waits at the prompt
+   winmux send '#999999' hi             # nothing arrives anywhere, silent, exit 0
+   ```
+   Take the ids from `winmux ls`. Quoting matters — an unquoted `#181` is a shell comment.
+   Send to the id of the **viewer** tab and of the **exited** tab: both must deliver nothing.
+   Send to your own id: nothing arrives (self-exclusion).
+5. **The old helper still works** — `~/.winmux/bin/winmux-send.sh build 'echo compat'` and its
+   `-l` form behave exactly as in the v3 round above; the file is now two lines.
+6. **Timeout outside winmux** — in a plain WSL terminal (Windows Terminal, not winmux):
+   ```bash
+   ~/.winmux/bin/winmux ls; echo "exit=$?"
+   ```
+   After ~2s it must print `no reply from winmux (not inside winmux, or the app is an old
+   version)` on stderr and exit 1, printing no table. Then confirm the same for the mismatched
+   pair: run this **new** CLI while an **older winmux build** (one without the query channel)
+   is the app — same message, same 2s, and the older app's stderr shows nothing, because an
+   unknown OSC kind is simply not parsed. Check `ls /tmp/winmux-query-*` afterwards in both
+   cases: **no leftover files**, and none with a `.partial` suffix.
+7. **The reply file is cleaned up and never half-read** — run `winmux ls` in a loop
+   (`for i in $(seq 20); do winmux ls > /dev/null || echo FAIL; done`) and confirm every run
+   succeeds and `/tmp` has no `winmux-query-*` left behind. Then run two `winmux ls` at the
+   same time from two tabs: both must get their own complete table (the query is not
+   coalesced, and each names its own reply file).
+8. **Nothing else regressed** — with the channels exercised, run a Claude Code session in a
+   tab and confirm the section 10 item 1 statuses (`running` → `needsInput` → `idle`) still
+   route, and that the agent finds the rewritten skill by name and uses `winmux ls` →
+   `winmux send '#<id>'` on its own when asked to hand work to another pane.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

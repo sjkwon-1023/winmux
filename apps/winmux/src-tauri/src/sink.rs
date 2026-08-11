@@ -9,16 +9,19 @@
 //! - OSC: [`OscRouter`] 에 밀어넣기만 한다 — 모델 반영은 라우터 worker 가 flush
 //!   창당 한 번 한다 (18단계 계획 glue 계약). 리더 스레드에서 Dispatcher lock 을
 //!   잡지 않는 경계가 여기다.
-//! - pane 간 전송(`OSC 777;winmux-send`)만 예외로 라우터를 타지 않는다 — 상태가
-//!   아니라 **액션**이라 코얼레싱할 것이 없다 ([`deliver_send`]).
+//! - pane 간 전송(`OSC 777;winmux-send`)과 탭 열거 질의(`OSC 777;winmux-query`)만
+//!   예외로 라우터를 타지 않는다 — 상태 델타가 아니라 **액션**이라 코얼레싱할
+//!   것이 없다 ([`deliver_send`]·[`deliver_query`]).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager};
-use winmux_core::command::SessionEvent;
+use winmux_core::command::{SessionEvent, TabInfo};
+use winmux_core::model::{AppState as CoreState, TabKind};
 use winmux_core::osc::OscEvent;
-use winmux_core::send::decode_send_text;
+use winmux_core::send::{decode_reply_path, decode_send_text};
 use winmux_core::session::{Delivery, SessionId, SessionSink};
 
 use crate::router::OscRouter;
@@ -111,16 +114,21 @@ impl SessionSink for SinkHandle {
     }
 
     fn on_osc(&self, event: &OscEvent) {
-        if let OscEvent::Osc777Send { target, text_b64 } = event {
-            // 전송은 상태 델타가 아니라 액션이다 — 배치에 넣으면 flush 창만큼
-            // 늦어지고 코얼레싱(last-wins)이 두 번째 전송을 삼킨다.
-            deliver_send(&self.0.app, self.0.session, target, text_b64);
-            return;
+        match event {
+            // 전송·질의는 상태 델타가 아니라 액션이다 — 배치에 넣으면 flush 창만큼
+            // 늦어지고 코얼레싱(last-wins)이 두 번째 요청을 삼킨다. 둘 다 리더
+            // 스레드에서는 넘기기만 하고 실제 작업은 blocking 풀에서 돈다.
+            OscEvent::Osc777Send { target, text_b64 } => {
+                deliver_send(&self.0.app, self.0.session, target, text_b64);
+            }
+            OscEvent::Osc777Query { kind, reply_b64 } => {
+                deliver_query(&self.0.app, self.0.session, kind, reply_b64);
+            }
+            // 리더 스레드 핫패스 — 배치에 합치고 깨우기만 한다. 모델 반영은 라우터
+            // worker 가 flush 창당 한 번 하며, 여기서 Dispatcher lock 을 잡지 않는다
+            // (router.rs 잠금 규율).
+            _ => self.0.router.push(self.0.session, event),
         }
-        // 리더 스레드 핫패스 — 배치에 합치고 깨우기만 한다. 모델 반영은 라우터
-        // worker 가 flush 창당 한 번 하며, 여기서 Dispatcher lock 을 잡지 않는다
-        // (router.rs 잠금 규율).
-        self.0.router.push(self.0.session, event);
     }
 
     fn on_exit(&self, code: Option<u32>) {
@@ -143,6 +151,37 @@ impl SessionSink for SinkHandle {
         });
         publish_state(&self.0.app, &dispatcher);
     }
+}
+
+/// 진행 중 blocking 태스크 상한 (보안 리뷰 finding) — 전송([`deliver_send`])과
+/// 질의([`deliver_query`])가 **하나의 카운터를 공유**한다. 임의 PTY 프로그램이
+/// 이 채널들을 고속 연사하면 태스크가 무한히 쌓여 blocking 풀을 포화시키고,
+/// paused 대상에의 write 도 9P 회신 파일 쓰기도 스레드를 오래 점유할 수 있다.
+/// 보호 대상이 같은 풀 하나이므로 상한도 하나여야 한다 (채널마다 따로 두면
+/// 합산 상한이 두 배가 된다). 초과분은 로그와 함께 폐기한다 — 협력 에이전트의
+/// 정상 사용(초당 몇 건)에는 닿지 않는 수치다.
+const MAX_IN_FLIGHT: usize = 8;
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// 카운터를 어떤 return 경로에서도 되돌리는 Drop 가드. [`acquire_in_flight`] 만
+/// 이것을 만들 수 있다 — 증가 없는 감소로 짝이 어긋나는 길을 막는다.
+struct InFlightGuard;
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// 슬롯 하나를 확보한다 — 상한을 넘으면 되돌리고 `None`. 리더 스레드에서 부르고
+/// 얻은 가드를 blocking 클로저 안으로 옮긴다: 클로저가 어느 경로로 끝나든, 또는
+/// 실행되지 못한 채 버려지든 카운터가 회수된다.
+fn acquire_in_flight() -> Option<InFlightGuard> {
+    if IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT {
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        return None;
+    }
+    Some(InFlightGuard)
 }
 
 /// pane 간 텍스트 전송 (에이전트 채널 — `scripts/wsl/skills/winmux-send/SKILL.md`).
@@ -171,33 +210,18 @@ impl SessionSink for SinkHandle {
 /// 것도 쓰지 않는다** — 진단 문자열이 남의 터미널 화면(그리고 replay 버퍼)에
 /// 섞이면 그게 더 나쁜 오염이다. 송신 측에서 보면 전송은 무음 fire-and-forget 이다.
 fn deliver_send(app: &AppHandle, sender: SessionId, target: &str, text_b64: &str) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    // 진행 중 전달 상한 (보안 리뷰 finding): 임의 PTY 프로그램이 전송을 고속
-    // 연사하면 태스크가 무한히 쌓여 blocking 풀을 포화시키고, paused 대상에의
-    // write 는 스레드를 무기한 점유할 수 있다. 상한 초과분은 로그와 함께
-    // 폐기한다 — 협력 에이전트의 정상 사용(초당 몇 건)에는 닿지 않는 수치다.
-    const MAX_IN_FLIGHT: usize = 8;
-    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-    if IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT {
-        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    let Some(guard) = acquire_in_flight() else {
         eprintln!(
             "[winmux] send: dropped from session {sender}: too many deliveries in flight \
              (cap {MAX_IN_FLIGHT})"
         );
         return;
-    }
+    };
     let app = app.clone();
     let target = target.to_owned();
     let text_b64 = text_b64.to_owned();
     tauri::async_runtime::spawn_blocking(move || {
-        // 카운터는 어떤 return 경로에서도 내려가야 한다 — Drop 가드로 묶는다.
-        struct InFlightGuard;
-        impl Drop for InFlightGuard {
-            fn drop(&mut self) {
-                IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-        let _guard = InFlightGuard;
+        let _guard = guard;
         let bytes = match decode_send_text(&text_b64) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -232,4 +256,158 @@ fn deliver_send(app: &AppHandle, sender: SessionId, target: &str, text_b64: &str
             eprintln!("[winmux] send: write to session {session} failed: {err:#}");
         }
     });
+}
+
+/// 이 글루가 답하는 유일한 질의 종류. 다른 값은 [`deliver_query`] 에서 무응답으로
+/// 떨어진다 (전방 호환 — 새 kind 를 아는 CLI 가 옛 winmux 를 만나도 안전하다).
+const QUERY_KIND_LIST_TABS: &str = "list-tabs";
+
+/// 질의 회신 JSON 의 최상위 형태 — `{"tabs": [...], "self_tab": <탭 id|null>}`.
+///
+/// `tabs` 의 원소는 코어 [`TabInfo`] 의 직렬화형이다. `self_tab` 은 **요청자
+/// 자신의 탭 id** 로, CLI 가 자기 행을 표시하거나 목록에서 빼는 데 쓴다. 요청자
+/// 세션에 대응하는 탭을 못 찾으면 `null` 이다 — 나머지 목록은 그대로 유효하므로
+/// 회신 자체를 버리지 않는다.
+#[derive(serde::Serialize)]
+struct QueryReply<'a> {
+    tabs: &'a [TabInfo],
+    self_tab: Option<u64>,
+}
+
+/// 에이전트 질의 채널 (`OSC 777;winmux-query;<kind>;<base64 회신 경로>`) —
+/// 열려 있는 탭 목록을 요청자가 지정한 `/tmp` 파일로 회신한다.
+///
+/// # 왜 즉시 처리하나
+///
+/// [`deliver_send`] 와 같은 이유다: 질의도 상태 델타가 아니라 **액션**이라
+/// flush 창에 모을 것이 없고, 코얼레싱하면 같은 창의 두 번째 질의가 사라진다.
+/// 모델 변이가 없으므로 스냅샷 발행·저장 예약도 하지 않는다.
+///
+/// # 스레드·잠금
+///
+/// 호출자는 PTY **리더 스레드**다. 여기서는 넘기기만 하고, Dispatcher lock 도
+/// 9P 파일 쓰기(수십 ms 이상)도 blocking 풀 안에서 한다 — 리더가 잡히면 요청자
+/// pane 의 출력이 그동안 멈춘다. lock 은 열거·역매핑 동안만 잡고 **파일 I/O 전에
+/// 놓는다** (state.rs 잠금 규율). 진행 중 태스크 상한은 전송과 [`IN_FLIGHT`] 를
+/// 공유한다.
+///
+/// # 실패
+///
+/// 경로 디코드·직렬화·파일 쓰기 실패는 전부 stderr 로만 남기고 **요청자 세션에는
+/// 아무것도 쓰지 않는다** (전송과 같은 무음 계약 — 진단 문자열이 남의 터미널
+/// 화면과 replay 버퍼를 오염시키는 쪽이 더 나쁘다). 회신 파일이 나타나지 않는
+/// 것이 요청자가 보는 유일한 신호다.
+fn deliver_query(app: &AppHandle, requester: SessionId, kind: &str, reply_b64: &str) {
+    let Some(guard) = acquire_in_flight() else {
+        eprintln!(
+            "[winmux] query: dropped from session {requester}: too many deliveries in flight \
+             (cap {MAX_IN_FLIGHT})"
+        );
+        return;
+    };
+    let app = app.clone();
+    let kind = kind.to_owned();
+    let reply_b64 = reply_b64.to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        // 회신 경로 검증이 먼저다 — 경로가 불량하면 어떤 kind 든 답할 곳이 없다.
+        let reply_path = match decode_reply_path(&reply_b64) {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("[winmux] query: rejected from session {requester}: {err}");
+                return;
+            }
+        };
+        if kind != QUERY_KIND_LIST_TABS {
+            eprintln!(
+                "[winmux] query: unsupported kind {kind:?} from session {requester}; ignored"
+            );
+            return;
+        }
+        let Some(state) = app.try_state::<AppState>() else {
+            // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 (send 와 같은 규율).
+            eprintln!("[winmux] query: managed state unavailable; dropped");
+            return;
+        };
+        // 열거와 요청자 역매핑은 둘 다 순수 조회다 — 한 번 잡은 lock 아래에서
+        // 같이 읽어 두 조회가 서로 다른 순간의 상태를 보는 일을 막고, 파일 I/O
+        // 전에 놓는다.
+        let (tabs, self_tab, distro) = {
+            let dispatcher = state.dispatcher.lock().unwrap();
+            let tabs = dispatcher.list_tabs();
+            let (self_tab, distro) = requester_tab_and_distro(dispatcher.state(), requester);
+            (tabs, self_tab, distro)
+        };
+        let json = match serde_json::to_vec(&QueryReply {
+            tabs: &tabs,
+            self_tab,
+        }) {
+            Ok(json) => json,
+            Err(err) => {
+                eprintln!("[winmux] query: cannot serialize reply for session {requester}: {err}");
+                return;
+            }
+        };
+        if let Err(err) = write_reply_file(distro, &reply_path, &json) {
+            eprintln!("[winmux] query: reply for session {requester} failed: {err}");
+        }
+    });
+}
+
+/// 요청자 세션의 **탭 id** 와 그 탭이 속한 워크스페이스의 **distro** 를 역으로
+/// 찾는다 — `Dispatcher::resolve_send_target` 의 순회와 같은 모양이되, 거기가
+/// 세션 → 상대라면 여기는 세션 → 자기 자신이다.
+///
+/// distro 가 필요한 이유는 회신이 **파일 쓰기**이기 때문이다: 요청자가 도는
+/// 배포판의 `/tmp` 에 놓아야 그 셸이 방금 지정한 경로에서 읽는다. 못 찾으면
+/// `None` 을 주고 `commands::host_path` 의 기본 해석에 맡긴다 (`WINMUX_DISTRO` →
+/// `wsl.exe` 기본 배포판) — 터미널 스폰이 distro 없는 워크스페이스를 다루는
+/// 방식과 같은 기본값이다.
+///
+/// 터미널 상태(Running/Exited)는 보지 않는다. 요청자는 방금 OSC 를 낸 살아 있는
+/// 세션이고, 여기서 알아야 할 것은 "이 세션이 어느 탭·워크스페이스에 있나"뿐이다.
+fn requester_tab_and_distro(
+    state: &CoreState,
+    requester: SessionId,
+) -> (Option<u64>, Option<String>) {
+    for ws in &state.workspaces {
+        for pane in ws.panes.values() {
+            for tab in &pane.tabs {
+                let TabKind::Terminal {
+                    pty_session: Some(session),
+                    ..
+                } = &tab.kind
+                else {
+                    continue;
+                };
+                if *session == requester {
+                    return (Some(tab.id.0), ws.distro.clone());
+                }
+            }
+        }
+    }
+    (None, None)
+}
+
+/// 회신 JSON 을 **완성된 상태로만** 최종 경로에 나타나게 한다: 같은 디렉터리의
+/// `<경로>.partial` 에 전부 쓰고 rename 한다.
+///
+/// 요청자 CLI 는 이 경로가 나타나기를 기다리다 읽는다. 최종 경로에 직접 쓰면
+/// 아직 다 쓰이지 않은 파일을 읽어 JSON 파싱이 깨진다 (특히 9P 를 사이에 둔
+/// 쓰기는 한 번에 끝나지 않는다). rename 은 같은 디렉터리 안이라 파일시스템
+/// 경계를 넘지 않는다.
+fn write_reply_file(distro: Option<String>, reply_path: &str, json: &[u8]) -> Result<(), String> {
+    let partial = crate::commands::host_path(distro.clone(), &format!("{reply_path}.partial"))?;
+    let final_path = crate::commands::host_path(distro, reply_path)?;
+    std::fs::write(&partial, json)
+        .map_err(|err| format!("cannot write {}: {err}", partial.display()))?;
+    std::fs::rename(&partial, &final_path).map_err(|err| {
+        // 개명이 실패하면 우리가 만든 임시 파일만 남는다 — 치우고 나간다.
+        let _ = std::fs::remove_file(&partial);
+        format!(
+            "cannot rename {} to {}: {err}",
+            partial.display(),
+            final_path.display()
+        )
+    })
 }

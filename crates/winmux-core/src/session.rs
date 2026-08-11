@@ -519,6 +519,9 @@ fn summarize_osc(event: &OscEvent) -> String {
         // 전송 payload(base64)는 요약에 싣지 않는다 — 대상만 있으면 충분하고,
         // stats 문자열에 사용자 텍스트를 흘릴 이유가 없다.
         OscEvent::Osc777Send { target, .. } => format!("777-send:{target}"),
+        // 질의도 같은 규율 — 종류만 싣고 회신 **경로는 싣지 않는다** (로그·stats
+        // 에 파일시스템 경로를 흘릴 이유가 없다).
+        OscEvent::Osc777Query { kind, .. } => format!("777-query:{kind}"),
     }
 }
 
@@ -602,5 +605,38 @@ impl SessionManager {
 impl Default for SessionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc_summaries_carry_no_user_payload() {
+        // stats 표시용 요약은 종류·대상만 싣는다 — 전송 텍스트와 회신 경로는
+        // 사용자 데이터라 이 문자열(로그·stats 표면)에 흘리지 않는다.
+        assert_eq!(
+            summarize_osc(&OscEvent::Osc777Send {
+                target: "build".into(),
+                text_b64: "Y2FyZ28gdGVzdAo=".into(),
+            }),
+            "777-send:build"
+        );
+        let summary = summarize_osc(&OscEvent::Osc777Query {
+            kind: "list-tabs".into(),
+            reply_b64: "L3RtcC93aW5tdXgtdGFicy00Mi5qc29u".into(),
+        });
+        assert_eq!(summary, "777-query:list-tabs");
+        assert!(!summary.contains("tmp"), "회신 경로가 요약에 실렸다: {summary}");
+        // 기존 종류의 요약 형태는 그대로다 (회귀 잠금).
+        assert_eq!(
+            summarize_osc(&OscEvent::Osc777Notify {
+                title: "winmux:idle".into(),
+                body: "done".into(),
+            }),
+            "777:winmux:idle"
+        );
+        assert_eq!(summarize_osc(&OscEvent::Osc0Title("t".into())), "0:t");
     }
 }

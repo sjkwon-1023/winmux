@@ -90,3 +90,9 @@ rebuilt, only re-entered.
   prompt from executing itself.
 - Absorbed by the retirement: the "keyboard targeting for send mode" idea (never built)
   dies with the mouse UI.
+- **Landed 2026-08-11 (addendum)**: the channel shipped as `OSC 777;winmux-send` plus a
+  `winmux-query` read half behind the `winmux` CLI — tab-id addressing as planned, but
+  written to the target session's stdin in Rust rather than through this ADR's frontend
+  paste path, so decision 5's bracketed-paste refusal and acceptance pre-check do not apply
+  to it; the machinery kept dormant above is still unused. Contract:
+  `scripts/wsl/claude-hook-example.md`.
