@@ -1007,12 +1007,15 @@ every failure of these channels is logged there and **nowhere else**.
    route, and that the agent finds the rewritten skill by name and uses `winmux ls` →
    `winmux send '#<id>'` on its own when asked to hand work to another pane.
 
-### v0.3.1 — verification
+### v0.3.1 + v0.3.2 — verification
 
-Five items: the OSC 10/11 colour-query responder, the workspace confinement of the agent
-channel, terminal font settings, the new-workspace button unification, and the Codex
-AGENTS.md guidance. Run the app from a console (`npm run tauri dev`) — item 1 is decided by
-a line on the app's **stderr**, and nothing else reports it.
+Six items: the OSC 10/11 colour-query responder, the workspace confinement of the agent
+channel, terminal font settings, the new-workspace button unification, the Codex AGENTS.md
+guidance, and — added in v0.3.2 — the per-tab agent resume hint. Run the app from a console
+(`npm run tauri dev`) — item 1 is decided by a line on the app's **stderr**, and nothing else
+reports it. Setup version **6** (`~/.winmux/.setup-v6`) carries the v0.3.2 notify script, and
+the marker differs from v5, so **an already-provisioned distro re-provisions on the next
+launch**; the wrapper half reaches only tabs opened after this build, so item 6 needs new tabs.
 
 1. **Codex's input box** — open a **new** tab (an existing tab predates this build) and start
    `codex`. The input prompt must be drawn as a filled pill that separates from the terminal
@@ -1066,11 +1069,36 @@ a line on the app's **stderr**, and nothing else reports it.
    at all** (first boot) — then there is no "current directory" to use.
 
 5. **Codex sandbox guidance (`~/.codex/AGENTS.md`)** — after this build's provisioning runs
-   (marker `.setup-v5`), `~/.codex/AGENTS.md` in the distro contains the managed
+   (marker `.setup-v6`), `~/.codex/AGENTS.md` in the distro contains the managed
    `winmux integration` block (only when `~/.codex` already existed). Ask Codex to run
    `winmux ls`: it should request escalated/non-sandboxed execution per the guidance —
    sandboxed runs fail silently because the sandbox blocks the terminal device and mounts a
    private `/tmp`. Any text of yours outside the managed block must be untouched.
+
+6. **Agent resume hint across a restart** (v0.3.2; contract in
+   [`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md), "Resume
+   hint") — this needs the new provisioning *and* a new tab, so launch this build once to let
+   it re-provision (confirm `~/.winmux/.setup-v6` exists), then open a **fresh** terminal tab.
+   ```bash
+   echo "$WINMUX_TAB"        # the tab id the file below is named after
+   claude                    # ask it anything, so the hooks fire at least once
+   ```
+   - while that session runs, `cat ~/.winmux/resume/tab-$WINMUX_TAB` shows two lines: a
+     `claude --resume <uuid>` command and an epoch timestamp. Ask a second question and check
+     that the timestamp moves — it is rewritten on every hook call,
+   - **quit winmux and relaunch it.** The tab comes back as a fresh shell, and just above the
+     first prompt sits one dimmed line: `[winmux] resume previous agent: claude --resume <uuid>`,
+   - press **↑ once** at that prompt: the same command is on the command line, unrun. Nothing
+     was executed on your behalf — confirm the tab is at a plain prompt, not inside Claude.
+     Press Enter and the session comes back with its history,
+   - open a **different** new tab (one that never ran an agent) and confirm it prints **no**
+     hint line at all, and that ↑ there recalls that tab's own history as before,
+   - start a **second, different** Claude session in the first tab, restart again, and confirm
+     the hint names the newer session — the most recent one wins.
+
+   The hint is shown whenever the file exists, no matter how old it is (freshness is your
+   call, and line 2 is there to check by hand). Codex sessions get no hint — see the contract
+   document and the `CLAUDE.md` backlog for why.
 
 ## 11. ARM64 cross-build notes
 

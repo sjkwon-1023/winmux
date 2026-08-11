@@ -108,6 +108,32 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
 /// 않으므로** 이 env 상속만으로 충분하다. mkdir 이 실패하면 `&&` 가 끊겨 셸이
 /// 그대로 종료된다 — 탭이 exited 로 표시돼 실패가 드러난다 (조용한 fallback 없음).
 ///
+/// **에이전트 세션 resume 힌트**: 재시작 후 respawn 되는 셸은 새 셸이라 그 탭에서 돌던
+/// 에이전트 세션이 화면에서 사라진다. Claude Code hook 이 매 호출마다
+/// `~/.winmux/resume/tab-<id>` 에 1행 = resume 명령, 2행 = 기록 시각(epoch)을 남기므로
+/// (`provision.rs` 의 `winmux-notify.sh` — 계약은 `scripts/wsl/claude-hook-example.md`),
+/// exec 직전에 그 1행을 읽어 ① 탭의 HISTFILE 끝에 덧붙이고(↑ 한 번에 나온다)
+/// ② 흐린 안내 한 줄을 찍는다. **자동 실행은 하지 않는다** — 재개할지는 사용자가 정한다.
+/// 파일이 없으면 아무 출력도 없다. 기록 시각으로 신선도를 판단하지 않는 것은 의도된
+/// 단순화다 (오래된 힌트인지는 사용자가 안다). 이 블록은 `&&` 사슬 안에 있지만 파일
+/// 부재·읽기 실패·append 실패 어느 쪽으로도 0 으로 끝난다(조건 거짓인 `if` 는 0,
+/// `read` 실패는 `|| true` 가 흡수, append 실패는 뒤따르는 printf 가 가린다) — 힌트가
+/// 셸 자체를 못 띄우게 만드는 일은 없어야 한다. 유일하게 새는 status 는 **안내 printf
+/// 자체가 이 pane 의 tty 에 못 쓰는** 경우인데, 그건 애초에 쓸 수 있는 탭이 아니다.
+/// `RESUME`·`cmd` 는 여기서 처음 대입되는 평범한 셸 변수라 exec 로 프로세스 이미지가
+/// 갈릴 때 사라진다 (로그인 셸 환경 무오염). 엄밀히는 같은 이름이 **export 된 채로
+/// 상속돼 들어오면** bash 가 export 속성을 유지하지만, spawn 환경은 winmux 가 이
+/// 함수에서 통째로 정하므로 그런 값은 오지 않는다.
+///
+/// 힌트 1행은 **읽는 쪽에서도 형태를 검증한다** (리뷰 finding): 기록 형식과 대칭인
+/// `claude --resume <영숫자·-·_ 토큰>` 정확 일치만 통과시키고, 그 외(escape 시퀀스·
+/// 셸 메타문자·다른 명령)는 조용히 무시한다 — 같은 uid 가 파일을 바꿔치기해도
+/// "↑+Enter 를 유도하는 임의 명령 표면"이 되지 않는다. 같은 uid 는 어차피
+/// `~/.bashrc` 를 고칠 수 있으니 권한 경계가 아니라 오발 방지이며, 쓰는 쪽
+/// (`winmux-notify.sh`)의 session_id charset 가드와 짝이다. 또 힌트는 표시로
+/// 소비되지 않으므로, 세션이 바뀌지 않은 채 재시작을 N 번 하면 같은 줄이
+/// HISTFILE 에 N 개 쌓인다 (인접하므로 ↑ 한 번은 그대로).
+///
 /// `PATH` 프리펜드는 프로비저닝이 까는 `winmux` CLI(`~/.winmux/bin/winmux`)를 탭 안에서
 /// 경로 없이 부르기 위한 것이다 (`provision.rs` 2절). 로그인 셸이 이 값을 덮지 않는
 /// 이유는 Debian/Ubuntu 계열의 `/etc/profile`·`~/.profile` 관례가 PATH 를 **재대입이
@@ -139,6 +165,14 @@ fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
     let script = match history_tab {
         Some(tab) => format!(
             "{THEME_SYNC}; mkdir -p \"$HOME/.winmux/history\" \
+             && RESUME=\"$HOME/.winmux/resume/tab-{tab}\" && cmd= \
+             && if [ -s \"$RESUME\" ]; then IFS= read -r cmd < \"$RESUME\" || true; fi \
+             && case \"$cmd\" in 'claude --resume '*) \
+             expr \"x$cmd\" : 'xclaude --resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
+             *) cmd= ;; esac \
+             && if [ -n \"$cmd\" ]; then \
+             printf '%s\\n' \"$cmd\" >> \"$HOME/.winmux/history/tab-{tab}\"; \
+             printf '\\033[2m[winmux] resume previous agent: %s\\033[0m\\n' \"$cmd\"; fi \
              && {PATH_PREFIX} COLORTERM=truecolor WINMUX=1 WINMUX_TAB={tab} \
              HISTFILE=\"$HOME/.winmux/history/tab-{tab}\" exec bash -l"
         ),
@@ -211,6 +245,14 @@ mod tests {
                 "-c".to_string(),
                 "printf '\\033]10;#cccccc\\033\\\\\\033]11;#1e1e1e\\033\\\\'; \
                  mkdir -p \"$HOME/.winmux/history\" \
+                 && RESUME=\"$HOME/.winmux/resume/tab-7\" && cmd= \
+                 && if [ -s \"$RESUME\" ]; then IFS= read -r cmd < \"$RESUME\" || true; fi \
+                 && case \"$cmd\" in 'claude --resume '*) \
+                 expr \"x$cmd\" : 'xclaude --resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
+                 *) cmd= ;; esac \
+                 && if [ -n \"$cmd\" ]; then \
+                 printf '%s\\n' \"$cmd\" >> \"$HOME/.winmux/history/tab-7\"; \
+                 printf '\\033[2m[winmux] resume previous agent: %s\\033[0m\\n' \"$cmd\"; fi \
                  && PATH=\"$HOME/.winmux/bin:$PATH\" COLORTERM=truecolor WINMUX=1 WINMUX_TAB=7 \
                  HISTFILE=\"$HOME/.winmux/history/tab-7\" exec bash -l"
                     .to_string(),
@@ -223,6 +265,8 @@ mod tests {
         let spec = spawn_spec(&ShellSpawnReq::default());
         // 탭 id 가 없으면 WINMUX 만 물린 로그인 셸 (셸 기본 history 그대로).
         // PATH 프리펜드는 두 경로에 다 걸린다 — winmux CLI 는 탭 id 와 무관하다.
+        // resume 힌트도 없다 — 힌트 파일은 탭 id 로 주소가 정해지므로 id 가 없으면
+        // 읽을 파일 자체가 없다 (없는 id 를 지어내지 않는 규율의 연장).
         // 앞부분은 검사하지 않는다 — env WINMUX_DISTRO 가 `-d` 를 덧붙일 수 있다.
         assert!(
             spec.args.ends_with(&[
@@ -233,6 +277,11 @@ mod tests {
                  PATH=\"$HOME/.winmux/bin:$PATH\" COLORTERM=truecolor WINMUX=1 exec bash -l"
                     .to_string(),
             ]),
+            "{:?}",
+            spec.args
+        );
+        assert!(
+            !spec.args.iter().any(|a| a.contains("resume")),
             "{:?}",
             spec.args
         );

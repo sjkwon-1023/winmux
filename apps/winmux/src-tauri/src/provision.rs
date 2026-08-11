@@ -32,7 +32,7 @@ use tauri::AppHandle;
 /// 설치 스크립트 버전. 마커 파일명(`~/.winmux/.setup-v<N>`)에 들어가므로, 스크립트
 /// 내용을 바꿔 기존 사용자에게도 다시 깔아야 할 때 이 값을 올리면 된다 (마커가
 /// 달라져 전원 재실행). 스크립트 본문의 `@SETUP_VERSION@` 자리에 치환된다.
-const SETUP_VERSION: u32 = 5;
+const SETUP_VERSION: u32 = 6;
 
 /// 프로세스 수명 캐시 — **해석된** distro 이름 기준으로 앱 실행당 1회만 스폰한다.
 /// 기본 distro(None)는 claim 전에 실제 이름으로 해석된다 (보안 리뷰 finding):
@@ -298,8 +298,11 @@ winmux_emit() {
 }
 
 # Claude Code passes the event information as JSON on stdin when it runs a hook.
-# For the Notification event, the .message field holds the human-readable notification text.
+# For the Notification event, the .message field holds the human-readable notification text,
+# and .session_id names the session this hook belongs to (used for the resume hint below).
+# stdin can only be read once, so both fields are taken from the same captured text.
 # Without jq, fall back to the default body received as an argument (the hook keeps working).
+SESSION_ID=""
 if [[ ! -t 0 ]]; then
   INPUT_JSON="$(cat)"
   if command -v jq > /dev/null 2>&1; then
@@ -307,6 +310,27 @@ if [[ ! -t 0 ]]; then
     if [[ -n "$FROM_JSON" ]]; then
       BODY="$FROM_JSON"
     fi
+    SESSION_ID="$(printf '%s' "$INPUT_JSON" | jq -r '.session_id // empty' 2>/dev/null || true)"
+  fi
+fi
+
+# Resume hint. winmux respawns a tab's shell on restart, so the agent session that ran in it
+# is gone from the screen; recording how to re-enter it lets the fresh shell offer the command
+# (apps/winmux/src-tauri/src/host.rs::bash_argv reads this file and never runs it). Rewritten
+# on every hook call, so the tab's most recent session wins. Line 1 is the command, line 2 the
+# epoch seconds it was recorded at. tmp+mv makes the replacement atomic for a concurrent
+# reader, and every failure here is swallowed: a notification must not break on it.
+# The id is required to be a plain token: the spawn wrapper echoes line 1 into the terminal
+# and into shell history and checks nothing itself, so this is where that is guarded. A
+# session id is a uuid, so the check rejects nothing real.
+if [[ -n "${WINMUX_TAB:-}" && "$SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  RESUME_FILE="$HOME/.winmux/resume/tab-$WINMUX_TAB"
+  if mkdir -p "$HOME/.winmux/resume" 2>/dev/null; then
+    if printf 'claude --resume %s\n%s\n' "$SESSION_ID" "$(date +%s 2>/dev/null || echo 0)" \
+         > "$RESUME_FILE.tmp.$$" 2>/dev/null; then
+      mv -f "$RESUME_FILE.tmp.$$" "$RESUME_FILE" 2>/dev/null || true
+    fi
+    rm -f "$RESUME_FILE.tmp.$$" 2>/dev/null || true
   fi
 fi
 

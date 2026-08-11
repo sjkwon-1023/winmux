@@ -17,7 +17,7 @@ named pipe, or Windows helper CLI.
 
 ## Automatic provisioning
 
-**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v5`); this
+**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v6`); this
 document remains the contract and the manual path.**
 
 On launch the app streams a setup script into `wsl.exe [-d <distro>] -- bash -s` for every
@@ -356,8 +356,11 @@ winmux_emit() {
 }
 
 # Claude Code passes the event information as JSON on stdin when it runs a hook.
-# For the Notification event, the .message field holds the human-readable notification text.
+# For the Notification event, the .message field holds the human-readable notification text,
+# and .session_id names the session this hook belongs to (used for the resume hint below).
+# stdin can only be read once, so both fields are taken from the same captured text.
 # Without jq, fall back to the default body received as an argument (the hook keeps working).
+SESSION_ID=""
 if [[ ! -t 0 ]]; then
   INPUT_JSON="$(cat)"
   if command -v jq > /dev/null 2>&1; then
@@ -365,6 +368,27 @@ if [[ ! -t 0 ]]; then
     if [[ -n "$FROM_JSON" ]]; then
       BODY="$FROM_JSON"
     fi
+    SESSION_ID="$(printf '%s' "$INPUT_JSON" | jq -r '.session_id // empty' 2>/dev/null || true)"
+  fi
+fi
+
+# Resume hint. winmux respawns a tab's shell on restart, so the agent session that ran in it
+# is gone from the screen; recording how to re-enter it lets the fresh shell offer the command
+# (apps/winmux/src-tauri/src/host.rs::bash_argv reads this file and never runs it). Rewritten
+# on every hook call, so the tab's most recent session wins. Line 1 is the command, line 2 the
+# epoch seconds it was recorded at. tmp+mv makes the replacement atomic for a concurrent
+# reader, and every failure here is swallowed: a notification must not break on it.
+# The id is required to be a plain token: the spawn wrapper echoes line 1 into the terminal
+# and into shell history and checks nothing itself, so this is where that is guarded. A
+# session id is a uuid, so the check rejects nothing real.
+if [[ -n "${WINMUX_TAB:-}" && "$SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  RESUME_FILE="$HOME/.winmux/resume/tab-$WINMUX_TAB"
+  if mkdir -p "$HOME/.winmux/resume" 2>/dev/null; then
+    if printf 'claude --resume %s\n%s\n' "$SESSION_ID" "$(date +%s 2>/dev/null || echo 0)" \
+         > "$RESUME_FILE.tmp.$$" 2>/dev/null; then
+      mv -f "$RESUME_FILE.tmp.$$" "$RESUME_FILE" 2>/dev/null || true
+    fi
+    rm -f "$RESUME_FILE.tmp.$$" 2>/dev/null || true
   fi
 fi
 
@@ -447,6 +471,63 @@ if [[ -n "$TRANSCRIPT" && -r "$TRANSCRIPT" ]]; then
   fi
 fi
 ```
+
+## Resume hint — `~/.winmux/resume/tab-<id>`
+
+A restart respawns every terminal tab as a **fresh login shell**: the layout comes back, but
+the agent session that was running in the tab does not, and its id is nowhere on screen. The
+hook stdin JSON carries `.session_id`, so the hook records it per tab and the next shell in
+that tab offers it back.
+
+**This is a hint, never an action.** The recorded command is put in front of the user in two
+places and run by neither of them.
+
+| Field | Contract |
+|---|---|
+| Path | `~/.winmux/resume/tab-<id>`, where `<id>` is the writer's `WINMUX_TAB` — the tab's stable id, which survives a restart, so the file and the tab that gets the hint are the same tab. |
+| Line 1 | The resume command, e.g. `claude --resume 11111111-2222-3333-4444-555555555555`. The reader takes **only this line**. |
+| Line 2 | Epoch seconds at the time of writing. Recorded for diagnosis; **nothing reads it** — see freshness below. |
+| Written when | Every hook invocation that has both a non-empty `WINMUX_TAB` and a `.session_id` matching `^[A-Za-z0-9_-]+$`. The tab's most recent session therefore wins. |
+| Not written when | The tab has no `WINMUX_TAB` (a tab without per-tab history), stdin is a TTY (the script run by hand, so no JSON is read at all), `jq` is missing, the JSON has no `session_id`, or the id is not a plain token. |
+| Atomicity | Written to `<path>.tmp.<pid>` and `mv`d into place, so a concurrent reader sees either the old file or the new one, never a half-written line. The pid suffix keeps two hooks firing at once in the same tab from sharing a temp name. |
+| Failure | Swallowed. Every step is guarded and the hook still exits 0 — a resume hint must never cost a notification, let alone the session. |
+
+The reader is `apps/winmux/src-tauri/src/host.rs::bash_argv`, the same wrapper that sets
+`WINMUX_TAB` and `HISTFILE`. Before it execs the login shell it reads line 1 and, if it is
+non-empty:
+
+1. **appends it to the tab's `HISTFILE`**, so a single press of ↑ at the fresh prompt puts the
+   command on the command line, and
+2. prints one dimmed line, `[winmux] resume previous agent: <cmd>`.
+
+If the file does not exist the wrapper prints nothing at all — a tab that never ran an agent
+looks exactly as it did before. The block is written so that it does not fail the `&&` chain
+that ends in `exec bash -l` — a broken hint must not cost you the shell. (The one status it
+cannot swallow is the hint `printf` failing to write to the pane's own tty, which is not a
+state a usable tab is in.)
+
+**The wrapper trusts the file; the write side is where the checking is.** The reader takes
+line 1 as-is, so the charset guard above is the only thing standing between the file and both
+a raw `printf` to the terminal and an appended shell-history line. This is the same stance as
+the send channel: anything running as you could edit `~/.bashrc` directly, so this is a
+misfire guard rather than a privilege boundary — but it does mean the file should be treated
+as trusted input, and a second guard on the reader is the obvious hardening if that ever
+stops being true.
+
+**A restart with no new session in between re-appends the same line.** The hint is not
+consumed by being shown, so N restarts of a tab whose recorded session has not changed leave
+N copies of it at the end of that tab's `HISTFILE`. They are adjacent, so ↑ still lands on it
+once; the file simply grows.
+
+**Freshness is the user's call.** The hint is shown whenever the file exists, however old it
+is. An age cutoff would have to guess at a threshold, and being wrong in the strict direction
+hides the one thing the user was looking for; the timestamp is on line 2 for anyone who wants
+to check by hand. Nothing prunes these files, exactly as nothing prunes `~/.winmux/history`.
+
+**Claude Code only, for now.** Codex's `notify` program receives its payload as a final
+**argv** argument rather than on stdin, and the entry winmux writes into `~/.codex/config.toml`
+discards it; wiring it up also means rewriting a `notify` key that the installer's own rule
+says it must never touch. See the backlog note in `CLAUDE.md`.
 
 ## Emitting title and cwd from the shell prompt (OSC 0 / OSC 7)
 

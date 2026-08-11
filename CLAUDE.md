@@ -71,8 +71,20 @@ Accepted deferrals, one line each. None of these block the MVP.
 - **≤100MB RAM** — ~129MB at checkpoint 2 sits inside the 100–150MB adoption band
   (ADR-0001); getting under 100MB is a v2 optimization.
 - **Per-tab shell history GC** — `~/.winmux/history/tab-<id>` files outlive the tabs that
-  created them and nothing prunes them. Open alongside it: whether a tab closed through
-  the kill path writes its `HISTFILE` at all (a `history -a` follow-up if it does not).
+  created them and nothing prunes them. `~/.winmux/resume/tab-<id>` (the agent resume hint)
+  has the same shape and the same gap, so one sweep should take both — including any
+  `tab-<id>.tmp.<pid>` a hook killed mid-write left behind. Open alongside it:
+  whether a tab closed through the kill path writes its `HISTFILE` at all (a `history -a`
+  follow-up if it does not).
+- **The resume hint is Claude-only** — the hook stdin JSON's `.session_id` is recorded per tab
+  and offered back by the spawn wrapper (contract in `scripts/wsl/claude-hook-example.md`).
+  Codex is **not** wired, deliberately: its `notify` payload arrives as the final **argv**
+  argument (not stdin), and the `notify` line winmux writes into `~/.codex/config.toml`
+  discards it, so reaching already-provisioned users would mean rewriting an existing `notify`
+  key — the one thing that step's rule says it must never do. `openai/codex` `main` does carry
+  a resumable `thread-id` in that payload (and `codex resume <uuid>` takes it), but which
+  released version first shipped the field is unverified. Doing this properly means a
+  self-migration path for winmux's own notify line plus a version probe.
 - **`isCommandError`'s variant table is hand-maintained** — the `formatCommandError`
   switch is compile-time exhaustive via `assertNever`, but the type guard above it is a
   literal list, so a new `CommandError` variant falls silently through to the raw-JSON
