@@ -684,6 +684,22 @@ impl Dispatcher {
                 distro,
                 tab,
             } => {
+                // Windows 스토리지(/mnt)는 워크스페이스 루트가 될 수 없다 (사용자
+                // 결정 2026-08-11): 드라이브는 뷰어로 데이터를 가져올 때만 쓰는
+                // 읽기 표면이고, 워크스페이스(셸·에이전트 작업)는 WSL 파일시스템에
+                // 산다. 픽커·Ctrl+Shift+N 이 먼저 거르지만 dev 훅·MCP 경유까지
+                // 막으려면 코어가 최종 관문이어야 한다. 뷰어 경로(NavigateFolder·
+                // 뷰어 탭)는 이 규칙의 대상이 아니다.
+                if let Some(path) = root_path.as_deref() {
+                    if path == "/mnt" || path.starts_with("/mnt/") {
+                        return Err(CommandError::InvalidPath {
+                            message: format!(
+                                "workspace root cannot live under /mnt (Windows drives are \
+                                 data-only): {path}"
+                            ),
+                        });
+                    }
+                }
                 // 원자성: 탭 동반 생성은 준비 단계(terminal = spawn, 뷰어 = 경로
                 // 검증)를 **모든 상태 변이보다 먼저** 수행한다 (CreateTab 과 동일
                 // 한 순서) — 실패 시 워크스페이스·pane·next_id·revision 전부
@@ -2526,6 +2542,33 @@ mod tests {
                 "{cmd:?} 가 상태를 바꿈"
             );
         }
+    }
+
+    #[test]
+    fn create_workspace_rejects_mnt_roots() {
+        // Windows 스토리지는 워크스페이스 루트 금지 — /mnt 정확히·하위 경로 둘 다.
+        // 접두 경계는 지킨다 (/mnta 는 무관한 디렉터리다). 거부는 상태 불변이다.
+        let (mut d, _host) = dispatcher();
+        let before = serde_json::to_string(&d.snapshot()).unwrap();
+        for path in ["/mnt", "/mnt/c", "/mnt/c/Users/dev/code"] {
+            let err = d
+                .dispatch(Command::CreateWorkspace {
+                    name: "w".into(),
+                    root_path: Some(path.into()),
+                    distro: None,
+                    tab: None,
+                })
+                .unwrap_err();
+            assert!(matches!(err, CommandError::InvalidPath { .. }), "{path}");
+        }
+        assert_eq!(serde_json::to_string(&d.snapshot()).unwrap(), before);
+        d.dispatch(Command::CreateWorkspace {
+            name: "w".into(),
+            root_path: Some("/mnta/data".into()),
+            distro: None,
+            tab: None,
+        })
+        .unwrap();
     }
 
     #[test]

@@ -762,9 +762,11 @@ and check these; nothing here needs a fresh `npm install`.
    - **WSL filesystem (UNC)** — pick something under `\\wsl.localhost\<distro>\home\...`:
      the workspace root must come out as the plain Linux path (`/home/...`) and the tab
      must run in **that distro** even when it is not the default one.
-   - **Windows drive** — pick e.g. `C:\Users\<you>\code`: the root must come out as
-     `/mnt/c/Users/<you>/code` and the tab starts there. (This assumes the distro's
-     default automount root; a custom `/etc/wsl.conf` shows up as a `cd` failure.)
+   - **Windows drive is refused** — pick e.g. `C:\Users\<you>\code`: the status line must
+     show a clear error ("Windows drives cannot host a workspace ...") and **no** workspace
+     may appear. Drives are data-only by decision (2026-08-11) — browse them with the folder
+     viewer instead. The core enforces the same rule (`/mnt` roots are rejected even via the
+     dev hook), so nothing can slip through another path.
    - **Rejected paths** — create one from inside WSL (`mkdir '/tmp/badname.'` — note the
      trailing dot), then pick it through the UNC view: the status line must show a loud
      path error and **no** workspace may appear. Trailing dot/space and `\` in names are
@@ -773,9 +775,13 @@ and check these; nothing here needs a fresh `npm install`.
      this with a `:` name: the 9P server shows `:` to Windows as a private-use character,
      so the picked path contains no literal `:` and passes validation — the name would
      fail later, at spawn/cwd time, which is acceptable but is not this item.)
-4. **`Ctrl+Shift+N` opens the same picker** — from anywhere (terminal focused included)
-   it must open the folder dialog, not focus a sidebar field. Holding the keys down or
-   double-pressing must not stack two dialogs. Nothing may leak into the terminal.
+4. **`Ctrl+Shift+N` creates a workspace from the current directory** — `cd` somewhere in a
+   terminal (with the OSC 7 prompt snippet wired the live directory is used; without it, the
+   spawn-time directory), press `Ctrl+Shift+N`: a workspace rooted there appears
+   immediately, named after the folder, same distro — **no dialog**. In a directory under
+   `/mnt` it must refuse with a status-line error instead (drives are data-only). With no
+   workspace open at all it falls back to the folder picker. Nothing may leak into the
+   terminal. The sidebar `+` button still opens the picker for arbitrary folders.
 5. **`F2` renames the active workspace** — press `F2`: the active sidebar card's name
    turns into an inline text box, pre-filled and fully selected. `Enter` commits; `Esc`
    **and** clicking away both cancel and restore the old name. An all-whitespace name is

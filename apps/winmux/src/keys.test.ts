@@ -5,14 +5,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activeTerminalCwd,
   keyAction,
   nextTab,
   nextWorkspace,
   paneInDirection,
+  pathBasename,
   shortcutLabel,
   workspaceAtOrdinal,
 } from "./keys";
 import type { KeySpec, PaneRect } from "./keys";
+import type { Workspace } from "./types";
 
 /** 기본 no-modifier·조합 아님 spec — 테스트마다 필요한 것만 덮어쓴다. */
 function spec(over: Partial<KeySpec> & { key: string }): KeySpec {
@@ -87,7 +90,7 @@ describe("keyAction", () => {
       direction: "horizontal",
     });
     expect(keyAction(spec({ key: "N", ctrl: true, shift: true }))).toEqual({
-      type: "openWorkspacePicker",
+      type: "newWorkspaceHere",
     });
     expect(keyAction(spec({ key: "[", ctrl: true, shift: true }))).toEqual({
       type: "cycleWorkspace",
@@ -126,7 +129,7 @@ describe("keyAction", () => {
   it("Ctrl+Shift+<문자> 매칭은 대소문자를 무시한다 — CapsLock·레이아웃 차이 흡수", () => {
     expect(keyAction(spec({ key: "w", ctrl: true, shift: true }))).toEqual({ type: "closeTab" });
     expect(keyAction(spec({ key: "n", ctrl: true, shift: true }))).toEqual({
-      type: "openWorkspacePicker",
+      type: "newWorkspaceHere",
     });
   });
 
@@ -293,5 +296,51 @@ describe("nextWorkspace", () => {
     expect(nextWorkspace([1], 1, 1)).toBeNull();
     expect(nextWorkspace([1, 2], null, 1)).toBeNull();
     expect(nextWorkspace([1, 2], 99, -1)).toBeNull();
+  });
+});
+
+describe("activeTerminalCwd / pathBasename", () => {
+  // Ctrl+Shift+N 의 경로 해석 재료 — 활성 pane 의 표시 탭 cwd 우선, 없으면 rootPath.
+  function ws(cwd: string | null, rootPath: string | null): Workspace {
+    return {
+      id: 1,
+      name: "w",
+      rootPath,
+      distro: null,
+      gitBranch: null,
+      gitDirty: null,
+      layout: { type: "leaf", pane: 1 },
+      panes: {
+        "1": {
+          id: 1,
+          tabs: [
+            {
+              id: 10,
+              title: "t",
+              kind: { type: "terminal", ptySession: 5, status: { type: "running" }, cwd },
+              notification: "none",
+              lastActivityMs: null,
+            },
+          ],
+          activeTab: 10,
+        },
+      },
+      activePane: 1,
+      agentStatus: "idle",
+      lastAgentMessage: null,
+      agentStatusSource: undefined,
+    };
+  }
+
+  it("활성 터미널 탭의 cwd 를 우선하고, 없으면 rootPath 로 내려간다", () => {
+    expect(activeTerminalCwd(ws("/home/dev/proj", "/home/dev"))).toBe("/home/dev/proj");
+    expect(activeTerminalCwd(ws(null, "/home/dev"))).toBe("/home/dev");
+    expect(activeTerminalCwd(ws(null, null))).toBeNull();
+  });
+
+  it("pathBasename 은 마지막 세그먼트를, 루트는 그대로 돌려준다", () => {
+    expect(pathBasename("/home/dev/proj")).toBe("proj");
+    expect(pathBasename("/home/dev/proj/")).toBe("proj");
+    expect(pathBasename("/")).toBe("/");
   });
 });

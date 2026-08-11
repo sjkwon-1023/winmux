@@ -102,7 +102,7 @@ export class Sidebar {
     newBtn.className = "sidebar-new";
     newBtn.textContent = "+ New workspace";
     // 단축키 표기는 keys.ts 의 shortcutLabel 단일 소스에서 받는다 (표류 방지).
-    newBtn.title = `New workspace — pick a folder (${shortcutLabel("newWorkspace")})`;
+    newBtn.title = `New workspace — pick a folder (${shortcutLabel("newWorkspace")} creates one from the current directory)`;
     newBtn.addEventListener("click", () => this.onNewWorkspace());
 
     footer.append(newBtn);

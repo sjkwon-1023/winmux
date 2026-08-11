@@ -12,10 +12,12 @@ import { ActivityPing } from "./activity-ping";
 import { dispatch, getState, pickWorkspaceFolder, resetUi, userActivity } from "./backend";
 import { formatCommandError } from "./command-error";
 import {
+  activeTerminalCwd,
   keyAction,
   nextTab,
   nextWorkspace,
   paneInDirection,
+  pathBasename,
   workspaceAtOrdinal,
 } from "./keys";
 import type { KeyAction } from "./keys";
@@ -187,11 +189,12 @@ class App {
    *  focusPane/activateTab 은 cmd 대상 보상, createTab/splitPane 은 새 탭 보상,
    *  closeTab 은 닫은 뒤 남는 activePane 보상. */
   private runNavAction(action: KeyAction): void {
-    // 사이드바 UI 액션 2종은 dispatch 도 스냅샷도 필요 없다 (각자 자기 가드를
-    // 가진다) — 워크스페이스가 하나도 없을 때가 새 워크스페이스 키를 가장
-    // 필요로 하는 순간이라 스냅샷 가드보다 앞에 둔다.
-    if (action.type === "openWorkspacePicker") {
-      void this.openWorkspacePicker();
+    // 새 워크스페이스 키는 스냅샷 가드보다 앞에 둔다 — 워크스페이스가 하나도
+    // 없을 때가 이 키를 가장 필요로 하는 순간이라, 그 경우엔 현재 경로가 없어
+    // 픽커로 폴백한다 (사용자 결정 2026-08-11: 평시엔 대화상자 없이 활성
+    // 터미널의 현재 경로로 즉시 생성).
+    if (action.type === "newWorkspaceHere") {
+      this.createWorkspaceHere();
       return;
     }
     if (action.type === "renameWorkspace") {
@@ -276,6 +279,41 @@ class App {
    *  취소는 조용한 no-op(null 반환)이고, 대화상자 실패·경로 변환 실패는 상태 라인
    *  one-shot 에러다. dispatch 실패는 dispatchUI 가 이미 표면화하므로 여기서 다시
    *  다루지 않는다. */
+  /** `Ctrl+Shift+N` — 활성 터미널의 현재 경로로 새 워크스페이스 즉시 생성.
+   *  경로는 activeTerminalCwd(탭 cwd → 워크스페이스 rootPath) 로 해석하고,
+   *  distro 는 지금 있는 워크스페이스 것을 상속한다 (같은 배포판에서 이어서
+   *  일한다는 뜻이므로). 워크스페이스가 아직 없으면 픽커로 폴백 — 그때는
+   *  "현재 경로" 자체가 없다. */
+  private createWorkspaceHere(): void {
+    const snapshot = this.store.snapshot;
+    const ws = snapshot === null ? null : activeWorkspace(snapshot);
+    if (ws === null) {
+      void this.openWorkspacePicker();
+      return;
+    }
+    const cwd = activeTerminalCwd(ws);
+    if (cwd === null) {
+      this.showError("cannot create a workspace here: current directory unknown");
+      return;
+    }
+    // Windows 스토리지(/mnt)는 워크스페이스 루트가 될 수 없다 (사용자 결정
+    // 2026-08-11 — 드라이브는 데이터를 가져올 때 뷰어로만 쓴다). 코어도 같은
+    // 규칙으로 거부하지만, 여기서 먼저 잡아야 문구가 상황에 맞는다.
+    if (cwd === "/mnt" || cwd.startsWith("/mnt/")) {
+      this.showError(
+        "cannot create a workspace under /mnt: Windows drives are data-only — cd into the WSL filesystem first",
+      );
+      return;
+    }
+    void this.dispatchUI({
+      type: "createWorkspace",
+      name: pathBasename(cwd),
+      rootPath: cwd,
+      distro: ws.distro,
+      tab: { type: "terminal", cwd: null },
+    });
+  }
+
   private async openWorkspacePicker(): Promise<void> {
     if (this.picking) return;
     this.picking = true;

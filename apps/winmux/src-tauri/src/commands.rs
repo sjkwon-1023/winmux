@@ -300,6 +300,16 @@ pub async fn pick_workspace_folder() -> Result<Option<PickedFolder>, String> {
         .to_str()
         .ok_or_else(|| format!("selected path is not valid UTF-8: {}", picked.display()))?;
     let (distro, linux_path) = wslpath::from_windows_path(path)?;
+    // Windows 드라이브 픽(UNC 가 아닌 경로 → distro None → /mnt/<d>/...)은 워크
+    // 스페이스 루트가 될 수 없다 (사용자 결정 2026-08-11 — 코어 CreateWorkspace
+    // 도 /mnt 를 거부하지만, 여기서 잡아야 문구가 픽커 상황에 맞는다). 드라이브
+    // 데이터는 뷰어(폴더 브라우저)로 접근한다.
+    if distro.is_none() {
+        return Err(format!(
+            "Windows drives cannot host a workspace (data-only; browse them with the folder \
+             viewer instead) — pick a folder under \\\\wsl.localhost\\<distro>\\...: {path}"
+        ));
+    }
     Ok(Some(PickedFolder {
         name: folder_name(&linux_path, distro.as_deref()),
         linux_path,
@@ -317,21 +327,15 @@ pub async fn pick_workspace_folder() -> Result<Option<PickedFolder>, String> {
 }
 
 /// 리눅스 경로의 마지막 세그먼트 (빈 세그먼트는 건너뛴다) — 코어의 탭 제목
-/// 규칙(`command.rs::path_title`)과 같은 계산이되, 루트 픽의 퇴화만 보정한다
-/// (리뷰 finding): distro 루트("/")는 `"/"` 대신 distro 이름이, 드라이브 루트
-/// (`/mnt/c`)는 `"c"` 대신 `"C:"` 가 워크스페이스 이름으로 자연스럽다.
+/// 규칙(`command.rs::path_title`)과 같은 계산이되, distro 루트("/") 픽의 퇴화만
+/// 보정한다 (리뷰 finding): `"/"` 대신 distro 이름이 워크스페이스 이름으로
+/// 자연스럽다. (드라이브 루트 보정은 드라이브 픽 자체가 거부되면서 제거됐다.)
 #[cfg(windows)]
 fn folder_name(linux_path: &str, distro: Option<&str>) -> String {
     if linux_path == "/" {
         if let Some(d) = distro {
             return d.to_owned();
         }
-    }
-    if let Some(drive) = linux_path
-        .strip_prefix("/mnt/")
-        .filter(|rest| rest.len() == 1 && rest.chars().all(|c| c.is_ascii_alphabetic()))
-    {
-        return format!("{}:", drive.to_ascii_uppercase());
     }
     linux_path
         .rsplit('/')
