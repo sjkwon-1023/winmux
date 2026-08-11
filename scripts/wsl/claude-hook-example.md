@@ -196,13 +196,15 @@ ESC ] 777 ; winmux-query ; <kind> ; <base64 reply path> BEL
 | `<kind>` | The question. `list-tabs` is the only one the app answers; any other value is ignored (so a newer CLI against an older app simply gets no reply, and vice versa). |
 | `<base64 reply path>` | Standard base64 of an absolute Linux path that **must start with `/tmp/`**. Both fields are required — `777;winmux-query;list-tabs` with no path is not a query at all, since there is nowhere to answer. |
 
-**`/tmp/` is enforced, and that is the whole security story of this channel.** The reply is a
-file *write performed by the winmux app*. The content is only metadata the app already owns,
-but leaving the path free would make this channel a way for anything that can write to a PTY
-to overwrite `~/.bashrc` or `~/.claude/settings.json`. Confining it to `/tmp/` closes that
-surface. Path validation (`crate::send::decode_reply_path`) rejects `..`, backslashes and NUL
-*before* the prefix check, so `/tmp/../home/u/.bashrc` does not get through either. Like the
-send channel's guards this is a misfire guard, not a privilege boundary.
+**`/tmp/` is enforced at the string level — a misfire guard, not a privilege boundary.** The
+reply is a file *write performed by the winmux app*. The content is only metadata the app
+already owns, but leaving the path free would make this channel a way for anything that can
+write to a PTY to overwrite `~/.bashrc` or `~/.claude/settings.json`. Path validation
+(`crate::send::decode_reply_path`) rejects `..`, backslashes and NUL *before* the prefix
+check, so `/tmp/../home/u/.bashrc` does not get through. What it does **not** block is a
+pre-planted symlink (`/tmp/x → $HOME`): the write follows it server-side. Like the send
+channel, this channel assumes cooperating processes on your own machine; a
+canonicalize-at-write recheck is a recorded backlog item pending real-hardware 9P semantics.
 
 The reply for `list-tabs`:
 

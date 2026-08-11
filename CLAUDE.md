@@ -33,6 +33,11 @@ buttons, redrawn icons) — its checklist is WINDOWS-BUILD §10's last subsectio
 
 Accepted deferrals, one line each. None of these block the MVP.
 
+- **Query-reply `/tmp` confinement is string-level only** — a pre-planted symlink
+  (`/tmp/x → $HOME`) routes the reply write outside; blocking it needs a
+  canonicalize-at-write recheck whose 9P semantics are unverified on real hardware
+  (review finding 2026-08-11; docs state the honest contract).
+
 - **Agent-facing pane-send channel** — **landed 2026-08-11 as a shell CLI**, not MCP (user
   decision: MCP is heavy, and it is a v2 browser-surface question instead). `winmux send`
   addresses a target by stable tab id (`'#181'`) as well as by title, and `winmux ls`
