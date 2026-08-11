@@ -66,6 +66,14 @@ impl OscEventPayload {
                 title: kind.clone(),
                 body: String::new(),
             },
+            // 색상 질의(OSC 10/11 `?`)에 대한 응답도 MVP 앱의 기능이다 — frozen
+            // 하네스는 답하지 않고 관측만 한다 (10 = 전경, 11 = 배경).
+            OscEvent::OscColorQuery { code } => Self {
+                id,
+                kind: "color-query",
+                title: code.to_string(),
+                body: String::new(),
+            },
         }
     }
 }

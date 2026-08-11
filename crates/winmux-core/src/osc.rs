@@ -45,6 +45,33 @@ pub enum OscEvent {
     /// (`777;winmux-query;list-tabs` 는 형식 불일치로 떨어진다 — 회신 주소 없는
     /// 질의를 조용히 성공시키지 않는다).
     Osc777Query { kind: String, reply_b64: String },
+    /// OSC 10/11 — 전경/배경색 **질의**(`ESC ] 10 ; ? ST`). `code` 는 10 = 전경,
+    /// 11 = 배경이다. 앱(글루)이 우리 테마 값으로 **직접 응답**한다
+    /// (`apps/winmux/src-tauri/src/sink.rs`).
+    ///
+    /// # 왜 우리가 답하나 (판단 반전의 근거)
+    ///
+    /// 종전 판단은 "응답기는 역효과"였다 — conhost 가 질의를 가로채 자기 색
+    /// 테이블로 먼저 답하므로(ms/terminal#17729) 우리가 또 답하면 중복 응답이
+    /// 되고, 그래서 `host.rs` 의 THEME_SYNC 로 conhost 의 테이블을 **미리 우리
+    /// 값으로 세팅**하는 쪽만 택했다. **2026-08-11 실기 probe 가 그 전제를
+    /// 뒤집었다: OSC 11 질의에 아무도 응답하지 않는다** (conhost 도, xterm 도).
+    /// Codex 는 배경색을 못 받으면 입력창 배경을 아예 그리지 않으므로, 그 미응답이
+    /// 실기 스크린샷의 "입력칸 구분 없음"으로 남는다.
+    ///
+    /// 그래서 계약을 뒤집었다: **질의가 conhost 를 통과해 우리 출력 스트림까지
+    /// 도달하면** 그때 우리가 답한다. 도달하지 않으면(= conhost 가 삼키면) 이
+    /// 이벤트 자체가 발생하지 않아 아무 일도 일어나지 않는다 — 무해한 조건부
+    /// 응답이다. 어느 쪽이었는지는 글루의 진단 로그로 판별한다 (sink.rs).
+    ///
+    /// # set 형태는 감지하지 않는다
+    ///
+    /// `rest` 가 정확히 `"?"` 일 때만 이벤트다. 색값을 싣는 set 형태
+    /// (`10;#cccccc`)는 종전대로 미감지 — 그대로 xterm 까지 passthrough 된다.
+    /// `host.rs` 의 THEME_SYNC 가 내보내는 set 이 이 경로로 흘러들어도 값이
+    /// TERMINAL_THEME 와 **같으므로** xterm 이 자기 테마를 같은 값으로 다시
+    /// 세팅할 뿐 무해하다.
+    OscColorQuery { code: u8 },
 }
 
 /// payload 상한 (bytes). 초과하는 시퀀스는 통째로 폐기한다 — 악성/폭주 입력 방어.
@@ -206,6 +233,10 @@ fn parse_payload(payload: &[u8]) -> Option<OscEvent> {
         "0" | "2" => Some(OscEvent::Osc0Title(rest.to_string())),
         "7" => Some(OscEvent::Osc7Cwd(rest.to_string())),
         "9" => Some(OscEvent::Osc9Notify(rest.to_string())),
+        // 색상 **질의**만 이벤트다 (`10;?`·`11;?`) — 근거는 OscColorQuery rustdoc.
+        // set 형태(`10;#cccccc`)는 여기서 걸러져 종전대로 passthrough 된다.
+        "10" if rest == "?" => Some(OscEvent::OscColorQuery { code: 10 }),
+        "11" if rest == "?" => Some(OscEvent::OscColorQuery { code: 11 }),
         "777" => {
             // urxvt 계열: `777;notify;title;body`. body 안의 `;` 는 body 에 포함.
             // `winmux-send` 는 winmux 자체 확장(pane 간 전송)이고, 그 외 kind 는
@@ -457,6 +488,50 @@ mod tests {
         assert_eq!(scan(b"\x1b]777;send;t;aGk=\x07"), vec![]);
         assert_eq!(scan(b"\x1b]777;winmux-queryx;t;aGk=\x07"), vec![]);
         assert_eq!(scan(b"\x1b]777;query;t;aGk=\x07"), vec![]);
+    }
+
+    #[test]
+    fn osc10_and_osc11_queries_detected() {
+        // 전경(10)·배경(11) 질의 — BEL·ST 종결 양쪽.
+        assert_eq!(
+            scan(b"\x1b]10;?\x07"),
+            vec![OscEvent::OscColorQuery { code: 10 }]
+        );
+        assert_eq!(
+            scan(b"\x1b]11;?\x1b\\"),
+            vec![OscEvent::OscColorQuery { code: 11 }]
+        );
+    }
+
+    #[test]
+    fn osc_color_query_split_across_feeds() {
+        // 청크 경계에서 나뉘어도 같은 계약 (다른 OSC 와 같은 스캐너 경로).
+        let mut s = OscScanner::new();
+        assert_eq!(s.feed(b"\x1b]11"), vec![]);
+        assert_eq!(
+            s.feed(b";?\x07"),
+            vec![OscEvent::OscColorQuery { code: 11 }]
+        );
+    }
+
+    #[test]
+    fn osc_color_set_not_detected() {
+        // set 형태는 감지 대상이 아니다 — 그대로 xterm 까지 passthrough 된다
+        // (host.rs THEME_SYNC 가 내보내는 값도 이 경로다).
+        assert_eq!(scan(b"\x1b]10;#cccccc\x1b\\"), vec![]);
+        assert_eq!(scan(b"\x1b]11;#1e1e1e\x1b\\"), vec![]);
+        assert_eq!(scan(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07"), vec![]);
+        // `?` 가 섞여 있어도 payload 전체가 정확히 "?" 여야 질의다.
+        assert_eq!(scan(b"\x1b]11;??\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]11;?;10;?\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]11\x07"), vec![]);
+    }
+
+    #[test]
+    fn osc12_query_not_detected() {
+        // 커서 색(12) 등 다른 색 슬롯은 응답 대상이 아니다 — 답할 값이 없다.
+        assert_eq!(scan(b"\x1b]12;?\x07"), vec![]);
+        assert_eq!(scan(b"\x1b]4;1;?\x07"), vec![]);
     }
 
     #[test]

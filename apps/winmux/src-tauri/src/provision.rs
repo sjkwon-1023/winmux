@@ -203,7 +203,7 @@ fn run(_distro: Option<&str>) -> Result<(), String> {
 ///
 /// 스크립트 자체는 사용자 머신에 남는 산출물이라 주석·출력이 전부 영어다
 /// (레포 컨벤션: 사용자 대면 문자열은 영어).
-const SETUP_SCRIPT: &str = r##"
+const SETUP_SCRIPT: &str = r###"
 # winmux provisioning — streamed into `wsl.exe [-d <distro>] -- bash -s` by the app on
 # first launch, once per distro. It installs the agent notification script and the winmux
 # CLI, wires the Claude Code hooks described in scripts/wsl/claude-hook-example.md, and
@@ -355,7 +355,7 @@ QUERY_TICKS=40
 usage() {
   cat <<'WINMUX_USAGE_EOF'
 usage:
-  winmux ls                            list tabs: TAB, TITLE, WORKSPACE, STATUS, COMMAND
+  winmux ls                            list tabs in this workspace: TAB, TITLE, WORKSPACE, STATUS, COMMAND
   winmux send [-l] <target> <text...>  type text into another pane (-l: pre-fill, no newline)
   winmux id                            print this tab's id ($WINMUX_TAB)
 
@@ -1031,6 +1031,61 @@ else
   exit 1
 fi
 
+# --- 6b. Codex global guidance (~/.codex/AGENTS.md) -------------------------------------
+# Codex does not read Claude's skills, so its equivalent discovery surface is the global
+# AGENTS.md. Managed-block discipline, same as the notify entry: we own only the text
+# between our markers (replace it on upgrades), never touch anything else in the file,
+# and deleting the block opts out until the next version bump. Skipped when ~/.codex is
+# absent (Codex not installed here). No python needed — awk handles the block splice.
+AGENTS_FILE="$HOME/.codex/AGENTS.md"
+BLOCK_BEGIN="<!-- >>> winmux integration (managed by winmux setup; delete this block to opt out) >>> -->"
+BLOCK_END="<!-- <<< winmux integration <<< -->"
+if [ ! -d "$HOME/.codex" ]; then
+  log "codex agents: no ~/.codex; skipped (Codex not installed here)"
+else
+  agents_block() {
+    printf '%s\n' \
+      "$BLOCK_BEGIN" \
+      "## winmux terminal integration" \
+      "" \
+      "You may be running inside winmux (the WINMUX env var is set; WINMUX_TAB is your" \
+      "tab id). winmux ships a CLI on PATH:" \
+      "" \
+      '- `winmux ls` — list this workspace'"'"'s tabs (id, title, status, command)' \
+      '- `winmux send '"'"'#<id>'"'"' '"'"'<text>'"'"'` — type text into another pane (trailing newline runs it)' \
+      '- `winmux id` — print this tab'"'"'s id' \
+      "" \
+      "Run winmux commands **outside the sandbox** (request escalated permissions):" \
+      "they write escape sequences to the real terminal device and exchange reply files" \
+      "under the shared /tmp, both of which a sandbox blocks — sandboxed runs fail" \
+      "silently. Sends are confined to your own workspace." \
+      "$BLOCK_END"
+  }
+  tmp_agents="$AGENTS_FILE.winmux-tmp"
+  if [ -f "$AGENTS_FILE" ] && grep -qF "$BLOCK_BEGIN" "$AGENTS_FILE"; then
+    # 기존 블록 교체 — 마커 사이만 우리 소유다.
+    if awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" '
+        $0 == begin { skip = 1; next }
+        $0 == end { skip = 0; next }
+        !skip { print }
+      ' "$AGENTS_FILE" > "$tmp_agents" \
+      && { cat "$tmp_agents"; agents_block; } > "$AGENTS_FILE.winmux-new" \
+      && mv "$AGENTS_FILE.winmux-new" "$AGENTS_FILE"; then
+      rm -f "$tmp_agents"
+      log "codex agents: managed block refreshed in $AGENTS_FILE"
+    else
+      rm -f "$tmp_agents" "$AGENTS_FILE.winmux-new"
+      echo "[winmux] setup: cannot refresh the winmux block in $AGENTS_FILE" >&2
+      exit 1
+    fi
+  else
+    { [ -f "$AGENTS_FILE" ] && cat "$AGENTS_FILE"; [ -s "$AGENTS_FILE" ] && echo; agents_block; } > "$tmp_agents" \
+      && mv "$tmp_agents" "$AGENTS_FILE" \
+      || { rm -f "$tmp_agents"; echo "[winmux] setup: cannot write $AGENTS_FILE" >&2; exit 1; }
+    log "codex agents: managed block added to $AGENTS_FILE"
+  fi
+fi
+
 # --- 7. marker --------------------------------------------------------------------------
 if ! : > "$MARKER"; then
   echo "[winmux] setup: cannot create the marker $MARKER" >&2
@@ -1038,4 +1093,4 @@ if ! : > "$MARKER"; then
 fi
 log "setup v@SETUP_VERSION@ complete"
 exit 0
-"##;
+"###;

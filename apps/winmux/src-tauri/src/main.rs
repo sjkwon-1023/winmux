@@ -233,6 +233,8 @@ fn main() {
             commands::get_stats,
             commands::user_activity,
             commands::reset_ui,
+            // settings.json 의 UI 설정 (터미널 폰트) — 부팅당 1회, 설정 UI 는 없다.
+            commands::get_ui_settings,
             // 워크스페이스 폴더 선택 (Windows 네이티브 대화상자).
             commands::pick_workspace_folder,
             // 뷰어 파일 접근 (21단계) — 읽기 전용 콘텐츠 플레인.

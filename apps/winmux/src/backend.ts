@@ -94,6 +94,26 @@ export function resetUi(): Promise<void> {
   return invoke<void>("reset_ui");
 }
 
+// --- UI 설정 (settings.json) --------------------------------------------------
+
+/** 백엔드 `UiSettings` 의 프론트 미러 — 필드명은 camelCase 계약(Rust 쪽
+ *  `serde(rename_all = "camelCase")`)이고, 사용자가 손으로 쓰는 settings.json 의
+ *  키와 같은 이름이다. **null = 미설정**이라 그 항목은 기본값을 그대로 쓴다. */
+export interface UiSettings {
+  /** xterm fontFamily — CSS font-family 문자열. */
+  fontFamily: string | null;
+  /** xterm fontSize (px). 백엔드가 6~72 범위를 강제한다 (밖이면 reject). */
+  fontSize: number | null;
+}
+
+/** 앱 설정 디렉터리의 settings.json 을 읽는다. **파일이 없으면 전부 null 인
+ *  기본값**이고(에러 아님), 파싱 실패·범위 밖 폰트 크기는 사유 문자열로 reject
+ *  된다 — 호출자는 그 사유를 표면화하고 기본값으로 진행한다 (가라 기본값으로
+ *  가리지 않는다). */
+export function getUiSettings(): Promise<UiSettings> {
+  return invoke<UiSettings>("get_ui_settings");
+}
+
 // --- 뷰어 파일 접근 (21단계) --------------------------------------------------
 // folderBrowser·textViewer 가 쓰는 읽기 전용 커맨드 3종. 백엔드가 Windows 에서
 // \\wsl.localhost UNC 로 접근하므로 프론트는 항상 **리눅스 경로**를 넘긴다.

@@ -9,7 +9,14 @@
 // 조작 표면 (주의: dispatchUI 를 우회하므로 focus 보상·에러 표면화가 없다).
 
 import { ActivityPing } from "./activity-ping";
-import { dispatch, getState, pickWorkspaceFolder, resetUi, userActivity } from "./backend";
+import {
+  dispatch,
+  getState,
+  getUiSettings,
+  pickWorkspaceFolder,
+  resetUi,
+  userActivity,
+} from "./backend";
 import { Chime, detectNeedsInputOnset, installChimeUnlock } from "./chime";
 import { formatCommandError } from "./command-error";
 import {
@@ -26,6 +33,7 @@ import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
+import { applyTerminalSettings } from "./terminal-view";
 import { initWindowVisibility } from "./window-visibility";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { AgentStatus, Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
@@ -118,7 +126,9 @@ class App {
   private readonly sidebar = new Sidebar(
     requireElement("sidebar"),
     (cmd) => this.dispatchUI(cmd),
-    () => void this.openWorkspacePicker(),
+    // 버튼도 단축키와 같은 동작 (사용자 버그 리포트 2026-08-11: 버튼만 픽커를
+    // 여는 비일관 제거) — 픽커는 createWorkspaceHere 의 무워크스페이스 폴백뿐이다.
+    () => this.createWorkspaceHere(),
   );
   /** needsInput 알림음 (chime.ts) — AudioContext 는 첫 제스처 unlock 까지 lazy 다. */
   private readonly chime = new Chime();
@@ -158,6 +168,18 @@ class App {
       console.error("window visibility listen failed", err);
     });
     this.installNavKeys();
+    // 터미널 폰트 설정 — **store.init() 앞**이어야 한다. 터미널 뷰는 첫 스냅샷
+    // 렌더부터 생기므로 그 전에 모듈 기본값을 갈아 끼워야 모든 탭이 같은 폰트로
+    // 열린다 (applyTerminalSettings 의 순서 계약). 읽기 실패(파싱 오류·범위 밖
+    // 값)는 사유를 상태 라인에 띄우고 **기본 폰트로 진행한다** — 폰트 설정 하나로
+    // 부트를 막지 않는다 (활동 핑·창 가시성과 같은 규율). 파일이 없는 경우는
+    // 에러가 아니라 전부 null 인 기본값으로 온다.
+    try {
+      applyTerminalSettings(await getUiSettings());
+    } catch (err) {
+      console.error("get_ui_settings failed", err);
+      this.showError(formatCommandError(err));
+    }
     this.store.subscribe((snapshot) => this.render(snapshot));
     await this.store.init();
   }

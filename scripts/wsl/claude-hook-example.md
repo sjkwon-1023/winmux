@@ -40,6 +40,8 @@ Once per distro it:
 - adds a `notify` key to `~/.codex/config.toml` **only if** that file exists and has no
   `notify` of its own (Codex runs it once per completed turn, which maps to `winmux:idle`);
   a missing file means Codex is not installed there and nothing is created,
+  and when `~/.codex/` exists, a managed `winmux integration` block in `~/.codex/AGENTS.md`
+  teaches Codex the CLI and to run it outside the sandbox (delete the block to opt out),
 - records what it did in `~/.winmux/setup.log`, then writes the marker.
 
 The hook merge treats each of the three events on its own, and never touches a hook that is

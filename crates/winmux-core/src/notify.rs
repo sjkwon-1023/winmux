@@ -97,6 +97,10 @@ impl OscBatch {
             // 여기까지 온다면 배치에 슬롯조차 만들지 않는다: 코얼레싱은 상태
             // 델타 전용이고, 빈 델타를 만들면 flush 가 헛돌기 때문이다.
             OscEvent::Osc777Send { .. } | OscEvent::Osc777Query { .. } => {}
+            // 색상 질의도 상태가 아니라 **액션**이다 — 글루가 그 세션의 stdin 에
+            // 즉시 응답을 쓴다 (sink.rs). 여기 슬롯은 만들지 않는다: 질의는 TUI
+            // 앱이 그릴 때마다 반복해서 오므로 배치에 담으면 flush 가 헛돈다.
+            OscEvent::OscColorQuery { .. } => {}
         }
     }
 

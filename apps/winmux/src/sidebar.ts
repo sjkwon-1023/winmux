@@ -18,7 +18,7 @@
 // - × = CloseWorkspace. 실행 중인 터미널 세션이 1개라도 있으면 confirm() 을
 //   거친다 — 그 세션들을 죽이는 파괴적 동작이다. 판정은 렌더 캐시가 아니라 클릭
 //   시점의 최신 스냅샷으로 한다 (카드 DOM 이 스킵으로 오래됐을 수 있다).
-// - "+ New workspace" = 폴더 선택 대화상자 (onNewWorkspace 콜백 — 실제 대화상자
+// - "+ New workspace" = 현재 터미널 경로로 즉시 생성 (onNewWorkspace 콜백 — 해석·dispatch
 //   호출과 CreateWorkspace dispatch 는 main.ts 글루가 한다. 같은 흐름이
 //   Ctrl+Shift+N 으로도 들어오므로 구현을 한곳에 둔다). 이름·경로·배포판을 손으로
 //   치던 인라인 폼은 없앴다 — 경로는 대화상자가, 이름은 폴더명이 정한다.
@@ -102,7 +102,7 @@ export class Sidebar {
     newBtn.className = "sidebar-new";
     newBtn.textContent = "+ New workspace";
     // 단축키 표기는 keys.ts 의 shortcutLabel 단일 소스에서 받는다 (표류 방지).
-    newBtn.title = `New workspace — pick a folder (${shortcutLabel("newWorkspace")} creates one from the current directory)`;
+    newBtn.title = `New workspace from the current directory (${shortcutLabel("newWorkspace")})`;
     newBtn.addEventListener("click", () => this.onNewWorkspace());
 
     footer.append(newBtn);

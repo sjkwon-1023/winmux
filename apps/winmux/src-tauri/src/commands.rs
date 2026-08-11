@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use winmux_core::command::{Command, CommandError, CommandOutput};
 use winmux_core::session::{PtySession, SessionId};
 use winmux_core::wslpath;
@@ -248,6 +248,80 @@ pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
         Some(visible) => state.reset.visibility(visible),
         None => state.reset.user_input("ping"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// UI 설정 (`settings.json`)
+//
+// 설정 **UI 는 없다** — 사용자가 앱 설정 디렉터리의 `settings.json` 을 직접 쓰고
+// 앱을 재시작한다 (v0.3.1 범위). 그래서 이 커맨드는 부팅 때 한 번 불린다.
+// ---------------------------------------------------------------------------
+
+/// 설정 파일에서 오는 프론트 UI 설정 — 현재는 터미널 폰트뿐이다.
+///
+/// 필드는 전부 `Option` 이고 **None = 미설정**(프론트의 기존 하드코딩 기본값을
+/// 그대로 쓴다)이다. serde 는 camelCase 로 읽고 쓴다 — 사용자가 손으로 쓰는
+/// 파일의 키(`fontFamily`/`fontSize`)와 프론트 미러 타입(`backend.ts` 의
+/// `UiSettings`)이 같은 이름이어야 하기 때문이다.
+///
+/// `deny_unknown_fields` 는 **일부러 걸지 않는다** — 뒤 버전이 넣을 키가 든
+/// 파일을 옛 빌드가 통째로 거부하면 폰트까지 같이 죽는다 (전방 호환).
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSettings {
+    /// xterm `fontFamily` — CSS font-family 문자열 그대로.
+    pub font_family: Option<String>,
+    /// xterm `fontSize` (px). [`FONT_SIZE_RANGE`] 밖이면 에러다.
+    pub font_size: Option<u16>,
+}
+
+/// 허용 폰트 크기(px). 밖의 값은 조용히 조정하지 않고 **거부**한다 — 0 이나 5000
+/// 이 들어간 파일을 말없이 고쳐 쓰면 사용자는 자기가 쓴 값이 먹은 줄 안다.
+const FONT_SIZE_RANGE: std::ops::RangeInclusive<u16> = 6..=72;
+
+/// 앱 설정 디렉터리(`%AppData%\app.winmux.desktop`)의 `settings.json` 을 읽는다.
+///
+/// - 파일 없음 → `Ok(기본값)`. 설정을 쓴 적 없는 것이 정상 상태다.
+/// - 파싱 실패·범위 밖 값 → `Err(사유)`. **가라 기본값으로 가리지 않는다** —
+///   프론트가 상태 라인에 사유를 띄우고 기본 폰트로 진행하므로, 사용자는 자기
+///   파일이 안 먹었다는 사실과 이유를 함께 본다.
+///
+/// sync 커맨드인 이유: 앱 설정 디렉터리는 Windows 로컬 디스크라(뷰어의 9P 경로와
+/// 다르다) 작은 파일 읽기 한 번이고, 호출도 부팅당 1회다.
+#[tauri::command]
+pub fn get_ui_settings(app: AppHandle) -> Result<UiSettings, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("cannot resolve the app config dir: {err}"))?;
+    let path = dir.join("settings.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UiSettings::default());
+        }
+        Err(err) => return Err(format!("cannot read {}: {err}", path.display())),
+    };
+    let settings: UiSettings = serde_json::from_str(&text)
+        .map_err(|err| format!("cannot parse {}: {err}", path.display()))?;
+    if let Some(size) = settings.font_size {
+        if !FONT_SIZE_RANGE.contains(&size) {
+            return Err(format!(
+                "fontSize {size} in {} is out of range ({}-{})",
+                path.display(),
+                FONT_SIZE_RANGE.start(),
+                FONT_SIZE_RANGE.end()
+            ));
+        }
+    }
+    // fontSize 와 같은 loud-fail 대칭 (리뷰 finding): 공백뿐인 fontFamily 를 조용히
+    // 넘기면 xterm 등폭 렌더가 깨진 채 원인이 숨는다.
+    if let Some(family) = &settings.font_family {
+        if family.trim().is_empty() {
+            return Err(format!("fontFamily in {} must not be blank", path.display()));
+        }
+    }
+    Ok(settings)
 }
 
 /// 수동 WebView 리셋 — **dev 훅(`window.__winmux.resetUi`)·향후 MCP 전용이며 UI

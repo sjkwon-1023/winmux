@@ -1007,6 +1007,71 @@ every failure of these channels is logged there and **nowhere else**.
    route, and that the agent finds the rewritten skill by name and uses `winmux ls` →
    `winmux send '#<id>'` on its own when asked to hand work to another pane.
 
+### v0.3.1 — verification
+
+Five items: the OSC 10/11 colour-query responder, the workspace confinement of the agent
+channel, terminal font settings, the new-workspace button unification, and the Codex
+AGENTS.md guidance. Run the app from a console (`npm run tauri dev`) — item 1 is decided by
+a line on the app's **stderr**, and nothing else reports it.
+
+1. **Codex's input box** — open a **new** tab (an existing tab predates this build) and start
+   `codex`. The input prompt must be drawn as a filled pill that separates from the terminal
+   background, not as bare text on the background.
+
+   Whatever the screen shows, look at the app's stderr:
+   - `[winmux] color query 11 answered (session=<n>)` present → the query reached us and we
+     answered with the theme background (`#1e1e1e`). If the pill is *still* invisible after
+     that, the remaining suspect is Codex's own colour choice, not the query path. Note that
+     in this world xterm.js may answer the same query too (identical value, second reply is
+     an unsolicited byte burst) — re-run the earlier probe one-liner and count how many
+     `rgb:` replies come back if Codex misbehaves.
+   - **no such line at all** → the query never left conhost: it intercepted the sequence and
+     did not pass it through, so no responder inside the app can ever see it. **That closes
+     this item as an out-of-app (conhost) problem** — do not add more app-side responders.
+     The `THEME_SYNC` set on spawn (`host.rs`) stays as the only lever we have there.
+
+   The responder's reply values live in `sink.rs` (`COLOR_REPLY_FOREGROUND` /
+   `COLOR_REPLY_BACKGROUND`) and are one leg of a three-way contract with `host.rs`'s
+   `THEME_SYNC` and `terminal-view.ts`'s `TERMINAL_THEME` — if you retheme, all three move
+   together.
+
+2. **Workspace isolation of the agent channel** — with tabs open in **two** workspaces, run
+   `winmux ls` from a tab in each:
+   - each listing shows only the tabs of the workspace it was run in, and the two tables are
+     disjoint,
+   - take a tab id from the *other* workspace's listing and `winmux send '#<id>' 'echo x'`:
+     nothing arrives there, silently (a globally unique id is still not a key past the
+     workspace boundary).
+
+   This repeats section 10's "Query channel" items 2 and 4 deliberately — it is the regression
+   check that the confinement survived this batch.
+
+3. **Terminal font from `settings.json`** — the file is written by hand; there is no settings
+   UI. Create `%AppData%\app.winmux.desktop\settings.json`:
+   ```json
+   {"fontFamily": "Cascadia Code, Consolas, monospace", "fontSize": 15}
+   ```
+   Restart the app (this is read once at boot, so a reload is not enough — quit and relaunch).
+   - every terminal tab, including ones restored from the saved layout, renders in that font
+     and size, and `fit` still gives a sane column count (no clipped or overlapping cells),
+   - remove the file and restart → back to Consolas 13, no error,
+   - break the JSON (drop the closing brace) and restart → the status line briefly shows a
+     `cannot parse ...settings.json` error and **the app still boots** with the default font;
+     the same holds for `{"fontSize": 200}`, which reports an out-of-range fontSize (6-72).
+
+4. **The New workspace button matches Ctrl+Shift+N** (field bug 2026-08-11) — with a
+   workspace open, click the sidebar's `+ New workspace` button: a workspace rooted at the
+   active terminal's current directory appears immediately, **no folder dialog**. The dialog
+   appears in exactly one situation: pressing either entry point when **no workspace exists
+   at all** (first boot) — then there is no "current directory" to use.
+
+5. **Codex sandbox guidance (`~/.codex/AGENTS.md`)** — after this build's provisioning runs
+   (marker `.setup-v5`), `~/.codex/AGENTS.md` in the distro contains the managed
+   `winmux integration` block (only when `~/.codex` already existed). Ask Codex to run
+   `winmux ls`: it should request escalated/non-sandboxed execution per the guidance —
+   sandboxed runs fail silently because the sandbox blocks the terminal device and mounts a
+   private `/tmp`. Any text of yours outside the managed block must be untouched.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

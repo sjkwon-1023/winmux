@@ -45,7 +45,7 @@ import { AckBatcher } from "./ack-batcher";
 import { AttachGate } from "./attach-gate";
 import type { GateResult } from "./attach-gate";
 import { ackOutput, attachTerminal, detachTerminal, resizeTerminal, writeStdin } from "./backend";
-import type { OutputChunk } from "./backend";
+import type { OutputChunk, UiSettings } from "./backend";
 import { parseAttachBody, parseFrame } from "./frame";
 import type { SessionId } from "./types";
 
@@ -58,7 +58,14 @@ import type { SessionId } from "./types";
  *  이 팔레트의 brightBlack(#666666)은 배경보다 확실히 밝아 구분선이 보이고,
  *  black(#000000)은 반대로 배경보다 어두워 채움면이 구분된다. 값을 임의로 고르지
  *  않고 VS Code 기본 다크를 통째로 쓰는 이유는 그 조합이 같은 배경(#1e1e1e) 위에서
- *  TUI 가독성이 이미 검증된 조합이기 때문이다 — 개별 색을 손대면 그 검증이 깨진다. */
+ *  TUI 가독성이 이미 검증된 조합이기 때문이다 — 개별 색을 손대면 그 검증이 깨진다.
+ *
+ *  **3자 동기화 계약**: 이 팔레트의 foreground/background 는 백엔드 두 곳에 같은
+ *  값으로 적혀 있다 — `src-tauri/src/host.rs` 의 `THEME_SYNC`(ConPTY 색 테이블에
+ *  내보내는 OSC 10/11 set)와 `src-tauri/src/sink.rs` 의 `COLOR_REPLY_FOREGROUND`/
+ *  `COLOR_REPLY_BACKGROUND`(OSC 10/11 **질의**에 앱이 직접 답하는 응답기). 여기가
+ *  값의 정본이고, 이 둘을 바꾸면 그 셋을 같이 바꾼다 (갈라지면 TUI 가 실제 배경과
+ *  다른 색을 기준으로 자기 색을 골라 입력창이 배경에 묻힌다). */
 const TERMINAL_THEME: ITheme = {
   foreground: "#cccccc",
   background: "#1e1e1e",
@@ -81,6 +88,32 @@ const TERMINAL_THEME: ITheme = {
   brightCyan: "#29b8db",
   brightWhite: "#e5e5e5",
 };
+
+/** 폰트 기본값 — 설정(settings.json)이 없을 때 쓰는 값이자, 종전에 Terminal
+ *  생성 옵션에 하드코딩돼 있던 그 값이다 (승격만 했고 값은 그대로).
+ *  Consolas/Cascadia Mono 는 Windows 기본 탑재 등폭 폰트라 설치 전제가 없다. */
+const DEFAULT_FONT_FAMILY = "Consolas, 'Cascadia Mono', monospace";
+const DEFAULT_FONT_SIZE = 13;
+
+/** 현재 적용 중인 폰트 — 모듈 수준 상태다. 뷰가 탭마다 새로 생기므로 인스턴스가
+ *  아니라 모듈이 들고 있어야 이후 만들어지는 모든 뷰에 같은 값이 적용된다. */
+let fontFamily = DEFAULT_FONT_FAMILY;
+let fontSize = DEFAULT_FONT_SIZE;
+
+/** settings.json 의 폰트 설정을 적용한다 (main.ts 부트가 **뷰 생성 전에** 1회
+ *  호출). null 필드는 미설정이라 기본값을 유지한다.
+ *
+ *  값 검증은 백엔드(`get_ui_settings`)가 이미 했다 — 여기서 다시 판정하면 두
+ *  곳의 규칙이 갈라질 수 있어 받은 값을 그대로 반영한다.
+ *
+ *  **순서 안전**: 터미널 뷰는 첫 스냅샷 렌더(store.init → render → workspace-view)
+ *  부터 생기고, 이 호출은 그 앞(store.init 앞)이라 이미 만들어진 뷰를 뒤늦게
+ *  고치는 경로가 필요 없다. 반대로 순서가 뒤집히면 첫 스냅샷의 탭들만 기본 폰트로
+ *  남는 비일관이 생긴다. */
+export function applyTerminalSettings(settings: UiSettings): void {
+  if (settings.fontFamily !== null) fontFamily = settings.fontFamily;
+  if (settings.fontSize !== null) fontSize = settings.fontSize;
+}
 
 export class TerminalView {
   readonly root: HTMLDivElement;
@@ -128,8 +161,10 @@ export class TerminalView {
 
     this.term = new Terminal({
       scrollback: 5000,
-      fontSize: 13,
-      fontFamily: "Consolas, 'Cascadia Mono', monospace",
+      // 폰트는 모듈 상태 — settings.json 이 있으면 부트가 먼저 반영해 둔다
+      // (applyTerminalSettings 주석의 순서 계약).
+      fontSize,
+      fontFamily,
       theme: TERMINAL_THEME,
     });
     this.fitAddon = new FitAddon();

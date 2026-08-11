@@ -9,9 +9,10 @@
 //! - OSC: [`OscRouter`] 에 밀어넣기만 한다 — 모델 반영은 라우터 worker 가 flush
 //!   창당 한 번 한다 (18단계 계획 glue 계약). 리더 스레드에서 Dispatcher lock 을
 //!   잡지 않는 경계가 여기다.
-//! - pane 간 전송(`OSC 777;winmux-send`)과 탭 열거 질의(`OSC 777;winmux-query`)만
-//!   예외로 라우터를 타지 않는다 — 상태 델타가 아니라 **액션**이라 코얼레싱할
-//!   것이 없다 ([`deliver_send`]·[`deliver_query`]).
+//! - pane 간 전송(`OSC 777;winmux-send`)·탭 열거 질의(`OSC 777;winmux-query`)·
+//!   색상 질의(`OSC 10/11 ;?`)만 예외로 라우터를 타지 않는다 — 상태 델타가 아니라
+//!   **액션**이라 코얼레싱할 것이 없다 ([`deliver_send`]·[`deliver_query`]·
+//!   [`answer_color_query`]).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,6 +124,11 @@ impl SessionSink for SinkHandle {
             }
             OscEvent::Osc777Query { kind, reply_b64 } => {
                 deliver_query(&self.0.app, self.0.session, kind, reply_b64);
+            }
+            // 색상 질의도 같은 이유로 즉시 처리한다 — 질의를 낸 TUI 앱은 응답을
+            // 기다리는 중이라 flush 창만큼 늦출 수 없다 ([`answer_color_query`]).
+            OscEvent::OscColorQuery { code } => {
+                answer_color_query(&self.0.app, self.0.session, *code);
             }
             // 리더 스레드 핫패스 — 배치에 합치고 깨우기만 한다. 모델 반영은 라우터
             // worker 가 flush 창당 한 번 하며, 여기서 Dispatcher lock 을 잡지 않는다
@@ -390,6 +396,92 @@ fn requester_tab_and_distro(
         }
     }
     (None, None)
+}
+
+/// OSC 10/11 색상 질의에 대한 응답 시퀀스 — **테마 3자 동기화 계약**.
+///
+/// 값은 xterm 프론트의 `TERMINAL_THEME`(`apps/winmux/src/terminal-view.ts`)의
+/// foreground `#cccccc` / background `#1e1e1e` 를, ConPTY 색 테이블에 내보내는
+/// `host.rs` 의 `THEME_SYNC` 와 같은 색으로 적은 것이다. **셋 중 하나를 바꾸면
+/// 나머지 둘도 같이 바꾼다** — 갈라지면 질의한 TUI 앱이 실제 배경과 다른 색을
+/// 기준으로 자기 색을 골라 입력창이 배경에 묻힌다 (이 기능이 고치려는 그 결함).
+///
+/// 형식은 xterm 관례인 `rgb:<r>/<g>/<b>` 이고 컴포넌트마다 **4자리**(16bit
+/// 확장 — `cc` → `cccc`), 종결은 ST(`ESC \`)다. Codex 의 `parse_osc_color` 가
+/// 받는 형식이 이것이라 BEL 종결·짧은 자릿수로 줄이지 않는다.
+const COLOR_REPLY_FOREGROUND: &str = "\x1b]10;rgb:cccc/cccc/cccc\x1b\\";
+/// 배경(OSC 11) 응답 — 위 [`COLOR_REPLY_FOREGROUND`] 의 동기화 계약이 그대로 적용된다.
+const COLOR_REPLY_BACKGROUND: &str = "\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\";
+
+/// OSC 10/11 색상 질의에 **질의를 낸 그 세션의 stdin** 으로 우리 테마 값을 답한다.
+///
+/// # 왜 앱이 답하나 (판단 반전)
+///
+/// 종전 판단은 "conhost 가 먼저 답하므로 응답기는 중복 = 역효과"였다. 2026-08-11
+/// 실기 probe 가 그 전제를 뒤집었다 — **OSC 11 질의에 아무도 답하지 않았다**
+/// (conhost 도, xterm 도). Codex 는 배경색을 못 받으면 입력창 배경을 아예 그리지
+/// 않으므로 그 미응답이 곧 "입력칸 구분 없음"이다. 그래서 질의가 conhost 를
+/// **통과해 우리 출력 스트림까지 도달한 경우**에 한해 우리가 덮어 답한다. 도달하지
+/// 않으면 코어 스캐너가 이벤트를 내지 않아 이 경로가 발동조차 하지 않는다(무해).
+/// 자세한 계약은 [`OscEvent::OscColorQuery`] rustdoc.
+///
+/// # 진단 관측점 (v0.3.1)
+///
+/// 응답할 때마다 stderr 에 한 줄 남긴다. **로그가 찍히지 않으면 질의가 conhost
+/// 에서 소멸한 것**이고, 그러면 이 문제는 앱 밖(conhost) 문제로 종결된다 —
+/// 검증 절차는 `docs/WINDOWS-BUILD.md` §10 "v0.3.1 — verification" 1번.
+///
+/// # 스레드·잠금
+///
+/// [`deliver_send`] 와 **같은 규율**이다: 호출자가 PTY 리더 스레드라 여기서 write
+/// 하면 (대상이 paused 일 때) 그 pane 의 출력이 멈출 수 있다. 그래서 실제 쓰기는
+/// `spawn_blocking` 으로 넘기고 진행 중 태스크 상한([`IN_FLIGHT`])도 전송·질의와
+/// 공유한다 — 질의를 연사하는 TUI 앱이 blocking 풀을 포화시키지 못하게. Dispatcher
+/// lock 은 아예 잡지 않는다 (대상이 요청자 자신이라 해석할 것이 없다).
+///
+/// # 실패
+///
+/// 전송·질의와 같은 무음 계약 — 실패는 stderr 로만 남긴다.
+fn answer_color_query(app: &AppHandle, session: SessionId, code: u8) {
+    let reply = match code {
+        10 => COLOR_REPLY_FOREGROUND,
+        11 => COLOR_REPLY_BACKGROUND,
+        // 코어 파서가 10/11 만 이 이벤트로 만든다 — 다른 값이 오면 계약이 갈라진
+        // 것이므로 지어낸 색으로 답하지 않고 드러낸다.
+        other => {
+            eprintln!(
+                "[winmux] color query: unsupported code {other} (session={session}); ignored"
+            );
+            return;
+        }
+    };
+    let Some(guard) = acquire_in_flight() else {
+        eprintln!(
+            "[winmux] color query: dropped from session {session}: too many deliveries in flight \
+             (cap {MAX_IN_FLIGHT})"
+        );
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        let Some(state) = app.try_state::<AppState>() else {
+            // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 (send 와 같은 규율).
+            eprintln!("[winmux] color query: managed state unavailable; dropped");
+            return;
+        };
+        let Some(handle) = state.sessions.get(session) else {
+            // 질의와 write 사이에 탭이 닫힌 경우 — 드물지만 정상 순서다.
+            eprintln!("[winmux] color query: session {session} is gone; dropped");
+            return;
+        };
+        if let Err(err) = handle.write(reply.as_bytes()) {
+            eprintln!("[winmux] color query: write to session {session} failed: {err:#}");
+            return;
+        }
+        // v0.3.1 진단 관측점 — 이 줄이 없으면 질의가 conhost 에서 소멸한 것이다.
+        eprintln!("[winmux] color query {code} answered (session={session})");
+    });
 }
 
 /// 회신 JSON 을 **완성된 상태로만** 최종 경로에 나타나게 한다: 같은 디렉터리의

@@ -522,6 +522,8 @@ fn summarize_osc(event: &OscEvent) -> String {
         // 질의도 같은 규율 — 종류만 싣고 회신 **경로는 싣지 않는다** (로그·stats
         // 에 파일시스템 경로를 흘릴 이유가 없다).
         OscEvent::Osc777Query { kind, .. } => format!("777-query:{kind}"),
+        // 색상 질의는 코드(10 = 전경, 11 = 배경)만으로 관측이 끝난다.
+        OscEvent::OscColorQuery { code } => format!("color-query:{code}"),
     }
 }
 
@@ -638,5 +640,10 @@ mod tests {
             "777:winmux:idle"
         );
         assert_eq!(summarize_osc(&OscEvent::Osc0Title("t".into())), "0:t");
+        // 색상 질의 — 코드만.
+        assert_eq!(
+            summarize_osc(&OscEvent::OscColorQuery { code: 11 }),
+            "color-query:11"
+        );
     }
 }

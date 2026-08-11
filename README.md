@@ -61,6 +61,11 @@ npm run tauri build -- --no-bundle
 That leaves `winmux-app.exe` in the repo's `target\release\`. Use `npm run tauri dev` instead
 to run it with hot reload.
 
+The terminal font is the one thing you configure by hand — there is no settings screen. Write
+`%AppData%\app.winmux.desktop\settings.json` as `{"fontFamily": "Cascadia Code, monospace",
+"fontSize": 15}` and restart; either key may be left out, and a broken file reports itself in
+the status line instead of being silently ignored.
+
 ## Setup
 
 ### Choosing a distribution

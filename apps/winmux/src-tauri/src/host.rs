@@ -123,6 +123,12 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
 /// 프론트 무영향). **값의 정본은 `apps/winmux/src/terminal-view.ts` 의 `TERMINAL_THEME`
 /// foreground/background 다 — 테마를 바꾸면 여기도 같이 바꾼다** (갈라지면 재발).
 /// `COLORTERM=truecolor` 는 그 짝: Codex 의 색 선택이 truecolor 분기를 타게 한다.
+///
+/// **3자 동기화 계약**: 같은 값을 쓰는 세 번째 자리가 `sink.rs` 의
+/// `COLOR_REPLY_FOREGROUND`/`COLOR_REPLY_BACKGROUND` 다 — OSC 10/11 **질의**에 앱이
+/// 직접 답하는 응답기로, 위 "conhost 가 대신 응답한다"는 전제가 실기 probe 에서
+/// 뒤집힌(아무도 응답하지 않았다) 뒤 2026-08-11 에 추가됐다. 셋 중 하나를 바꾸면
+/// 나머지 둘도 같이 바꾼다.
 #[cfg(windows)]
 fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
     // 이 파일이 없으면 `winmux` 를 못 찾을 뿐이고, 프로비저닝이 다음 부팅에서 다시
