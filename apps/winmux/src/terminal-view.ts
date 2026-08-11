@@ -36,7 +36,7 @@
 // 뷰만 해제하고 세션을 죽이지 않는다.
 
 import { Terminal } from "@xterm/xterm";
-import type { IDisposable } from "@xterm/xterm";
+import type { IDisposable, ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Channel } from "@tauri-apps/api/core";
 import "@xterm/xterm/css/xterm.css";
@@ -48,6 +48,39 @@ import { ackOutput, attachTerminal, detachTerminal, resizeTerminal, writeStdin }
 import type { OutputChunk } from "./backend";
 import { parseAttachBody, parseFrame } from "./frame";
 import type { SessionId } from "./types";
+
+/** 터미널 색 테마 — VS Code 기본 다크 터미널 팔레트 전체(16색 ANSI 포함).
+ *
+ *  배경만 지정하고 팔레트를 xterm 기본값에 맡기면 TUI 가 배경에 묻힌다 (실기
+ *  결함: Codex TUI 의 입력창 구분선·배경이 터미널 배경과 구분되지 않았다).
+ *  TUI 는 프레임·구분선·비활성 텍스트를 black/brightBlack 이나 dim 으로 그리는데,
+ *  **brightBlack 이 배경(#1e1e1e)과 충분히 갈리는 것이 입력창 구분의 핵심**이다 —
+ *  이 팔레트의 brightBlack(#666666)은 배경보다 확실히 밝아 구분선이 보이고,
+ *  black(#000000)은 반대로 배경보다 어두워 채움면이 구분된다. 값을 임의로 고르지
+ *  않고 VS Code 기본 다크를 통째로 쓰는 이유는 그 조합이 같은 배경(#1e1e1e) 위에서
+ *  TUI 가독성이 이미 검증된 조합이기 때문이다 — 개별 색을 손대면 그 검증이 깨진다. */
+const TERMINAL_THEME: ITheme = {
+  foreground: "#cccccc",
+  background: "#1e1e1e",
+  cursor: "#cccccc",
+  selectionBackground: "#264f78",
+  black: "#000000",
+  red: "#cd3131",
+  green: "#0dbc79",
+  yellow: "#e5e510",
+  blue: "#2472c8",
+  magenta: "#bc3fbc",
+  cyan: "#11a8cd",
+  white: "#e5e5e5",
+  brightBlack: "#666666",
+  brightRed: "#f14c4c",
+  brightGreen: "#23d18b",
+  brightYellow: "#f5f543",
+  brightBlue: "#3b8eea",
+  brightMagenta: "#d670d6",
+  brightCyan: "#29b8db",
+  brightWhite: "#e5e5e5",
+};
 
 export class TerminalView {
   readonly root: HTMLDivElement;
@@ -97,7 +130,7 @@ export class TerminalView {
       scrollback: 5000,
       fontSize: 13,
       fontFamily: "Consolas, 'Cascadia Mono', monospace",
-      theme: { background: "#1e1e1e" },
+      theme: TERMINAL_THEME,
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);

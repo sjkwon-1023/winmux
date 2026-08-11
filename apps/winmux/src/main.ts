@@ -10,6 +10,7 @@
 
 import { ActivityPing } from "./activity-ping";
 import { dispatch, getState, pickWorkspaceFolder, resetUi, userActivity } from "./backend";
+import { Chime, detectNeedsInputOnset, installChimeUnlock } from "./chime";
 import { formatCommandError } from "./command-error";
 import {
   activeTerminalCwd,
@@ -27,7 +28,7 @@ import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
 import { initWindowVisibility } from "./window-visibility";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
-import type { Command, CommandOutput, StateSnapshot } from "./types";
+import type { AgentStatus, Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
 
 declare global {
   interface Window {
@@ -119,6 +120,12 @@ class App {
     (cmd) => this.dispatchUI(cmd),
     () => void this.openWorkspacePicker(),
   );
+  /** needsInput 알림음 (chime.ts) — AudioContext 는 첫 제스처 unlock 까지 lazy 다. */
+  private readonly chime = new Chime();
+  /** 직전 스냅샷의 워크스페이스별 agentStatus — needsInput 상승 전이 판정 기준선.
+   *  부팅 첫 렌더 전까지 null 이고, 그 첫 스냅샷은 소리 없이 기준선으로만
+   *  채워진다 (notifyNeedsInput 주석). */
+  private agentStatuses: Map<WorkspaceId, AgentStatus> | null = null;
   private errorText: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
   /** 폴더 선택 in-flight 가드 — 대화상자가 떠 있는 동안 버튼 연타·키 반복으로
@@ -140,6 +147,9 @@ class App {
     };
     installReloadKey();
     installActivityPing();
+    // 알림음 unlock — 브라우저 autoplay 정책상 사용자 제스처 전에는 소리가 나지
+    // 않으므로, 첫 keydown/mousedown 에서 AudioContext 를 resume 해 둔다.
+    installChimeUnlock(this.chime);
     // 창 숨김(최소화) 신호 구독 — WebView2 가 주지 않는 visibility 를 글루 창
     // 이벤트로 대체한다 (window-visibility.ts). 실패는 폴링 게이팅 신호의
     // 유실일 뿐 UI 동작과 무관하므로(최소화 중에도 폴링이 도는 기존 동작으로
@@ -443,11 +453,31 @@ class App {
     // 전환 스냅샷 도착 시각 — wsView.render(attach 시작 기록)보다 먼저 찍는다.
     // 이 콜백은 store 구독이라 offer 채택 직후 동기 호출된다 (스냅샷 시각과 동일).
     this.tracer.markSnapshot(snapshot.state.activeWorkspace, performance.now());
+    this.notifyNeedsInput(snapshot);
     this.sidebar.render(snapshot);
     this.wsView.render(snapshot);
     // 렌더 말미 봉인 — 이 렌더에서 attach 를 시작한 탭이 없으면(터미널 0개·전부
     // keep-alive 재사용) 여기서 즉시 정착한다 (계획 A-2).
     this.tracer.settle();
+  }
+
+  /** needsInput 알림음 트리거 (실기 결함: 에이전트가 입력을 기다리는데 소리가 전혀
+   *  없어 대기를 놓친다) — 어느 워크스페이스든 needsInput 이 **아니었다가**
+   *  needsInput 이 된 순간에만 1회 울린다. 판정은 순수 함수 detectNeedsInputOnset
+   *  몫이고(같은 상태 반복·running/idle 전환은 무음 — 소음 방지) 여기는 기준선
+   *  보관과 재생 배선만 한다.
+   *
+   *  부팅 첫 스냅샷은 기준선으로만 쓴다(prev=null → 무음). 재시작 복원은 코어
+   *  sanitize 가 agent_status 를 Idle 로 되돌리므로 자연히 무음이지만, WebView
+   *  리로드·자동 리셋에서는 살아 있는 세션의 needsInput 이 그대로 첫 스냅샷에
+   *  실려 오므로 "전이"가 아닌 것에 울리지 않게 명시적으로 기준선 취급한다. */
+  private notifyNeedsInput(snapshot: StateSnapshot): void {
+    const { chime, next } = detectNeedsInputOnset(
+      this.agentStatuses,
+      snapshot.state.workspaces,
+    );
+    this.agentStatuses = next;
+    if (chime) this.chime.play();
   }
 
   /** 상태 라인 조립 — [send-mode 프롬프트] · [one-shot 에러]. **일시 표시**다:
