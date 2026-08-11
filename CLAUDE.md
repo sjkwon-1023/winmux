@@ -33,6 +33,17 @@ buttons, redrawn icons) — its checklist is WINDOWS-BUILD §10's last subsectio
 
 Accepted deferrals, one line each. None of these block the MVP.
 
+- **Syntax highlighting in the text viewer** (user request 2026-08-11) — medium weight:
+  ~50-100KB gzip of bundle for a highlight.js-class library plus a curated language
+  pack and an extension→language table; no per-language hand work. Design note:
+  tokenize the whole 512KiB window once and cache per-line results, or multi-line
+  constructs break at the virtual-scroll seams. Shiki-class quality costs ~1MB —
+  off-motto.
+- **Windows toast notifications on needsInput** (user request 2026-08-11) — light:
+  official tauri-plugin-notification + tens of wiring lines. The OSC flush point is
+  already marked as the hook (router.rs comment) and the chime's onset detection is
+  reusable; fire only while the window is unfocused. Field check: toast sender
+  identity for an unsigned standalone exe.
 - **Query-reply `/tmp` confinement is string-level only** — a pre-planted symlink
   (`/tmp/x → $HOME`) routes the reply write outside; blocking it needs a
   canonicalize-at-write recheck whose 9P semantics are unverified on real hardware
