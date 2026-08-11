@@ -1017,7 +1017,15 @@ reports it. Setup version **6** (`~/.winmux/.setup-v6`) carries the v0.3.2 notif
 the marker differs from v5, so **an already-provisioned distro re-provisions on the next
 launch**; the wrapper half reaches only tabs opened after this build, so item 6 needs new tabs.
 
-1. **Codex's input box** — open a **new** tab (an existing tab predates this build) and start
+1. **Codex's input box** — **CLOSED 2026-08-12 as out-of-app.** The release-side probe
+   returned an empty reply on the field machine: conhost consumes the OSC 11 query and
+   answers no one (not even from its own table), so neither the in-app responder nor the
+   THEME_SYNC set can reach Codex's background probe. Upstream tracking:
+   openai/codex#19741 (composer pill lost when the color query is blocked). The
+   responder and THEME_SYNC stay — they cost nothing and cover conhost versions that do
+   forward or answer. Original item kept below for machines where the probe answers.
+
+1. (original) **Codex's input box** — open a **new** tab (an existing tab predates this build) and start
    `codex`. The input prompt must be drawn as a filled pill that separates from the terminal
    background, not as bare text on the background.
 

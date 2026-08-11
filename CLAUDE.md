@@ -33,6 +33,13 @@ buttons, redrawn icons) — its checklist is WINDOWS-BUILD §10's last subsectio
 
 Accepted deferrals, one line each. None of these block the MVP.
 
+- **Codex composer pill: closed as out-of-app (2026-08-12)** — the field probe showed
+  conhost consuming OSC 11 queries without answering anyone, so no app-side lever
+  exists; upstream is openai/codex#19741. Responder + THEME_SYNC stay as no-cost
+  coverage for other conhost versions.
+- **Resume-hint ↑ integration is bash-only** — a `.bashrc` that execs zsh/fish reads
+  its own history, so the hint line shows but ↑ does not; needs per-shell history
+  append if the field diagnosis confirms a zsh setup (2026-08-12, pending).
 - **Ctrl+= / Ctrl+- terminal zoom** (user request 2026-08-11) — light: adjust the
   xterm fontSize at runtime (re-fit follows via the existing ResizeObserver) on top of
   the settings.json default; decide persistence (session-only vs write-back) and note
