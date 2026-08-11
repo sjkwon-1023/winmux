@@ -33,6 +33,10 @@ buttons, redrawn icons) — its checklist is WINDOWS-BUILD §10's last subsectio
 
 Accepted deferrals, one line each. None of these block the MVP.
 
+- **Ctrl+= / Ctrl+- terminal zoom** (user request 2026-08-11) — light: adjust the
+  xterm fontSize at runtime (re-fit follows via the existing ResizeObserver) on top of
+  the settings.json default; decide persistence (session-only vs write-back) and note
+  Ctrl+- shadows the terminal's C-_ (emacs undo) — same trade-off class as Ctrl+1-9.
 - **Syntax highlighting in the text viewer** (user request 2026-08-11) — medium weight:
   ~50-100KB gzip of bundle for a highlight.js-class library plus a curated language
   pack and an extension→language table; no per-language hand work. Design note:
