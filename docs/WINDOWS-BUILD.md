@@ -1021,7 +1021,13 @@ launch**; the wrapper half reaches only tabs opened after this build, so item 6 
    `codex`. The input prompt must be drawn as a filled pill that separates from the terminal
    background, not as bare text on the background.
 
-   Whatever the screen shows, look at the app's stderr:
+   Whatever the screen shows, decide by one of two signals. **A release exe has no
+   console, so its stderr is invisible** — there, run the probe inside a winmux tab
+   instead: `old=$(stty -g); stty raw -echo min 0 time 5; printf '\033]11;?\033\\';
+   resp=$(dd bs=64 count=1 2>/dev/null); stty "$old"; printf '%s\n' "$resp" | cat -v` —
+   an `^[]11;rgb:1e1e/...` reply means the query path works (responder or xterm
+   answered); an empty reply means conhost consumed the query and the item closes as
+   out-of-app. In a dev run (`npm run tauri dev`) the stderr line is the same signal:
    - `[winmux] color query 11 answered (session=<n>)` present → the query reached us and we
      answered with the theme background (`#1e1e1e`). If the pill is *still* invisible after
      that, the remaining suspect is Codex's own colour choice, not the query path. Note that
@@ -1095,6 +1101,9 @@ launch**; the wrapper half reaches only tabs opened after this build, so item 6 
      hint line at all, and that ↑ there recalls that tab's own history as before,
    - start a **second, different** Claude session in the first tab, restart again, and confirm
      the hint names the newer session — the most recent one wins.
+   Note: recording starts with the **first hook event after this build's provisioning**
+   (v6) — a session that ran before the update left no record, so the very first restart
+   after updating shows no hint yet. Run one prompt through Claude first, then restart.
 
    The hint is shown whenever the file exists, no matter how old it is (freshness is your
    call, and line 2 is there to check by hand). Codex sessions get no hint — see the contract
