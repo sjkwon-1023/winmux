@@ -41,21 +41,21 @@ Accepted deferrals, one line each. None of these block the MVP.
   read its own history (hint line still shows, ↑ would not). Informational: the
   2026-08-12 field failure was NOT this — it was the `wsl.exe --` double evaluation,
   fixed by `--exec` in v0.3.3 and field-confirmed.
-- **Ctrl+= / Ctrl+- terminal zoom** (user request 2026-08-11) — light: adjust the
-  xterm fontSize at runtime (re-fit follows via the existing ResizeObserver) on top of
-  the settings.json default; decide persistence (session-only vs write-back) and note
-  Ctrl+- shadows the terminal's C-_ (emacs undo) — same trade-off class as Ctrl+1-9.
+- **Ctrl+= / Ctrl+- terminal zoom — landed 2026-08-12** as **session-only** (no write-back:
+  relaunch returns to the `settings.json` size, Ctrl+0 resets to it), window-wide across all
+  tabs, clamped to the backend's 6-72 range; Ctrl+- shadows the terminal's C-_ (emacs undo)
+  as an accepted trade-off, same class as Ctrl+1-9. Verification: WINDOWS-BUILD §10 v0.3.4.
 - **Syntax highlighting in the text viewer** (user request 2026-08-11) — medium weight:
   ~50-100KB gzip of bundle for a highlight.js-class library plus a curated language
   pack and an extension→language table; no per-language hand work. Design note:
   tokenize the whole 512KiB window once and cache per-line results, or multi-line
   constructs break at the virtual-scroll seams. Shiki-class quality costs ~1MB —
   off-motto.
-- **Windows toast notifications on needsInput** (user request 2026-08-11) — light:
-  official tauri-plugin-notification + tens of wiring lines. The OSC flush point is
-  already marked as the hook (router.rs comment) and the chime's onset detection is
-  reusable; fire only while the window is unfocused. Field check: toast sender
-  identity for an unsigned standalone exe.
+- **Windows toast notifications on needsInput — landed 2026-08-12** via the official
+  `tauri-plugin-notification` (+ the `notify_toast` glue command), fired **only while the
+  window is unfocused** (`document.hasFocus()` false) on the chime's own onset rule — one
+  toast per transitioning workspace, chime alone when focused. Still a field check: toast
+  sender identity for an unsigned standalone exe (WINDOWS-BUILD §10 v0.3.4).
 - **Query-reply `/tmp` confinement is string-level only** — a pre-planted symlink
   (`/tmp/x → $HOME`) routes the reply write outside; blocking it needs a
   canonicalize-at-write recheck whose 9P semantics are unverified on real hardware

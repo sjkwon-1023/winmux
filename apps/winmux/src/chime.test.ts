@@ -19,6 +19,7 @@ describe("detectNeedsInputOnset", () => {
       { id: 2, agentStatus: "running" },
     ]);
     expect(out.chime).toBe(false);
+    expect(out.onsets).toEqual([]);
     expect(out.next).toEqual(statuses([[1, "needsInput"], [2, "running"]]));
   });
 
@@ -27,10 +28,12 @@ describe("detectNeedsInputOnset", () => {
       { id: 1, agentStatus: "needsInput" },
     ]);
     expect(fromIdle.chime).toBe(true);
+    expect(fromIdle.onsets).toEqual([1]);
     const fromRunning = detectNeedsInputOnset(statuses([[1, "running"]]), [
       { id: 1, agentStatus: "needsInput" },
     ]);
     expect(fromRunning.chime).toBe(true);
+    expect(fromRunning.onsets).toEqual([1]);
   });
 
   it("같은 needsInput 이 유지되는 재렌더는 무음이다", () => {
@@ -38,6 +41,7 @@ describe("detectNeedsInputOnset", () => {
       { id: 1, agentStatus: "needsInput" },
     ]);
     expect(out.chime).toBe(false);
+    expect(out.onsets).toEqual([]);
   });
 
   it("needsInput 이 아닌 쪽으로 가는 전환은 전부 무음이다", () => {
@@ -58,20 +62,25 @@ describe("detectNeedsInputOnset", () => {
       { id: 2, agentStatus: "needsInput" },
     ]);
     expect(added.chime).toBe(true);
+    expect(added.onsets).toEqual([2]);
     const addedRunning = detectNeedsInputOnset(prev, [
       { id: 1, agentStatus: "idle" },
       { id: 2, agentStatus: "running" },
     ]);
     expect(addedRunning.chime).toBe(false);
+    expect(addedRunning.onsets).toEqual([]);
   });
 
-  it("동시에 여러 워크스페이스가 전이해도 판정은 1회다", () => {
+  it("동시에 여러 워크스페이스가 전이해도 차임 판정은 1회다 (토스트는 전이마다)", () => {
     const out = detectNeedsInputOnset(statuses([[1, "running"], [2, "idle"]]), [
       { id: 1, agentStatus: "needsInput" },
       { id: 2, agentStatus: "needsInput" },
     ]);
-    // 반환은 boolean 이라 호출측이 재생을 1회만 한다 (개수를 세지 않는다).
+    // chime 은 boolean 이라 호출측이 재생을 1회만 한다 (개수를 세지 않는다).
+    // 토스트는 "어느 워크스페이스가 기다리는가"가 내용이라 합칠 수 없어, 전이한
+    // 워크스페이스가 입력 순서대로 전부 onsets 에 담긴다.
     expect(out.chime).toBe(true);
+    expect(out.onsets).toEqual([1, 2]);
   });
 
   it("사라진 워크스페이스는 기준선에서 빠지고, 다시 나타나면 신규로 취급된다", () => {
@@ -86,11 +95,13 @@ describe("detectNeedsInputOnset", () => {
       { id: 2, agentStatus: "idle" },
     ]);
     expect(reappeared.chime).toBe(true);
+    expect(reappeared.onsets).toEqual([1]);
   });
 
   it("워크스페이스가 하나도 없으면 무음이고 기준선은 빈 맵이다", () => {
     const out = detectNeedsInputOnset(statuses([[1, "needsInput"]]), []);
     expect(out.chime).toBe(false);
+    expect(out.onsets).toEqual([]);
     expect(out.next.size).toBe(0);
   });
 });

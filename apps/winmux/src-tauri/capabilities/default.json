@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window capability — core APIs (event listen for state-changed/osc-event). Without this the ACL rejects listen() and the whole frontend dies (spike 회귀 교훈).",
+  "description": "Main window capability — core APIs (event listen for state-changed/osc-event) plus the notification plugin's default set. Without core:default the ACL rejects listen() and the whole frontend dies (spike 회귀 교훈); notification:default keeps the plugin's JS surface reachable alongside the Rust-side notify_toast command.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }

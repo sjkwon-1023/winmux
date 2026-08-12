@@ -11,6 +11,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# needsInput OS 토스트 (백로그 2026-08-11) — 공식 플러그인. Windows 백엔드는
+# notify-rust → winrt-notification 의 **순수 Rust WinRT 바인딩**이라 C 툴체인도
+# 아키텍처별 바이너리도 없다 — ARM64 크로스 빌드에 추가 준비물이 없다 (rfd 와
+# 같은 판단). default features 는 비어 있고, `windows7-compat` 은 일부러 켜지
+# 않는다: 대상은 Windows 10/11 이고 그 feature 는 별도 창을 띄우는 win7 폴백을
+# 끌고 온다.
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

@@ -142,15 +142,20 @@ export interface AgentStatusEntry {
 
 export interface NeedsInputOnset {
   /** 이번 스냅샷에 needsInput 상승 전이가 하나라도 있었나 — 여러 워크스페이스가
-   *  동시에 전이해도 소리는 1회다 (소음 방지). */
+   *  동시에 전이해도 소리는 1회다 (소음 방지). `onsets.length > 0` 과 항상 같다. */
   chime: boolean;
+  /** needsInput 으로 **새로 전이한** 워크스페이스들 (입력 순서 그대로). 소리는
+   *  전체를 1회로 합치지만 OS 토스트는 워크스페이스마다 하나다 — "어느 프로젝트가
+   *  기다리는가"가 토스트의 내용 자체라, 합치면 알림의 의미가 사라진다. */
+  onsets: WorkspaceId[];
   /** 다음 판정의 기준선이 될 상태 맵 — 사라진 워크스페이스는 빠지므로 맵이 무한히
    *  자라지 않고, 같은 id 가 다시 나타나면 신규로 취급된다. */
   next: Map<WorkspaceId, AgentStatus>;
 }
 
 /** needsInput **상승 전이** 판정 (순수) — 어느 워크스페이스든 직전에 needsInput 이
- *  아니었다가 needsInput 이 된 경우에만 chime=true 다.
+ *  아니었다가 needsInput 이 된 경우에만 chime=true 이고, 그 워크스페이스들이
+ *  `onsets` 에 담긴다 (소리는 1회, 토스트는 전이마다 — 판정 규칙은 하나다).
  *
  *  - 같은 상태 반복(needsInput → needsInput)은 무음. 스냅샷은 무관한 변경
  *    (탭 활동·git 등)으로도 자주 오므로, 반복까지 울리면 소음이 된다.
@@ -168,13 +173,16 @@ export function detectNeedsInputOnset(
   workspaces: readonly AgentStatusEntry[],
 ): NeedsInputOnset {
   const next = new Map<WorkspaceId, AgentStatus>();
-  let chime = false;
+  const onsets: WorkspaceId[] = [];
   for (const ws of workspaces) {
     next.set(ws.id, ws.agentStatus);
     if (prev === null) continue;
     if (ws.agentStatus !== "needsInput") continue;
     if (prev.get(ws.id) === "needsInput") continue;
-    chime = true;
+    onsets.push(ws.id);
   }
-  return { chime, next };
+  // chime 은 onsets 에서 파생한다 — 두 값을 따로 세면 어긋날 수 있고, "소리는
+  // 1회·토스트는 전이마다"라는 규칙 차이는 호출측(main.ts)이 이 둘을 어떻게
+  // 쓰느냐로 표현된다.
+  return { chime: onsets.length > 0, onsets, next };
 }

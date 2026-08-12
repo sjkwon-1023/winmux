@@ -13,6 +13,7 @@ import {
   dispatch,
   getState,
   getUiSettings,
+  notifyToast,
   pickWorkspaceFolder,
   resetUi,
   userActivity,
@@ -33,7 +34,7 @@ import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
-import { applyTerminalSettings } from "./terminal-view";
+import { adjustFontSize, applyTerminalSettings, resetFontSize } from "./terminal-view";
 import { initWindowVisibility } from "./window-visibility";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { AgentStatus, Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
@@ -94,6 +95,16 @@ function installActivityPing(): void {
 
 /** one-shot 에러 표시 유지 시간 — 이 뒤엔 타이머로 소거한다 (폴링 금지). */
 const ERROR_TTL_MS = 5000;
+
+/** needsInput 토스트 본문 — 에이전트의 마지막 메시지 **첫 줄**이다. 여러 줄 메시지를
+ *  통째로 넣으면 OS 가 어차피 잘라 내며 첫 줄이 가장 정보가 많고, 메시지가 없거나
+ *  공백뿐이면 무엇을 알리는 알림인지는 남겨야 하므로 고정 문구로 대체한다. */
+const TOAST_FALLBACK_BODY = "agent needs your input";
+
+function toastBody(lastAgentMessage: string | null): string {
+  const firstLine = (lastAgentMessage ?? "").split("\n", 1)[0].trim();
+  return firstLine === "" ? TOAST_FALLBACK_BODY : firstLine;
+}
 
 function requireElement(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -231,6 +242,17 @@ class App {
     }
     if (action.type === "renameWorkspace") {
       this.sidebar.beginRename();
+      return;
+    }
+    // 줌도 스냅샷 가드 앞이다 — 글꼴 크기는 모델 상태가 아니라 terminal-view 의
+    // 모듈 상태라 대상 해석(활성 워크스페이스·pane)이 필요 없고, 스냅샷이 아직
+    // 없는 부트 직후에도 그냥 걸린다. 세션 한정이라 dispatch 도 하지 않는다.
+    if (action.type === "zoom") {
+      adjustFontSize(action.delta);
+      return;
+    }
+    if (action.type === "zoomReset") {
+      resetFontSize();
       return;
     }
     const snapshot = this.store.snapshot;
@@ -483,23 +505,44 @@ class App {
     this.tracer.settle();
   }
 
-  /** needsInput 알림음 트리거 (실기 결함: 에이전트가 입력을 기다리는데 소리가 전혀
+  /** needsInput 알림 트리거 (실기 결함: 에이전트가 입력을 기다리는데 소리가 전혀
    *  없어 대기를 놓친다) — 어느 워크스페이스든 needsInput 이 **아니었다가**
    *  needsInput 이 된 순간에만 1회 울린다. 판정은 순수 함수 detectNeedsInputOnset
    *  몫이고(같은 상태 반복·running/idle 전환은 무음 — 소음 방지) 여기는 기준선
-   *  보관과 재생 배선만 한다.
+   *  보관과 재생·토스트 배선만 한다.
+   *
+   *  같은 전이에 신호가 둘이고 조건이 다르다: **차임은 항상**(포커스 여부 무관,
+   *  여러 워크스페이스가 동시에 전이해도 1회), **토스트는 비포커스일 때만**
+   *  (워크스페이스마다 1건). 아래 분기의 주석이 그 이유를 담는다.
    *
    *  부팅 첫 스냅샷은 기준선으로만 쓴다(prev=null → 무음). 재시작 복원은 코어
    *  sanitize 가 agent_status 를 Idle 로 되돌리므로 자연히 무음이지만, WebView
    *  리로드·자동 리셋에서는 살아 있는 세션의 needsInput 이 그대로 첫 스냅샷에
    *  실려 오므로 "전이"가 아닌 것에 울리지 않게 명시적으로 기준선 취급한다. */
   private notifyNeedsInput(snapshot: StateSnapshot): void {
-    const { chime, next } = detectNeedsInputOnset(
+    const { chime, onsets, next } = detectNeedsInputOnset(
       this.agentStatuses,
       snapshot.state.workspaces,
     );
     this.agentStatuses = next;
     if (chime) this.chime.play();
+    // OS 토스트는 **창이 비포커스일 때만** (백로그 2026-08-11). 창을 보고 있는
+    // 사용자에게는 사이드바 강조 + 차임이면 충분하고, 그 위에 토스트까지 뜨면
+    // 방해다 — 토스트의 값은 "winmux 를 안 보고 있을 때 불러 준다"에 있다.
+    // document.hasFocus() 를 쓰는 이유: 백엔드의 창 포커스 신호는 자동 리셋 정책
+    // 전용 경로(main.rs on_window_event)라 프론트로 오지 않고, 사실 자체는 WebView
+    // 안에서 그대로 읽힌다. 차임과 달리 워크스페이스마다 1건이다 — 어느 프로젝트가
+    // 기다리는지가 알림의 내용이라 합칠 수 없다.
+    if (onsets.length === 0 || document.hasFocus()) return;
+    const pending = new Set(onsets);
+    for (const ws of snapshot.state.workspaces) {
+      if (!pending.has(ws.id)) continue;
+      // 실패는 console 로만 — 알림은 차임과 같은 부가 신호라 UI 동작을 막지 않는다
+      // (알림 차단·플러그인 실패 어느 쪽이든 앱은 그대로 돈다).
+      notifyToast(`winmux — ${ws.name}`, toastBody(ws.lastAgentMessage)).catch((err) => {
+        console.debug("[winmux] needsInput toast failed", err);
+      });
+    }
   }
 
   /** 상태 라인 조립 — [send-mode 프롬프트] · [one-shot 에러]. **일시 표시**다:

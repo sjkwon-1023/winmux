@@ -1117,6 +1117,84 @@ launch**; the wrapper half reaches only tabs opened after this build, so item 6 
    call, and line 2 is there to check by hand). Codex sessions get no hint — see the contract
    document and the `CLAUDE.md` backlog for why.
 
+### v0.3.4 — verification
+
+The v0.3.4 backlog batch. Items are independent — run them in any order on a build of this
+batch, from a console (`npm run tauri dev`) unless an item says otherwise.
+
+1. **Terminal zoom — `Ctrl+=` / `Ctrl++` / `Ctrl+-` / `Ctrl+0`** (session-only by decision;
+   the interception rows and the trade-off note live in the
+   [`apps/winmux/src/keys.ts`](../apps/winmux/src/keys.ts) module doc).
+   - **All tabs move together** — with at least two panes and two tabs per pane, press
+     `Ctrl+=` a few times: the visible terminals grow in step, and switching to the hidden
+     tabs shows them at the same size (they refit on becoming visible, not before). A tab
+     opened *after* zooming opens at the zoomed size — no per-tab font divergence anywhere
+     in the window, including tabs restored in another workspace.
+   - **The `+` key works as `+`** — on a US layout the zoom-in key is physically `Shift+=`;
+     pressing `Ctrl` + the key labelled `+` must zoom in, not do nothing.
+   - **Clamp** — hold `Ctrl+=` and let auto-repeat run past the top: the size stops at 72px
+     and stays there (no error, no runaway growth, the app stays responsive). Same at the
+     bottom with `Ctrl+-` → 6px. These bounds are the same range the backend enforces for
+     `settings.json` (`FONT_SIZE_RANGE` 6-72 in `commands.rs`); a size reachable by zoom but
+     rejected in the file would mean the two drifted apart.
+   - **Reset goes to *your* default, not the app default** — write
+     `%AppData%\app.winmux.desktop\settings.json` with `{"fontSize": 15}` and relaunch; zoom
+     away from it, then `Ctrl+0` → back to **15**, not 13. Remove the file, relaunch, and
+     `Ctrl+0` lands on 13.
+   - **Session-only** — after zooming, quit and relaunch: terminals come back at the
+     `settings.json` size (or 13), and the file's contents/timestamp are untouched. The app
+     never writes zoom back.
+   - **Nothing leaks into the terminal** — at a shell prompt with an empty command line,
+     press all four combinations: the font changes and the command line stays **empty** (no
+     stray `=`, `-`, `0`, `+`). Repeat inside a TUI (`htop`, `vim`) — the keys zoom and the
+     app underneath does not see them.
+   - **The grid really refit** — after a zoom, `tput cols; tput lines` reports the new grid
+     (the PTY got the resize, not just the renderer), and a full-screen TUI redraws filling
+     the pane with no clipped or overlapping columns.
+   - **The accepted trade-off: `C-_` is no longer the shell's** — in `bash`, `Ctrl+-` /
+     `Ctrl+_` used to be undo on the command line. Type a few words, press `Ctrl+-`, and
+     confirm the font shrinks **and the undo does not happen**. This is intended (same class
+     as `Ctrl+1`-`Ctrl+9`); if it proves too costly in the field, the fix is to drop the row
+     from the keys.ts table, not to special-case it. `Ctrl+Shift+-` is *not* intercepted, so
+     whatever that sends still reaches the shell.
+   - **`Ctrl+0` is not a workspace switch** — with several workspaces open, `Ctrl+0` only
+     resets the font (workspace ordinals stay `Ctrl+1`-`Ctrl+9`).
+
+2. **needsInput toast — fires only while the window is unfocused.** The chime already covers
+   the focused case; the toast exists for the moment winmux is *not* the window you are
+   looking at. It rides the same onset rule as the chime
+   ([`apps/winmux/src/chime.ts`](../apps/winmux/src/chime.ts), `detectNeedsInputOnset`), so
+   drive it the same way: let an agent (Claude Code) reach a state where it waits for you —
+   a permission prompt is the easiest.
+   - **Unfocused → toast** — click another window (an editor, Explorer) so winmux loses
+     focus, then let the agent hit needsInput. A Windows toast appears bottom-right with the
+     title `winmux — <workspace name>` and, as the body, the **first line** of the agent's
+     last message; with no message recorded the body reads `agent needs your input`. The
+     workspace name is the point of the notification — it is how you know which project is
+     waiting.
+   - **Focused → no toast, chime only** — repeat with winmux focused (click into a terminal
+     first): the chime plays and the sidebar highlights, but **no toast appears**. A toast
+     on top of the window you are already reading is noise, so this half is as much of a
+     requirement as the first.
+   - **One toast per workspace, one chime per batch** — with two workspaces entering
+     needsInput in the same snapshot while unfocused, expect two toasts and a single chime.
+     Staying in needsInput (later redraws, tab activity) produces neither — only the rising
+     transition notifies.
+   - **Sender identity for an unsigned standalone exe** *(field item — report what you see)*
+     — the toast is issued under the bundle identifier `app.winmux.desktop`, and Windows
+     resolves the displayed sender from an installed app registration. A standalone,
+     unsigned, never-installed `winmux-app.exe` may therefore show a generic or missing
+     sender, and may land in the Action Center under an odd name. Note the exact sender text
+     and whether the toast reaches the Action Center at all; if it looks wrong, report it
+     rather than working around it — the fix would be a registration/shortcut question, not
+     an app-code one.
+   - **Failure stays silent by design** — if notifications are turned off for the app
+     (Settings → System → Notifications) or Focus Assist swallows them, nothing else may
+     break: the chime still plays, the UI keeps working, and the only trace is a
+     `console.debug` line (`needsInput toast failed`) in the dev console. Confirm that, and
+     treat it as correct behavior rather than a defect — the toast is an auxiliary signal,
+     same discipline as the chime.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

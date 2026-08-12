@@ -32,6 +32,12 @@
 //   (현재 send-mode 는 UI 진입점이 없어 휴면이라 이 선점은 실제로 일어나지
 //   않는다 — keys.ts 가로채기 표 참조.)
 //
+// 글꼴은 모듈 수준 상태다 (뷰가 탭마다 새로 생기므로): settings.json 부팅값을
+// applyTerminalSettings 가 심고, 런타임 줌(`Ctrl+=`/`Ctrl+-`/`Ctrl+0`)은
+// adjustFontSize/resetFontSize 가 살아있는 뷰 레지스트리 전체에 건다. 줌은 **세션
+// 한정**이라 settings.json 에 되쓰지 않는다 (adjustFontSize 주석 참조). 키 판정
+// 자체는 keys.ts(가로채기 표가 정본) + main.ts 글루 소관이다.
+//
 // 세션 수명은 dispatcher(CloseTab/ClosePane/CloseWorkspace) 소유다 — dispose 는
 // 뷰만 해제하고 세션을 죽이지 않는다.
 
@@ -96,9 +102,59 @@ const DEFAULT_FONT_FAMILY = "Consolas, 'Cascadia Mono', monospace";
 const DEFAULT_FONT_SIZE = 13;
 
 /** 현재 적용 중인 폰트 — 모듈 수준 상태다. 뷰가 탭마다 새로 생기므로 인스턴스가
- *  아니라 모듈이 들고 있어야 이후 만들어지는 모든 뷰에 같은 값이 적용된다. */
+ *  아니라 모듈이 들고 있어야 이후 만들어지는 모든 뷰에 같은 값이 적용된다.
+ *  fontSize 는 줌(Ctrl+= / Ctrl+-)이 움직이는 **유효 크기**이고, baseFontSize 는
+ *  줌 리셋(Ctrl+0)이 돌아갈 부팅값(settings.json 또는 기본값)이다. */
 let fontFamily = DEFAULT_FONT_FAMILY;
 let fontSize = DEFAULT_FONT_SIZE;
+let baseFontSize = DEFAULT_FONT_SIZE;
+
+/** 줌 클램프 범위 — **백엔드와의 동기화 계약**: `src-tauri/src/commands.rs` 의
+ *  `FONT_SIZE_RANGE`(6..=72)와 같은 값이어야 한다. 그쪽은 settings.json 의
+ *  fontSize 를 검증해 범위 밖이면 부트에서 에러로 표면화하고, 여기는 런타임 줌이
+ *  그 범위를 넘지 않게 막는다 — 갈라지면 줌으로만 도달 가능한 크기가 생겨
+ *  "설정으로는 못 쓰는 값이 화면에는 있는" 비일관이 된다. 한쪽을 바꾸면 둘 다 바꾼다. */
+const FONT_SIZE_MIN = 6;
+const FONT_SIZE_MAX = 72;
+
+/** 살아있는 TerminalView 레지스트리 — 줌은 "지금 열려 있는 모든 터미널"에
+ *  동시에 걸리므로 인스턴스 목록이 필요하다. 등록·해제는 생성자와 dispose 가
+ *  짝으로 맡는다 (dispose 된 뷰가 남아 이미 죽은 xterm 을 건드리지 않게). */
+const liveViews = new Set<TerminalView>();
+
+/** 줌 후 글꼴 크기 (순수) — 클램프 규칙의 단일 소스라 테스트가 여기를 잡는다.
+ *  정수 px 로 유지한다 (xterm 이 소수 크기도 받지만 셀 폭 반올림이 fit 계산과
+ *  어긋나기 쉽다). 범위를 벗어난 요청은 에러가 아니라 경계에 멈춘다 — 키를 더
+ *  눌러도 아무 일이 없는 것 자체가 피드백이다 (키보드 조작의 조용한 no-op 규율). */
+export function clampFontSize(size: number): number {
+  return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(size)));
+}
+
+/** 줌 ±1px (`Ctrl+=` / `Ctrl+-`) — 현재 유효 크기에 delta 를 더해 클램프하고,
+ *  살아있는 모든 뷰에 적용한다. 이후 새로 열리는 탭도 모듈 상태를 읽으므로 같은
+ *  크기로 열린다 (한 창 안에서 탭마다 글꼴이 다른 상태를 만들지 않는다).
+ *
+ *  **줌은 세션 한정이다 — settings.json 에 되쓰지 않는다** (백로그 결정
+ *  2026-08-12). 줌은 "지금 이 화면을 잠깐 키우는" 조작이고 영구 설정은 파일이
+ *  담당한다: 되쓰면 임시 확대가 다음 부팅의 기본값이 되고, 손으로 쓴 설정 파일을
+ *  앱이 말없이 고치게 된다. 영구 변경은 settings.json 을 직접 고치는 경로다. */
+export function adjustFontSize(delta: number): void {
+  applyFontSize(clampFontSize(fontSize + delta));
+}
+
+/** 줌 리셋 (`Ctrl+0`) — settings.json 부팅값(설정이 없으면 기본 13px)으로 되돌린다.
+ *  "0 = 원래대로"의 원래는 앱 기본값이 아니라 **사용자가 설정한 값**이다. */
+export function resetFontSize(): void {
+  applyFontSize(baseFontSize);
+}
+
+/** 모듈 상태 갱신 + 전 인스턴스 반영. 값이 그대로면(경계에 걸렸거나 이미 그 크기)
+ *  아무 것도 하지 않는다 — 무변경 refit 은 PTY resize 왕복만 낭비한다. */
+function applyFontSize(size: number): void {
+  if (size === fontSize) return;
+  fontSize = size;
+  for (const view of liveViews) view.setFontSize(size);
+}
 
 /** settings.json 의 폰트 설정을 적용한다 (main.ts 부트가 **뷰 생성 전에** 1회
  *  호출). null 필드는 미설정이라 기본값을 유지한다.
@@ -112,7 +168,11 @@ let fontSize = DEFAULT_FONT_SIZE;
  *  남는 비일관이 생긴다. */
 export function applyTerminalSettings(settings: UiSettings): void {
   if (settings.fontFamily !== null) fontFamily = settings.fontFamily;
-  if (settings.fontSize !== null) fontSize = settings.fontSize;
+  if (settings.fontSize !== null) {
+    fontSize = settings.fontSize;
+    // 줌 리셋의 복귀 지점 — 이 호출이 부팅 1회이므로 여기가 "기본값"의 정의다.
+    baseFontSize = settings.fontSize;
+  }
 }
 
 export class TerminalView {
@@ -173,6 +233,20 @@ export class TerminalView {
     this.batcher = new AckBatcher((n) => {
       this.sendAck(n);
     });
+    // 줌 대상 등록 — 해제는 dispose 가 짝으로 맡는다.
+    liveViews.add(this);
+  }
+
+  /** 글꼴 크기 적용 (줌 경로 전용 — 모듈의 adjustFontSize/resetFontSize 가 부른다).
+   *  크기가 바뀌면 셀 치수가 바뀌므로 곧바로 refit 해 cols/rows 를 다시 잡는다
+   *  (기존 fit 경로 재사용 — scheduleFit 의 rAF 코얼레싱을 그대로 탄다. 그 결과
+   *  term.onResize → resizeTerminal 로 PTY 에도 새 크기가 나간다).
+   *  숨은 뷰의 fit 은 크기 0 가드로 스킵되지만, 다시 보일 때 setVisible 이
+   *  scheduleFit 을 걸어 따라잡는다 — 옵션 값은 지금 심어 두므로 유실은 없다. */
+  setFontSize(size: number): void {
+    if (this.disposed) return;
+    this.term.options.fontSize = size;
+    this.scheduleFit();
   }
 
   /** keep-alive 가시성 토글 — display 만 바꾼다 (채널·ack 은 계속 돈다).
@@ -350,6 +424,7 @@ export class TerminalView {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    liveViews.delete(this);
     // 백엔드 채널 슬롯도 분리한다 — 채널을 남겨두면 이후 출력이 Delivered 인데
     // ack 는 없는 상태로 pending 이 쌓여 백그라운드 세션이 paused 에 고착된다
     // (리뷰 finding). 분리 후 출력은 Dropped(detach 모드)로 보상 롤백되며 replay

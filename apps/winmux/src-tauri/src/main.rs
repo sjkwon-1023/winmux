@@ -56,6 +56,11 @@ fn main() {
     let window_hidden = AtomicBool::new(false);
 
     tauri::Builder::default()
+        // OS 알림 플러그인 — needsInput 토스트(`commands::notify_toast`)의 백엔드다.
+        // 프론트는 플러그인의 JS API 를 직접 쓰지 않고 글루 커맨드만 부르지만,
+        // capabilities/default.json 에 `notification:default` 를 함께 둔다 (플러그인
+        // 등록과 ACL 을 한 벌로 유지 — 나중에 JS 쪽을 쓰게 돼도 조용히 막히지 않는다).
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let sessions = Arc::new(SessionManager::new());
@@ -237,6 +242,8 @@ fn main() {
             commands::get_ui_settings,
             // 워크스페이스 폴더 선택 (Windows 네이티브 대화상자).
             commands::pick_workspace_folder,
+            // needsInput OS 토스트 — 창이 비포커스일 때만 프론트가 부른다.
+            commands::notify_toast,
             // 뷰어 파일 접근 (21단계) — 읽기 전용 콘텐츠 플레인.
             commands::fs_list_dir,
             commands::fs_stat,

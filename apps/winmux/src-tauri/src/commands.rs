@@ -21,6 +21,7 @@ use std::time::UNIX_EPOCH;
 
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 use winmux_core::command::{Command, CommandError, CommandOutput};
 use winmux_core::session::{PtySession, SessionId};
 use winmux_core::wslpath;
@@ -331,6 +332,29 @@ pub fn get_ui_settings(app: AppHandle) -> Result<UiSettings, String> {
 #[tauri::command]
 pub fn reset_ui(state: State<'_, AppState>) {
     state.reset.reset_now();
+}
+
+/// needsInput OS 토스트 (백로그 2026-08-11) — `tauri-plugin-notification` 으로
+/// 제목·본문 두 줄짜리 알림 하나를 띄운다.
+///
+/// **언제 부를지는 전적으로 프론트 계약이다**: `main.ts` 의 `notifyNeedsInput` 이
+/// needsInput 상승 전이(`chime.ts::detectNeedsInputOnset` 의 `onsets`)이면서
+/// `document.hasFocus()` 가 false 일 때만 부른다 — 창을 보고 있는 사용자에게는
+/// 차임이면 충분하다. 여기서 포커스를 다시 판정하지 않는 이유는 Tauri 쪽 포커스
+/// 신호(`on_window_event`)가 리셋 정책 전용의 별개 경로라, 판정을 두 곳에 두면
+/// 두 사실이 어긋나기 때문이다.
+///
+/// 실패는 사유 문자열 그대로 올린다 — 호출측은 console 로만 남긴다 (알림은 차임과
+/// 같은 부가 신호라 실패가 UI 동작을 막으면 안 된다). 상태도 Dispatcher lock 도
+/// 타지 않고, 호출 빈도가 전이당 1회라 sync 커맨드로 둔다.
+#[tauri::command]
+pub fn notify_toast(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|err| format!("cannot show the notification: {err}"))
 }
 
 /// `pick_workspace_folder` 응답 — 고른 폴더를 워크스페이스 생성 인자로 편 형태.

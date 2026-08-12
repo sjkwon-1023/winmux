@@ -65,7 +65,7 @@ describe("keyAction", () => {
     expect(keyAction(spec({ key: "ArrowLeft", alt: true, isComposing: true }))).toBeNull();
   });
 
-  it("shift 변형은 Ctrl+Shift+Tab 과 Ctrl+Shift+<문자>만 허용한다 — 숫자·방향키의 shift 조합은 null", () => {
+  it("shift 변형은 Ctrl+Shift+Tab · Ctrl+Shift+<문자> · 확대의 + 만 허용한다 — 숫자·방향키의 shift 조합은 null", () => {
     expect(keyAction(spec({ key: "1", ctrl: true, shift: true }))).toBeNull();
     expect(keyAction(spec({ key: "ArrowRight", alt: true, shift: true }))).toBeNull();
   });
@@ -153,6 +153,42 @@ describe("keyAction", () => {
     expect(keyAction(spec({ key: "N", ctrl: true, shift: true, isComposing: true }))).toBeNull();
   });
 
+  it("줌 3키는 plain Ctrl 계열이다 — Ctrl+= / Ctrl+- / Ctrl+0", () => {
+    expect(keyAction(spec({ key: "=", ctrl: true }))).toEqual({ type: "zoom", delta: 1 });
+    expect(keyAction(spec({ key: "-", ctrl: true }))).toEqual({ type: "zoom", delta: -1 });
+    expect(keyAction(spec({ key: "0", ctrl: true }))).toEqual({ type: "zoomReset" });
+  });
+
+  it("확대는 + 로 와도 같은 동작이다 — US 배열에서 + 는 Shift+= 로 온다", () => {
+    expect(keyAction(spec({ key: "+", ctrl: true, shift: true }))).toEqual({
+      type: "zoom",
+      delta: 1,
+    });
+    // shift 없이 + 를 주는 레이아웃도 있으므로 그쪽도 받는다.
+    expect(keyAction(spec({ key: "+", ctrl: true }))).toEqual({ type: "zoom", delta: 1 });
+  });
+
+  it("축소·리셋은 shift 변형을 받지 않는다 — Shift 결과 문자(_ 나 ))는 터미널 소유", () => {
+    expect(keyAction(spec({ key: "-", ctrl: true, shift: true }))).toBeNull();
+    expect(keyAction(spec({ key: "_", ctrl: true, shift: true }))).toBeNull();
+    expect(keyAction(spec({ key: "0", ctrl: true, shift: true }))).toBeNull();
+    expect(keyAction(spec({ key: ")", ctrl: true, shift: true }))).toBeNull();
+  });
+
+  it("줌 3키는 Ctrl 이 빠지거나 Alt 가 섞이면 매칭되지 않는다 — IME 조합 중도 마찬가지", () => {
+    expect(keyAction(spec({ key: "=" }))).toBeNull();
+    expect(keyAction(spec({ key: "-" }))).toBeNull();
+    expect(keyAction(spec({ key: "0" }))).toBeNull();
+    expect(keyAction(spec({ key: "=", ctrl: true, alt: true }))).toBeNull();
+    expect(keyAction(spec({ key: "-", ctrl: true, alt: true }))).toBeNull();
+    expect(keyAction(spec({ key: "0", ctrl: true, alt: true }))).toBeNull();
+    expect(keyAction(spec({ key: "0", ctrl: true, isComposing: true }))).toBeNull();
+  });
+
+  it("Ctrl+0 은 워크스페이스 전환으로 새지 않는다 — ordinal 은 1~9 뿐이다", () => {
+    expect(keyAction(spec({ key: "0", ctrl: true }))).toEqual({ type: "zoomReset" });
+  });
+
   it("모디파이어가 어긋난 조합은 null — 맨 키·Ctrl+Alt 혼합·Alt+Ctrl 방향키", () => {
     expect(keyAction(spec({ key: "1" }))).toBeNull();
     expect(keyAction(spec({ key: "Tab" }))).toBeNull();
@@ -162,8 +198,8 @@ describe("keyAction", () => {
     expect(keyAction(spec({ key: "ArrowLeft", alt: true, ctrl: true }))).toBeNull();
   });
 
-  it("가로채기 목록 밖의 키는 null — Ctrl+0, Ctrl+Shift+R(리로드), Esc, 일반 문자", () => {
-    expect(keyAction(spec({ key: "0", ctrl: true }))).toBeNull();
+  // Ctrl+0 은 v0.3.4 부터 줌 리셋이다 (종전 "미배정" — 위 줌 블록 테스트가 잡는다).
+  it("가로채기 목록 밖의 키는 null — Ctrl+Shift+R(리로드), Esc, 일반 문자", () => {
     expect(keyAction(spec({ key: "R", ctrl: true, shift: true }))).toBeNull();
     expect(keyAction(spec({ key: "Escape" }))).toBeNull();
     expect(keyAction(spec({ key: "c", ctrl: true }))).toBeNull();

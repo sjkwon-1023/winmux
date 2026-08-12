@@ -94,6 +94,15 @@ export function resetUi(): Promise<void> {
   return invoke<void>("reset_ui");
 }
 
+/** needsInput OS 토스트 — 제목·본문 그대로 Windows 알림 하나를 띄운다.
+ *  **언제 부를지의 판정은 호출측(main.ts notifyNeedsInput) 계약이다**: needsInput
+ *  상승 전이이면서 창이 비포커스일 때만 부른다. 실패는 사유 문자열로 reject 되고
+ *  호출측은 console 로만 남긴다 — 알림은 차임과 같은 부가 신호라 실패가 UI 동작을
+ *  막지 않는다. */
+export function notifyToast(title: string, body: string): Promise<void> {
+  return invoke<void>("notify_toast", { title, body });
+}
+
 // --- UI 설정 (settings.json) --------------------------------------------------
 
 /** 백엔드 `UiSettings` 의 프론트 미러 — 필드명은 camelCase 계약(Rust 쪽

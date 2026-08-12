@@ -24,6 +24,9 @@
 // | `Ctrl+Shift+E` | 활성 pane 좌우 분할 + 터미널 탭 | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+N` | 새 워크스페이스 — 활성 터미널의 현재 경로로 즉시 생성 (임의 폴더는 사이드바 + 버튼의 픽커) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+[` / `Ctrl+Shift+]` | 이전/다음 워크스페이스 (사이드바 순서, 끝에서 순환) | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+=` / `Ctrl++` | 터미널 글꼴 확대 (세션 한정 — settings.json 은 그대로) | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+-` | 터미널 글꼴 축소 (세션 한정) | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+0` | 터미널 글꼴 크기를 settings.json 기본값으로 리셋 | keys.ts 판정 + main.ts window keydown capture |
 // | `F2` | 활성 워크스페이스 이름 변경 (사이드바 카드 인라인 편집) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+R` | WebView 리로드 (F5 는 쓰지 않는다 — main.ts 주석 참조) | main.ts installReloadKey |
 // | `Ctrl+V` / `Ctrl+Shift+V` / `Shift+Insert` | 붙여넣기 (클립보드 → xterm paste) | terminal-view.ts customKeyEventHandler |
@@ -42,6 +45,13 @@
 // (terminal-view 소유), `Ctrl+Shift+R` 은 리로드(main.ts 소유)라 여기서 판정하지
 // 않는다.
 //
+// **줌 3키의 예외 (명시)**: `Ctrl+=` · `Ctrl+-` · `Ctrl+0` 은 위 규약을 깨고 plain
+// `Ctrl` 계열이다 — 확대/축소/원래대로는 브라우저·에디터 전반의 관례라 `Ctrl+Shift`
+// 로 옮기면 아무도 찾지 못한다. 대가는 알고 받아들인다: `Ctrl+-` 는 터미널의 `C-_`
+// (bash·emacs 의 undo)를 가려 그 앱들에 영영 닿지 않고, `Ctrl+=`·`Ctrl+0` 도 같은
+// 값을 쓰는 앱에서 마찬가지다. `Ctrl+1`~`Ctrl+9` 와 같은 트레이드오프 계열이다
+// (되돌린다면 이 표와 keyAction 의 줌 블록을 함께 고친다).
+//
 // **`F2` 의 트레이드오프 (명시)**: 무수식 F2 는 터미널 앱이 실제로 쓰는 키다
 // (mc 의 Rename, 기능키 행을 쓰는 TUI) — 가로채면 그 앱들에 F2 가 영영 닿지
 // 않는다. 이 비용을 알고 받아들인 선택이다: "이름 변경 = F2" 는 데스크톱 전반의
@@ -50,8 +60,9 @@
 // 자리라 여기 남긴다 — 이름 변경에는 동급의 관례 대체 키가 없다. 되돌린다면
 // 이 표와 CTRL_SHIFT_KEYS 를 함께 고치면 된다 (판정·표시 단일 소스).
 //
-// shift 규약: shift 를 받는 조합은 `Ctrl+Shift+Tab` 과 위 `Ctrl+Shift+<문자>`
-// 8종뿐이다. `Ctrl+Shift+1`·`Alt+Shift+←` 같은 변형은 판정 대상이 아니다(null) —
+// shift 규약: shift 를 받는 조합은 `Ctrl+Shift+Tab` · 위 `Ctrl+Shift+<문자>` 8종 ·
+// 확대 키의 `+`(US 배열에서 `Shift+=` 로 오는 문자)뿐이다.
+// `Ctrl+Shift+1`·`Alt+Shift+←` 같은 변형은 판정 대상이 아니다(null) —
 // shift 는 레이아웃에 따라 다른 문자를 만들 수 있어 보수적으로 목록에 명시된
 // 조합만 가로챈다. `[`·`]` 는 그 예외를 정면으로 만나는 자리라 표기 문자와
 // **shift 결과 문자**(`{`·`}`)를 둘 다 매칭한다 (아래 CTRL_SHIFT_KEYS 참조).
@@ -94,7 +105,12 @@ export type KeyAction =
   | { type: "newWorkspaceHere" }
   /** 활성 워크스페이스 이름의 인라인 편집 시작 — dispatch 가 아닌 UI 액션이다
    *  (편집 확정 시점에 글루가 renameWorkspace 를 보낸다). */
-  | { type: "renameWorkspace" };
+  | { type: "renameWorkspace" }
+  /** 터미널 글꼴 크기 ±1px (`Ctrl+=`/`Ctrl++` · `Ctrl+-`). 클램프·적용은
+   *  terminal-view 의 모듈 상태 소관이고, 상태 스냅샷과 무관한 UI 액션이다. */
+  | { type: "zoom"; delta: 1 | -1 }
+  /** 터미널 글꼴 크기를 settings.json 기본값으로 되돌린다 (`Ctrl+0`). */
+  | { type: "zoomReset" };
 
 const ARROW_DIRS: Record<string, PaneDirection | undefined> = {
   ArrowUp: "up",
@@ -103,7 +119,8 @@ const ARROW_DIRS: Record<string, PaneDirection | undefined> = {
   ArrowRight: "right",
 };
 
-/** 워크스페이스 전환 키의 ordinal 범위 (`Ctrl+1`~`Ctrl+9` — `Ctrl+0` 은 미배정). */
+/** 워크스페이스 전환 키의 ordinal 범위 (`Ctrl+1`~`Ctrl+9` — `Ctrl+0` 은 이 범위가
+ *  아니라 줌 리셋이다. 아래 줌 블록이 먼저 판정한다). */
 const DIGIT_KEY = /^[1-9]$/;
 
 /** `Ctrl+Shift+<문자>` 단축키의 식별자 — 툴팁이 라벨을 요청할 때 쓰는 키다. */
@@ -194,6 +211,19 @@ export function keyAction(spec: KeySpec): KeyAction | null {
     const letter = spec.key.toLowerCase();
     for (const def of Object.values(CTRL_SHIFT_KEYS)) {
       if (def.letter === letter || def.shifted === letter) return def.action();
+    }
+  }
+  // 터미널 줌 3키 — plain Ctrl 계열이다 (파일 상단 "줌 3키의 예외" 참조).
+  // `+` 는 US 배열에서 `Shift+=` 로 오므로 확대만 shift 를 허용한다: 사용자는
+  // `Ctrl` 을 쥔 채 `+` 라고 적힌 키를 누르지, `=` 를 누른다고 생각하지 않는다.
+  // 축소·리셋은 shift 없이만 받는다 (`Ctrl+Shift+-` 의 `_`, `Ctrl+Shift+0` 의 `)`
+  // 는 판정 대상이 아니고 그대로 터미널로 간다).
+  if (spec.ctrl && !spec.alt) {
+    if (spec.key === "+") return { type: "zoom", delta: 1 };
+    if (!spec.shift) {
+      if (spec.key === "=") return { type: "zoom", delta: 1 };
+      if (spec.key === "-") return { type: "zoom", delta: -1 };
+      if (spec.key === "0") return { type: "zoomReset" };
     }
   }
   // 여기부터는 shift 변형을 받지 않는다 (파일 상단 shift 규약).
