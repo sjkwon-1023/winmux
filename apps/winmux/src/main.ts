@@ -35,6 +35,7 @@ import { Store } from "./store";
 import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
 import { adjustFontSize, applyTerminalSettings, resetFontSize } from "./terminal-view";
+import { applyHighlightSettings } from "./text-view";
 import { initWindowVisibility } from "./window-visibility";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { AgentStatus, Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
@@ -179,14 +180,17 @@ class App {
       console.error("window visibility listen failed", err);
     });
     this.installNavKeys();
-    // 터미널 폰트 설정 — **store.init() 앞**이어야 한다. 터미널 뷰는 첫 스냅샷
-    // 렌더부터 생기므로 그 전에 모듈 기본값을 갈아 끼워야 모든 탭이 같은 폰트로
-    // 열린다 (applyTerminalSettings 의 순서 계약). 읽기 실패(파싱 오류·범위 밖
-    // 값)는 사유를 상태 라인에 띄우고 **기본 폰트로 진행한다** — 폰트 설정 하나로
-    // 부트를 막지 않는다 (활동 핑·창 가시성과 같은 규율). 파일이 없는 경우는
-    // 에러가 아니라 전부 null 인 기본값으로 온다.
+    // UI 설정(터미널 폰트 + 뷰어 하이라이트 언어) — **store.init() 앞**이어야
+    // 한다. 뷰는 첫 스냅샷 렌더부터 생기므로 그 전에 모듈 기본값을 갈아 끼워야
+    // 모든 탭이 같은 설정으로 열린다 (applyTerminalSettings·applyHighlightSettings
+    // 의 순서 계약). 읽기 실패(파싱 오류·범위 밖 값·모르는 언어 이름)는 사유를
+    // 상태 라인에 띄우고 **기본값으로 진행한다** — 설정 하나로 부트를 막지 않는다
+    // (활동 핑·창 가시성과 같은 규율). 파일이 없는 경우는 에러가 아니라 전부
+    // null 인 기본값으로 온다.
     try {
-      applyTerminalSettings(await getUiSettings());
+      const settings = await getUiSettings();
+      applyTerminalSettings(settings);
+      applyHighlightSettings(settings);
     } catch (err) {
       console.error("get_ui_settings failed", err);
       this.showError(formatCommandError(err));
@@ -242,6 +246,13 @@ class App {
     }
     if (action.type === "renameWorkspace") {
       this.sidebar.beginRename();
+      return;
+    }
+    // 워크스페이스 닫기는 사이드바 × 버튼의 구현을 그대로 부른다 — confirm 조건
+    // (실행 중인 터미널 세션 유무)과 문구가 두 벌로 갈라지지 않게 하기 위해서다.
+    // 활성 워크스페이스가 없으면 사이드바 쪽에서 조용한 no-op 이 된다.
+    if (action.type === "closeWorkspace") {
+      this.sidebar.closeActive();
       return;
     }
     // 줌도 스냅샷 가드 앞이다 — 글꼴 크기는 모델 상태가 아니라 terminal-view 의

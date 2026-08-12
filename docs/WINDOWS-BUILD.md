@@ -1250,6 +1250,69 @@ Note, as with v0.3.3: recording starts with the **first turn after this build's 
 (v7). A Codex thread that ran before the update left no record, so the first restart after
 updating shows no Codex hint yet — run one turn through Codex first, then restart.
 
+### v0.3.6 — verification
+
+The v0.3.6 batch. Items are independent — run them in any order on a build of this batch.
+
+1. **Close the active workspace — `Ctrl+Shift+Q`** (the interception row lives in the
+   [`apps/winmux/src/keys.ts`](../apps/winmux/src/keys.ts) module doc; the key runs the
+   sidebar `×` button's implementation, so the two can never disagree).
+   - **Confirm appears while sessions are running** — in a workspace with at least one live
+     terminal (a shell prompt counts), press `Ctrl+Shift+Q`: the same dialog the `×` button
+     shows appears, naming the workspace — `Close workspace "<name>"? All terminal sessions
+     in it will be killed.`
+   - **Cancel changes nothing** — dismiss the dialog and confirm the workspace is still
+     there, still active, with its panes, tabs and scrollback intact, and the shells still
+     alive (`echo $$` gives the same pid as before).
+   - **Accept closes it** — confirm the dialog and the workspace card disappears, the view
+     switches to whatever workspace the core makes active, and keyboard focus lands in a
+     terminal there (typing goes into the shell, not nowhere).
+   - **A workspace with no running sessions closes immediately** — in a workspace whose
+     terminals have all exited (`exit` in each) or that only has viewer tabs, press
+     `Ctrl+Shift+Q`: it closes with **no dialog** (there is nothing to kill, so the warning
+     would be a lie).
+   - **The last workspace behaves exactly as the `×` button does** — close the only
+     remaining workspace with the key and confirm you get the same result as clicking `×`
+     on it (no special-casing was added for the keyboard path).
+   - **Nothing leaks into the terminal** — at a shell prompt with an empty command line,
+     press `Ctrl+Shift+Q` and cancel: the command line stays **empty**. Note the shell's own
+     `Ctrl+Q` (XON) is untouched — only the `Shift` variant is intercepted.
+   - **The `×` tooltip advertises the key** — hover the `×` on a workspace card: the tooltip
+     reads `Close workspace (Ctrl+Shift+Q)`.
+   - **WebView2 delivers it** — this combo was not in the set
+     [ADR-0007](adr/0007-keyboard-model.md) cleared on 2026-08-10, and `Ctrl+Shift+Q` is a
+     browser quit accelerator on some platforms. The first bullet already proves delivery
+     (no dialog = the WebView ate the key); if it ever regresses, the fix is
+     `AreBrowserAcceleratorKeysEnabled(false)`, not a different binding.
+
+2. **Syntax highlighting in the text viewer** — highlighting is an overlay on the existing
+   plain renderer, and every item below is about it staying an overlay. Use a folder tab to
+   open the files (the highlighter is chosen by extension, not by content).
+
+   - **Plain first, colour after** — open a real `.py` or `.rs` source file of a few hundred
+     lines. The text must appear **immediately**, uncoloured, and the colours arrive a moment
+     later on their own; scrolling and typing elsewhere stay responsive the whole time. A
+     visible wait before the text appears is a failure, not a slow machine.
+   - **The colours match the app** — token colours are VS Code's dark palette on the viewer's
+     own background: the background does **not** change to a lighter block, the line grid does
+     not shift, and the horizontal scroll of long lines still works.
+   - **Unsupported extensions stay plain** — open a `.txt`, a `.log` and a file with no
+     extension at all: they render exactly as before, in one colour, with no delay.
+   - **`settings.json` picks the languages** — with the app closed, write
+     `%AppData%\app.winmux.desktop\settings.json` as `{"highlightLanguages": ["python"]}` and
+     relaunch: a `.py` file is coloured and a `.rs` file is now plain. Change it to `[]` and
+     relaunch → nothing is coloured anywhere. Remove the key (or the file) and relaunch → the
+     default set is back and both files are coloured again.
+   - **A bad language name reports itself** — `{"highlightLanguages": ["pyton"]}` and relaunch:
+     the status line shows an `unsupported language "pyton"` error listing the supported names,
+     and **the app still boots** with default fonts and default highlighting (same loud-fail
+     rule as `fontSize`).
+   - **Large files stay responsive** — open a source file bigger than ~256 KiB (or use the
+     window buttons to page into one): the window renders immediately and stays plain — that
+     is the intended cap, not a bug. Paging with the window buttons and `Ctrl+PageUp/PageDown`
+     is as fast as before, and moving quickly between windows never leaves colours from the
+     previous window behind.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

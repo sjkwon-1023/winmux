@@ -8,8 +8,9 @@
 // happy-dom 은 이 파일 전용 환경이다 (상단 @vitest-environment) — 나머지 프론트
 // 테스트는 계속 DOM 없는 node 환경에서 돈다.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { shortcutLabel } from "./keys";
 import { Sidebar } from "./sidebar";
 import type {
   AgentStatus,
@@ -336,5 +337,66 @@ describe("Sidebar interaction across patches", () => {
     // 반대로 비활성이 된 ws 1 은 다시 전환을 보낸다.
     cards()[0].click();
     expect(dispatched).toEqual([{ type: "switchWorkspace", workspace: 1 }]);
+  });
+});
+
+describe("Sidebar close (× 버튼 · Ctrl+Shift+Q)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** confirm 을 고정 응답으로 갈아 끼운다 — 호출 인자까지 보기 위해 spy 를 돌려준다. */
+  function stubConfirm(answer: boolean): ReturnType<typeof vi.fn> {
+    const spy = vi.fn(() => answer);
+    vi.stubGlobal("confirm", spy);
+    return spy;
+  }
+
+  it("키 경로가 × 버튼과 같은 confirm·명령을 탄다 — 대상은 활성 워크스페이스", () => {
+    const confirmSpy = stubConfirm(true);
+    const { sidebar, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 2));
+
+    sidebar.closeActive();
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(confirmSpy.mock.calls[0][0]).toBe(
+      'Close workspace "ws 2"? All terminal sessions in it will be killed.',
+    );
+    expect(dispatched).toEqual([{ type: "closeWorkspace", workspace: 2 }]);
+  });
+
+  it("confirm 취소는 아무것도 보내지 않는다 — × 클릭과 키가 같은 판정", () => {
+    const confirmSpy = stubConfirm(false);
+    const { sidebar, cards, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 2));
+
+    sidebar.closeActive();
+    child(cards()[0], ".ws-card-close").click();
+
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(dispatched).toEqual([]);
+  });
+
+  it("활성 워크스페이스가 없으면 조용한 no-op — confirm 도 뜨지 않는다", () => {
+    const confirmSpy = stubConfirm(true);
+    const { sidebar, dispatched } = mount();
+    // 워크스페이스 0개(빈 상태) — 그리고 스냅샷이 아직 없는 부트 직후도 같은 경로.
+    sidebar.render(snapshot(1, [], null));
+
+    sidebar.closeActive();
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(dispatched).toEqual([]);
+  });
+
+  it("× 버튼 툴팁이 단축키를 표기한다 — keys.ts 단일 소스", () => {
+    const { sidebar, cards } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+
+    expect(child(cards()[0], ".ws-card-close").title).toBe(
+      `Close workspace (${shortcutLabel("closeWorkspace")})`,
+    );
+    expect(shortcutLabel("closeWorkspace")).toBe("Ctrl+Shift+Q");
   });
 });

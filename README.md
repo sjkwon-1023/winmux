@@ -61,10 +61,25 @@ npm run tauri build -- --no-bundle
 That leaves `winmux-app.exe` in the repo's `target\release\`. Use `npm run tauri dev` instead
 to run it with hot reload.
 
-The terminal font is the one thing you configure by hand — there is no settings screen. Write
-`%AppData%\app.winmux.desktop\settings.json` as `{"fontFamily": "Cascadia Code, monospace",
-"fontSize": 15}` and restart; either key may be left out, and a broken file reports itself in
-the status line instead of being silently ignored.
+Settings are edited by hand — there is no settings screen. Write
+`%AppData%\app.winmux.desktop\settings.json` and restart; any key may be left out, and a broken
+file reports itself in the status line instead of being silently ignored.
+
+```json
+{
+  "fontFamily": "Cascadia Code, monospace",
+  "fontSize": 15,
+  "highlightLanguages": ["python", "javascript", "typescript", "rust", "json", "toml", "css", "html"]
+}
+```
+
+`fontFamily`/`fontSize` set the terminal font. `highlightLanguages` picks which languages the
+text viewer syntax-highlights; the list above is also what you get when the key is absent, and
+those eight names are the entire supported set — an unknown name is reported rather than
+ignored. The language comes from the file extension (`.jsx` highlights as `javascript`, `.tsx`
+as `typescript`), and anything outside the set stays plain text. `[]` turns highlighting off.
+The highlighter is loaded on demand, so a session that never opens a matching file never pays
+for it.
 
 ## Setup
 

@@ -70,7 +70,7 @@ describe("keyAction", () => {
     expect(keyAction(spec({ key: "ArrowRight", alt: true, shift: true }))).toBeNull();
   });
 
-  it("Ctrl+Shift+<문자> 8종은 각 전역 단축키로 매핑된다", () => {
+  it("Ctrl+Shift+<문자> 9종은 각 전역 단축키로 매핑된다", () => {
     expect(keyAction(spec({ key: "W", ctrl: true, shift: true }))).toEqual({ type: "closeTab" });
     expect(keyAction(spec({ key: "T", ctrl: true, shift: true }))).toEqual({
       type: "newTab",
@@ -99,6 +99,9 @@ describe("keyAction", () => {
     expect(keyAction(spec({ key: "]", ctrl: true, shift: true }))).toEqual({
       type: "cycleWorkspace",
       delta: 1,
+    });
+    expect(keyAction(spec({ key: "Q", ctrl: true, shift: true }))).toEqual({
+      type: "closeWorkspace",
     });
   });
 
@@ -131,6 +134,9 @@ describe("keyAction", () => {
     expect(keyAction(spec({ key: "n", ctrl: true, shift: true }))).toEqual({
       type: "newWorkspaceHere",
     });
+    expect(keyAction(spec({ key: "q", ctrl: true, shift: true }))).toEqual({
+      type: "closeWorkspace",
+    });
   });
 
   it("Ctrl+Shift+C / Ctrl+Shift+V 는 절대 매칭되지 않는다 — 복사·붙여넣기 관례", () => {
@@ -141,11 +147,14 @@ describe("keyAction", () => {
   });
 
   it("Ctrl+Shift+<문자> 는 Alt 가 섞이거나 Shift 가 빠지면 매칭되지 않는다", () => {
-    // plain Ctrl 조합은 셸 소유다 (Ctrl+W 단어 삭제·Ctrl+D EOF).
+    // plain Ctrl 조합은 셸 소유다 (Ctrl+W 단어 삭제·Ctrl+D EOF·Ctrl+Q 흐름 제어 XON).
     expect(keyAction(spec({ key: "w", ctrl: true }))).toBeNull();
     expect(keyAction(spec({ key: "d", ctrl: true }))).toBeNull();
+    expect(keyAction(spec({ key: "q", ctrl: true }))).toBeNull();
     expect(keyAction(spec({ key: "W", ctrl: true, shift: true, alt: true }))).toBeNull();
     expect(keyAction(spec({ key: "W", shift: true }))).toBeNull();
+    expect(keyAction(spec({ key: "Q", ctrl: true, shift: true, alt: true }))).toBeNull();
+    expect(keyAction(spec({ key: "Q", shift: true }))).toBeNull();
   });
 
   it("IME 조합 중에는 Ctrl+Shift+<문자>도 가로채지 않는다", () => {
@@ -217,6 +226,7 @@ describe("shortcutLabel", () => {
     "newWorkspace",
     "prevWorkspace",
     "nextWorkspace",
+    "closeWorkspace",
   ] as const;
 
   it("툴팁 라벨은 Ctrl+Shift+<대문자> 형식이다", () => {
@@ -226,6 +236,7 @@ describe("shortcutLabel", () => {
     expect(shortcutLabel("splitTopBottom")).toBe("Ctrl+Shift+D");
     expect(shortcutLabel("splitLeftRight")).toBe("Ctrl+Shift+E");
     expect(shortcutLabel("newWorkspace")).toBe("Ctrl+Shift+N");
+    expect(shortcutLabel("closeWorkspace")).toBe("Ctrl+Shift+Q");
     // 문자가 아닌 키는 대문자 변환이 항등이다 — 표기가 그대로 나간다.
     expect(shortcutLabel("prevWorkspace")).toBe("Ctrl+Shift+[");
     expect(shortcutLabel("nextWorkspace")).toBe("Ctrl+Shift+]");

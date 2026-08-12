@@ -258,12 +258,12 @@ pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
 // 앱을 재시작한다 (v0.3.1 범위). 그래서 이 커맨드는 부팅 때 한 번 불린다.
 // ---------------------------------------------------------------------------
 
-/// 설정 파일에서 오는 프론트 UI 설정 — 현재는 터미널 폰트뿐이다.
+/// 설정 파일에서 오는 프론트 UI 설정 — 터미널 폰트와 뷰어 하이라이트 언어 목록.
 ///
 /// 필드는 전부 `Option` 이고 **None = 미설정**(프론트의 기존 하드코딩 기본값을
 /// 그대로 쓴다)이다. serde 는 camelCase 로 읽고 쓴다 — 사용자가 손으로 쓰는
-/// 파일의 키(`fontFamily`/`fontSize`)와 프론트 미러 타입(`backend.ts` 의
-/// `UiSettings`)이 같은 이름이어야 하기 때문이다.
+/// 파일의 키(`fontFamily`/`fontSize`/`highlightLanguages`)와 프론트 미러 타입
+/// (`backend.ts` 의 `UiSettings`)이 같은 이름이어야 하기 때문이다.
 ///
 /// `deny_unknown_fields` 는 **일부러 걸지 않는다** — 뒤 버전이 넣을 키가 든
 /// 파일을 옛 빌드가 통째로 거부하면 폰트까지 같이 죽는다 (전방 호환).
@@ -274,11 +274,28 @@ pub struct UiSettings {
     pub font_family: Option<String>,
     /// xterm `fontSize` (px). [`FONT_SIZE_RANGE`] 밖이면 에러다.
     pub font_size: Option<u16>,
+    /// 텍스트 뷰어에서 구문 하이라이팅을 켤 언어 이름. [`HIGHLIGHT_LANGUAGES`]
+    /// 밖의 이름이 하나라도 있으면 에러이고, **빈 배열은 "끄기"** 로 유효하다.
+    pub highlight_languages: Option<Vec<String>>,
 }
 
 /// 허용 폰트 크기(px). 밖의 값은 조용히 조정하지 않고 **거부**한다 — 0 이나 5000
 /// 이 들어간 파일을 말없이 고쳐 쓰면 사용자는 자기가 쓴 값이 먹은 줄 안다.
 const FONT_SIZE_RANGE: std::ops::RangeInclusive<u16> = 6..=72;
+
+/// 구문 하이라이팅을 지원하는 언어 이름. 프론트가 언어당 하나씩 lazy-load 하는
+/// hljs 모듈 목록(`apps/winmux/src/text-view.ts` 의 `LANGUAGE_LOADERS`)과 **같은
+/// 목록이어야 한다** — 여기만 넓히면 로드할 모듈이 없는 이름이 통과한다.
+const HIGHLIGHT_LANGUAGES: [&str; 8] = [
+    "css",
+    "html",
+    "javascript",
+    "json",
+    "python",
+    "rust",
+    "toml",
+    "typescript",
+];
 
 /// 앱 설정 디렉터리(`%AppData%\app.winmux.desktop`)의 `settings.json` 을 읽는다.
 ///
@@ -320,6 +337,20 @@ pub fn get_ui_settings(app: AppHandle) -> Result<UiSettings, String> {
     if let Some(family) = &settings.font_family {
         if family.trim().is_empty() {
             return Err(format!("fontFamily in {} must not be blank", path.display()));
+        }
+    }
+    // 같은 loud-fail 규율: 오타 난 언어 이름("pyton")을 조용히 무시하면 사용자는
+    // 그 파일만 색이 안 붙는 이유를 영영 알 수 없다. 지원 목록을 같이 알려 준다.
+    if let Some(languages) = &settings.highlight_languages {
+        if let Some(unknown) = languages
+            .iter()
+            .find(|name| !HIGHLIGHT_LANGUAGES.contains(&name.as_str()))
+        {
+            return Err(format!(
+                "highlightLanguages in {} has an unsupported language {unknown:?} (supported: {})",
+                path.display(),
+                HIGHLIGHT_LANGUAGES.join(", ")
+            ));
         }
     }
     Ok(settings)

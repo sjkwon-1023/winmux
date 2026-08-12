@@ -35,9 +35,20 @@
 //
 // 리사이즈는 **자체 ResizeObserver** 로 받는다 (계획 프론트 계약): pane 의
 // observer 는 터미널 fit 전용이라 뷰어까지 겸하게 만들지 않는다.
+//
+// 구문 하이라이팅(v0.3.6)은 위 두 계약 **위에 덧입히는** 층이라 셋째 계약이 아니다:
+// 파일 열기는 언제나 플레인 렌더로 즉시 끝나고, highlight.js 는 **dynamic import
+// 로만** 들어와(앱 시작 경로·비대상 파일 경로에는 바이트가 하나도 실리지 않는다)
+// 로드가 끝난 뒤에 창 1개를 통째로 토큰화해 행별 HTML 을 캐시한다. 자세한 계약은
+// 아래 "구문 하이라이팅" 절에 있다.
+
+// highlight.js 는 **타입만** 정적으로 참조한다 (`import type` 은 컴파일에서
+// 지워져 런타임 코드가 남지 않는다) — 값은 전부 아래 dynamic import 로만 들어온다.
+import type { LanguageFn } from "highlight.js";
 
 import type { TimerHost } from "./ack-batcher";
 import { fsReadChunk, fsStat } from "./backend";
+import type { UiSettings } from "./backend";
 import type { KeySpec } from "./keys";
 import type { ViewerKind, ViewerView } from "./viewer-view";
 import type { Command, CommandOutput, TabId } from "./types";
@@ -411,6 +422,219 @@ function describeError(err: unknown): string {
   return typeof err === "string" ? err : String(err);
 }
 
+// ---------------------------------------------------------------------------
+// 구문 하이라이팅 (v0.3.6)
+//
+// 네 가지가 이 절의 설계를 지배한다.
+//
+// 1. **하이라이트를 쓰지 않는 경로의 런타임 비용은 0 이다.** highlight.js 는
+//    정적 import 가 **금지**다 — 정적으로 붙으면 앱 시작 번들에 실려 터미널만
+//    쓰는 사용자도 그 바이트를 파싱한다. 코어·언어 모듈·테마 CSS 는 전부 아래
+//    LANGUAGE_LOADERS 의 dynamic import 로만 들어오고, Vite 가 언어당 청크
+//    하나로 떼어 낸다. 설치 파일이 그만큼 커지는 것은 받아들인 트레이드오프다
+//    (사용자 요구).
+// 2. **열기는 절대 기다리지 않는다.** 로드는 창을 플레인으로 그린 **뒤에**
+//    시작하고, 끝나면 그 위에 덧입힌다. 도착 시점에 뷰가 dispose 됐거나 창이 이미
+//    바뀌었으면(loadToken 불일치) 조용히 버린다.
+// 3. **창 1개를 한 번에** 토큰화하고 행별로 쪼개 캐시한다 (백로그 설계 노트).
+//    행마다 따로 하이라이트하면 여러 행에 걸치는 구문(파이썬 삼중따옴표, 블록
+//    주석, 템플릿 리터럴)이 가상 스크롤 이음매마다 깨진다.
+// 4. **대상 판정은 확장자 명시 맵**이다 — highlightAuto 는 쓰지 않는다 (전 언어
+//    시도라 비싸고, 짧은 파일에서 자주 틀린다). 맵에 없거나 settings.json 의
+//    highlightLanguages 밖이면 **모듈 로드 자체를 하지 않는다**.
+// ---------------------------------------------------------------------------
+
+/** hljs 에서 우리가 쓰는 표면 — 테스트가 가짜를 넣을 수 있게 구조적으로 좁혔다. */
+export interface HighlightApi {
+  highlight(
+    code: string,
+    options: { language: string; ignoreIllegals?: boolean },
+  ): { value: string };
+}
+
+/** 언어 이름 → hljs 언어 모듈 로더. **키 목록이 곧 지원 언어의 정본**이고,
+ *  백엔드(`commands.rs` 의 `HIGHLIGHT_LANGUAGES`)가 settings.json 의 이름을 이
+ *  목록으로 검사한다 — 두 목록은 같이 움직여야 한다 (한쪽에만 있으면, 통과한
+ *  이름에 로드할 모듈이 없거나 로드할 수 있는 언어를 설정할 수 없다).
+ *
+ *  import 경로가 언어 이름과 다른 둘: HTML 은 hljs 의 `xml` 모듈이 처리하고,
+ *  TOML 은 `ini` 모듈이 처리한다 (등록은 우리 이름으로 하므로 highlight() 에
+ *  넘기는 언어 인자는 이 키 그대로다). */
+const LANGUAGE_LOADERS: Record<string, (() => Promise<{ default: LanguageFn }>) | undefined> = {
+  css: () => import("highlight.js/lib/languages/css"),
+  html: () => import("highlight.js/lib/languages/xml"),
+  javascript: () => import("highlight.js/lib/languages/javascript"),
+  json: () => import("highlight.js/lib/languages/json"),
+  python: () => import("highlight.js/lib/languages/python"),
+  rust: () => import("highlight.js/lib/languages/rust"),
+  toml: () => import("highlight.js/lib/languages/ini"),
+  typescript: () => import("highlight.js/lib/languages/typescript"),
+};
+
+/** settings.json 의 `highlightLanguages` 가 없을 때 켜는 언어.
+ *  주력 스택(python · Next.js/React · rust)과 그 인접 실무 파일이다. */
+export const DEFAULT_HIGHLIGHT_LANGUAGES: readonly string[] = [
+  "python",
+  "javascript",
+  "typescript",
+  "rust",
+  "json",
+  "toml",
+  "css",
+  "html",
+];
+
+/** 확장자(점 없는 소문자) → 언어 이름. jsx/tsx 는 각각 javascript/typescript
+ *  문법으로 처리한다 (hljs 에서 그 둘의 별칭이다). */
+const EXTENSION_LANGUAGES: Record<string, string | undefined> = {
+  cjs: "javascript",
+  css: "css",
+  cts: "typescript",
+  htm: "html",
+  html: "html",
+  js: "javascript",
+  json: "json",
+  jsx: "javascript",
+  mjs: "javascript",
+  mts: "typescript",
+  py: "python",
+  pyi: "python",
+  pyw: "python",
+  rs: "rust",
+  toml: "toml",
+  ts: "typescript",
+  tsx: "typescript",
+};
+
+/** 하이라이트할 창의 최대 바이트 수.
+ *
+ *  창 하나를 **한 번의 동기 호출**로 토큰화하므로(계약 3) 이 값이 곧 그 호출이
+ *  메인 스레드를 붙잡는 시간의 상한이다. 밀도 높은 TS 소스로 잰 hljs 11 처리량은
+ *  약 2MB/s (64KiB 63ms · 256KiB 144ms · 512KiB 248ms) — 창 상한인 WINDOW_BYTES
+ *  (512KiB)를 그대로 쓰면 열고 나서 4분의 1초를 멎는다. 절반에서 끊어 ~150ms 로
+ *  묶고, 넘는 창은 플레인으로 남긴다 (색은 편의이고 응답성은 1급 요구사항이다).
+ *
+ *  판정 대상이 **창** 바이트인 이유: 렌더 경로는 fsReadChunk 를 창당 1회
+ *  (WINDOW_BYTES) 부르고 청크를 이어 붙이지 않는다 — 글루의 4MiB 상한
+ *  (commands.rs MAX_READ_LEN)은 이 경로에 닿지 않는다. */
+export const HIGHLIGHT_MAX_BYTES = 256 * 1024;
+
+/** 지금 켜져 있는 언어 목록 — 부팅 시 applyHighlightSettings 가 덮는다. */
+let highlightLanguages: readonly string[] = DEFAULT_HIGHLIGHT_LANGUAGES;
+
+/** settings.json 의 하이라이트 설정을 적용한다 (main.ts 부트가 **뷰 생성 전에**
+ *  1회 호출 — applyTerminalSettings 와 같은 자리·같은 순서 계약).
+ *
+ *  null 은 미설정이라 기본 목록을 유지하고, **빈 배열은 "하이라이팅 끄기"** 라는
+ *  유효한 설정이다. 이름 검증은 백엔드(get_ui_settings)가 이미 했다 — 여기서 다시
+ *  판정하면 두 곳의 규칙이 갈라진다 (applyTerminalSettings 와 같은 규율). */
+export function applyHighlightSettings(settings: UiSettings): void {
+  if (settings.highlightLanguages !== null) highlightLanguages = settings.highlightLanguages;
+}
+
+/** 파일 경로 → 하이라이트에 쓸 언어 이름, 대상이 아니면 null (순수).
+ *
+ *  뷰어 경로는 항상 리눅스 경로다 (backend.ts 계약). 확장자가 없거나 dotfile
+ *  (`.bashrc`)이면 대상이 아니다 — 이름 전체가 확장자로 보이는 것을 막는다. */
+export function languageForPath(
+  path: string,
+  active: readonly string[] = highlightLanguages,
+): string | null {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const language = EXTENSION_LANGUAGES[base.slice(dot + 1).toLowerCase()];
+  if (language === undefined) return null;
+  return active.includes(language) ? language : null;
+}
+
+/** hljs 마크업 1덩이 → 행별 HTML (순수).
+ *
+ *  hljs 출력은 열림/닫힘이 맞는 `<span class="…">` 뿐이고 원문의 `<`·`&` 는 전부
+ *  엔티티라, 남아 있는 `<` 는 hljs 자신의 태그가 유일하다. 개행에서 그냥 자르면
+ *  여러 행에 걸친 span 이 행 경계에서 끊겨 각 행이 불균형 HTML 이 되므로(브라우저
+ *  가 제멋대로 닫는다), 열려 있는 span 을 **행 끝에서 닫고 다음 행 머리에서 같은
+ *  순서로 다시 연다**. 결과 배열 길이는 항상 `개행 수 + 1` 이다. */
+export function splitHighlightedLines(html: string): string[] {
+  const token = /<span [^>]*>|<\/span>|\n/g;
+  const lines: string[] = [];
+  const open: string[] = [];
+  let line = "";
+  let last = 0;
+  for (let match = token.exec(html); match !== null; match = token.exec(html)) {
+    line += html.slice(last, match.index);
+    last = token.lastIndex;
+    const tag = match[0];
+    if (tag === "\n") {
+      lines.push(line + "</span>".repeat(open.length));
+      line = open.join("");
+    } else if (tag === "</span>") {
+      open.pop();
+      line += tag;
+    } else {
+      open.push(tag);
+      line += tag;
+    }
+  }
+  lines.push(line + html.slice(last));
+  return lines;
+}
+
+/** 창의 행들 → 행별 하이라이트 HTML (순수 — hljs 는 주입).
+ *
+ *  창을 통째로 한 번 토큰화한다 (계약 3). 행 수가 어긋나면 행과 색이 밀린 채로
+ *  그려지므로 null 을 돌려 **플레인으로 남는 쪽**을 택한다.
+ *
+ *  `ignoreIllegals` 는 켠다: 편집 중이라 문법이 깨진 파일도 뷰어에서는 색이
+ *  보이는 편이 낫다. 이스케이프는 hljs 가 하지만 그 사실 자체를 신뢰하지 않고
+ *  악성 픽스처로 직접 잠근다 (text-view.test.ts). */
+export function highlightLines(
+  lines: readonly string[],
+  language: string,
+  hljs: HighlightApi,
+): string[] | null {
+  const html = hljs.highlight(lines.join("\n"), { language, ignoreIllegals: true }).value;
+  const split = splitHighlightedLines(html);
+  return split.length === lines.length ? split : null;
+}
+
+/** 언어별 로더 캐시 — 같은 언어의 두 번째 파일은 왕복 없이 같은 promise 를 받고,
+ *  registerLanguage 도 한 번만 돈다. */
+const highlighters = new Map<string, Promise<HighlightApi>>();
+
+/** hljs 코어 + 언어 모듈 + 테마 CSS 를 **이 경로에서만** 로드한다 (계약 1).
+ *
+ *  테마는 vs2015 — VS Code 다크 그대로라 배경(#1E1E1E)이 이 앱의 터미널 배경
+ *  (terminal-view.ts TERMINAL_THEME)과 같은 값이다. 게다가 우리는 행 엘리먼트에
+ *  `.hljs` 클래스를 **붙이지 않으므로** 테마의 배경·padding 규칙(`.hljs`,
+ *  `pre code.hljs`)은 아예 매칭되지 않고 토큰 색(`.hljs-*`)만 먹는다 — 뷰어의
+ *  기존 배경·글꼴이 그대로 유지된다. CSS 를 styles.css 에 정적으로 넣지 않는
+ *  이유도 같다: 그러면 하이라이트를 한 번도 안 쓰는 세션에도 실린다. */
+async function loadHighlighter(language: string): Promise<HighlightApi> {
+  const cached = highlighters.get(language);
+  if (cached !== undefined) return cached;
+  const load = LANGUAGE_LOADERS[language];
+  if (load === undefined) {
+    // languageForPath 를 통과한 이름은 반드시 로더가 있다 — 오면 배선 결함이다.
+    return Promise.reject(new Error(`no highlight module for language ${language}`));
+  }
+  const pending = (async (): Promise<HighlightApi> => {
+    const [core, definition] = await Promise.all([
+      import("highlight.js/lib/core"),
+      load(),
+      import("highlight.js/styles/vs2015.css"),
+    ]);
+    const hljs = core.default;
+    hljs.registerLanguage(language, definition.default);
+    return hljs;
+  })();
+  highlighters.set(language, pending);
+  // 실패는 캐시에서 비운다 — 남겨두면 일시 실패(파일 잠금 등) 하나로 그 언어가
+  // 앱 재시작까지 플레인으로 굳는다. 다음 파일 열기가 로드를 다시 시도한다.
+  pending.catch(() => highlighters.delete(language));
+  return pending;
+}
+
 export interface TextViewOptions {
   /** 타이머 구현 (테스트 주입). 기본은 전역 setTimeout/clearTimeout. */
   timers?: TimerHost;
@@ -443,6 +667,12 @@ export class TextView implements ViewerView {
   private adopted: { path: string } | null = null;
   /** 로드가 끝나면 적용할 전역 byte offset (마운트·경로 변경 시 1회). */
   private pendingOffset: number | null = null;
+  /** 이 파일에 쓸 하이라이트 언어 (대상이 아니면 null — 그러면 highlight.js 를
+   *  아예 로드하지 않는다). 경로가 바뀔 때만 다시 판정한다. */
+  private language: string | null;
+  /** 현재 창의 행별 하이라이트 HTML — 아직·영영 없으면 null 이고 그때는 플레인
+   *  textContent 로 그린다. 창이 바뀌면 무효다 (showWindow 가 비운다). */
+  private highlighted: string[] | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -457,6 +687,7 @@ export class TextView implements ViewerView {
     this.path = kind.type === "textViewer" ? kind.path : "";
     this.adopted = { path: this.path };
     this.pendingOffset = kind.type === "textViewer" ? kind.scrollTop : 0;
+    this.language = languageForPath(this.path);
 
     this.settle = new ScrollSettle(
       (offset) => {
@@ -543,6 +774,7 @@ export class TextView implements ViewerView {
     if (!shouldAdoptScroll(this.adopted, kind.path)) return;
     this.adopted = { path: kind.path };
     this.path = kind.path;
+    this.language = languageForPath(this.path);
     this.pendingOffset = kind.scrollTop;
     this.settle.markSynced(null);
     this.load(kind.scrollTop, true);
@@ -673,6 +905,34 @@ export class TextView implements ViewerView {
 
     this.setBanner(null, false);
     this.showWindow(decodeWindow(bytes, readOffset, atEof), stat.size);
+    // 창은 이미 플레인으로 화면에 있다 — 색은 그 뒤에 덧입힌다 (계약 2).
+    this.startHighlight(token);
+  }
+
+  /** 하이라이트 덧입히기 (구문 하이라이팅 계약 2·3). 대상이 아니거나 창이
+   *  문턱을 넘으면 **아무 것도 로드하지 않고** 플레인으로 남는다.
+   *
+   *  로드가 끝난 시점에 뷰가 dispose 됐거나 그새 다른 창을 읽었으면(창 이동
+   *  연타·경로 변경) 버린다 — 판정은 로드 응답과 같은 loadToken 이다. 로드
+   *  실패는 콘솔에만 남긴다: 플레인 렌더는 이미 정상이라 UI 를 막을 이유가
+   *  없다 (활동 핑·창 가시성과 같은 규율). */
+  private startHighlight(token: number): void {
+    const language = this.language;
+    if (language === null || this.win.lines.length === 0) return;
+    if (this.win.end - this.win.start > HIGHLIGHT_MAX_BYTES) return;
+    loadHighlighter(language)
+      .then((hljs) => {
+        if (this.disposed || token !== this.loadToken) return;
+        const highlighted = highlightLines(this.win.lines, language, hljs);
+        if (highlighted === null) return;
+        this.highlighted = highlighted;
+        // 구간이 그대로여도 내용이 바뀌었으므로 renderSlice 의 no-op 을 푼다.
+        this.slice = null;
+        this.renderSlice();
+      })
+      .catch((err: unknown) => {
+        console.error("[winmux] syntax highlighting failed", err);
+      });
   }
 
   /** 새 창을 화면에 앉힌다 — 전체 높이·범위 표시·버튼 상태를 갱신하고, 보류된
@@ -684,6 +944,8 @@ export class TextView implements ViewerView {
     this.size = size;
     this.spacerEl.style.height = `${win.lines.length * LINE_HEIGHT_PX}px`;
     this.slice = null;
+    // 행별 하이라이트는 창에 붙어 있다 — 새 창은 다시 계산되기 전까지 플레인이다.
+    this.highlighted = null;
 
     const paged = win.start > 0 || win.end < size;
     this.barEl.hidden = !paged;
@@ -730,7 +992,12 @@ export class TextView implements ViewerView {
     for (let i = range.first; i < range.last; i += 1) {
       const el = document.createElement("div");
       el.className = "text-line";
-      el.textContent = this.win.lines[i];
+      // 하이라이트가 붙은 창이면 hljs 마크업을, 아니면 원문을 그대로 그린다.
+      // innerHTML 에 넣는 문자열의 출처는 hljs 뿐이고 파일 내용은 그 안에서
+      // 이스케이프돼 있다 (highlightLines 주석 — 픽스처 테스트가 잠근다).
+      const html = this.highlighted?.[i];
+      if (html === undefined) el.textContent = this.win.lines[i];
+      else el.innerHTML = html;
       nodes.push(el);
     }
     this.linesEl.replaceChildren(...nodes);

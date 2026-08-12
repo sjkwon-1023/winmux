@@ -18,6 +18,8 @@
 // - × = CloseWorkspace. 실행 중인 터미널 세션이 1개라도 있으면 confirm() 을
 //   거친다 — 그 세션들을 죽이는 파괴적 동작이다. 판정은 렌더 캐시가 아니라 클릭
 //   시점의 최신 스냅샷으로 한다 (카드 DOM 이 스킵으로 오래됐을 수 있다).
+//   같은 흐름이 Ctrl+Shift+Q 로도 들어온다 (closeActive — main.ts 글루가 부른다):
+//   confirm 조건·문구가 두 벌로 갈라지지 않게 키 경로도 이 onClose 를 그대로 탄다.
 // - "+ New workspace" = 현재 터미널 경로로 즉시 생성 (onNewWorkspace 콜백 — 해석·dispatch
 //   호출과 CreateWorkspace dispatch 는 main.ts 글루가 한다. 같은 흐름이
 //   Ctrl+Shift+N 으로도 들어오므로 구현을 한곳에 둔다). 이름·경로·배포판을 손으로
@@ -240,7 +242,8 @@ export class Sidebar {
     close.type = "button";
     close.className = "ws-card-close";
     close.textContent = "×";
-    close.title = "Close workspace";
+    // 단축키 표기는 "+ New workspace" 버튼과 같은 관례 — keys.ts 단일 소스.
+    close.title = `Close workspace (${shortcutLabel("closeWorkspace")})`;
     close.addEventListener("click", (ev) => {
       ev.stopPropagation(); // 카드 클릭(전환)과 분리
       this.onClose(model.workspace);
@@ -292,6 +295,15 @@ export class Sidebar {
     setText(nodes.path, model.path ?? "");
     nodes.path.title = model.path ?? "";
     nodes.path.hidden = model.path === null;
+  }
+
+  /** `Ctrl+Shift+Q` — 활성 워크스페이스 닫기 (main.ts 글루가 부른다). × 버튼과
+   *  완전히 같은 경로를 타므로 confirm 조건·문구가 갈라지지 않는다. 활성
+   *  워크스페이스가 없으면(빈 상태·스냅샷 미도착) 조용한 no-op 이다. */
+  closeActive(): void {
+    const workspace = this.lastSnapshot?.state.activeWorkspace ?? null;
+    if (workspace === null) return;
+    this.onClose(workspace);
   }
 
   /** × 클릭 — 터미널 탭이 있으면 confirm 후 CloseWorkspace (계획 D4). */

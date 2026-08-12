@@ -24,6 +24,7 @@
 // | `Ctrl+Shift+E` | 활성 pane 좌우 분할 + 터미널 탭 | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+N` | 새 워크스페이스 — 활성 터미널의 현재 경로로 즉시 생성 (임의 폴더는 사이드바 + 버튼의 픽커) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+[` / `Ctrl+Shift+]` | 이전/다음 워크스페이스 (사이드바 순서, 끝에서 순환) | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+Shift+Q` | 활성 워크스페이스 닫기 (실행 중인 터미널 세션이 있으면 confirm — 사이드바 × 버튼과 같은 경로) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+=` / `Ctrl++` | 터미널 글꼴 확대 (세션 한정 — settings.json 은 그대로) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+-` | 터미널 글꼴 축소 (세션 한정) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+0` | 터미널 글꼴 크기를 settings.json 기본값으로 리셋 | keys.ts 판정 + main.ts window keydown capture |
@@ -60,7 +61,7 @@
 // 자리라 여기 남긴다 — 이름 변경에는 동급의 관례 대체 키가 없다. 되돌린다면
 // 이 표와 CTRL_SHIFT_KEYS 를 함께 고치면 된다 (판정·표시 단일 소스).
 //
-// shift 규약: shift 를 받는 조합은 `Ctrl+Shift+Tab` · 위 `Ctrl+Shift+<문자>` 8종 ·
+// shift 규약: shift 를 받는 조합은 `Ctrl+Shift+Tab` · 위 `Ctrl+Shift+<문자>` 9종 ·
 // 확대 키의 `+`(US 배열에서 `Shift+=` 로 오는 문자)뿐이다.
 // `Ctrl+Shift+1`·`Alt+Shift+←` 같은 변형은 판정 대상이 아니다(null) —
 // shift 는 레이아웃에 따라 다른 문자를 만들 수 있어 보수적으로 목록에 명시된
@@ -103,6 +104,10 @@ export type KeyAction =
    *  사용자 결정 2026-08-11: 키보드 흐름은 "지금 있는 곳에서 바로", 임의 폴더는
    *  사이드바 + 버튼의 픽커가 담당한다). cwd 해석·dispatch 는 글루 몫이다. */
   | { type: "newWorkspaceHere" }
+  /** 활성 워크스페이스 닫기 — 사이드바 × 버튼과 **같은 명령**이다. 실행 중인
+   *  터미널 세션이 있으면 confirm 을 거치는데, 그 판정·문구는 × 버튼 구현
+   *  (sidebar.ts 의 onClose)이 단일 소스라 글루가 그쪽을 그대로 부른다. */
+  | { type: "closeWorkspace" }
   /** 활성 워크스페이스 이름의 인라인 편집 시작 — dispatch 가 아닌 UI 액션이다
    *  (편집 확정 시점에 글루가 renameWorkspace 를 보낸다). */
   | { type: "renameWorkspace" }
@@ -132,7 +137,8 @@ export type ShortcutId =
   | "splitLeftRight"
   | "newWorkspace"
   | "prevWorkspace"
-  | "nextWorkspace";
+  | "nextWorkspace"
+  | "closeWorkspace";
 
 /** `Ctrl+Shift+<문자>` 단축키 표 (canonical) — 판정(keyAction)과 표시
  *  (shortcutLabel)가 같은 표를 읽으므로 버튼 툴팁이 실제 키와 어긋날 수 없다.
@@ -167,6 +173,7 @@ const CTRL_SHIFT_KEYS: Record<
     shifted: "}",
     action: () => ({ type: "cycleWorkspace", delta: 1 }),
   },
+  closeWorkspace: { letter: "q", action: () => ({ type: "closeWorkspace" }) },
 };
 
 /** 버튼 툴팁에 붙일 단축키 표기 — 표시 문자열의 **단일 소스**다. UI 는 이 함수를

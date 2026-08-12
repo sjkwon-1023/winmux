@@ -45,17 +45,36 @@ Accepted deferrals, one line each. None of these block the MVP.
   relaunch returns to the `settings.json` size, Ctrl+0 resets to it), window-wide across all
   tabs, clamped to the backend's 6-72 range; Ctrl+- shadows the terminal's C-_ (emacs undo)
   as an accepted trade-off, same class as Ctrl+1-9. Verification: WINDOWS-BUILD §10 v0.3.4.
-- **Syntax highlighting in the text viewer** (user request 2026-08-11) — medium weight:
-  ~50-100KB gzip of bundle for a highlight.js-class library plus a curated language
-  pack and an extension→language table; no per-language hand work. Design note:
-  tokenize the whole 512KiB window once and cache per-line results, or multi-line
-  constructs break at the virtual-scroll seams. Shiki-class quality costs ~1MB —
-  off-motto.
+- **Syntax highlighting in the text viewer — landed 2026-08-12** (user request 2026-08-11)
+  with highlight.js 11 behind **dynamic import only**: the entry bundle carries zero
+  highlighter bytes (verified on the build output — core, one chunk per language and the
+  vs2015 theme CSS are separate assets), so start-up and non-code files pay nothing.
+  Opening a file always renders plain first and the colours are overlaid when the module
+  lands (stale callbacks dropped on dispose / window change). The window is tokenized once
+  and cached per line as the design note required, capped at 256 KiB per window
+  (measured ~2 MB/s, so a full 512 KiB window would block the main thread for ~250 ms);
+  over the cap the window stays plain. Language comes from an explicit extension map — no
+  `highlightAuto` — filtered by `settings.json`'s `highlightLanguages` (default python,
+  javascript, typescript, rust, json, toml, css, html; `[]` disables; unknown names are
+  rejected loudly like `fontSize`). Supported names are exactly the shipped loader set,
+  mirrored in `commands.rs::HIGHLIGHT_LANGUAGES` — widening it means adding a loader on
+  both sides. Verification: WINDOWS-BUILD §10 v0.3.6 item 2.
 - **Windows toast notifications on needsInput — landed 2026-08-12** via the official
   `tauri-plugin-notification` (+ the `notify_toast` glue command), fired **only while the
   window is unfocused** (`document.hasFocus()` false) on the chime's own onset rule — one
   toast per transitioning workspace, chime alone when focused. Still a field check: toast
   sender identity for an unsigned standalone exe (WINDOWS-BUILD §10 v0.3.4).
+- **Toasts do not appear at all in the field** (user report 2026-08-12, v0.3.5): the
+  card-style Windows notification never shows, focused or not. Root cause **confirmed
+  2026-08-12**: Windows Settings › Notifications has no winmux entry at all (screenshot
+  checked), i.e. the shell has never seen an app identity to attribute toasts to — an
+  unpackaged, unsigned exe registers no AppUserModelID / Start-menu shortcut, and WinRT
+  drops toasts from unregistered senders silently. Fix direction: at startup (Windows
+  only, idempotent) create/refresh a Start-menu shortcut carrying
+  `PKEY_AppUserModel_ID` for our identifier, call
+  `SetCurrentProcessExplicitAppUserModelID`, and verify the plugin's toast AUMID matches
+  the registered one; the exe moving between versions means the shortcut target must be
+  refreshed, not just created once.
 - **Query-reply `/tmp` confinement is string-level only** — a pre-planted symlink
   (`/tmp/x → $HOME`) routes the reply write outside; blocking it needs a
   canonicalize-at-write recheck whose 9P semantics are unverified on real hardware

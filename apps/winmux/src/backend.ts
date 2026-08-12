@@ -113,6 +113,11 @@ export interface UiSettings {
   fontFamily: string | null;
   /** xterm fontSize (px). 백엔드가 6~72 범위를 강제한다 (밖이면 reject). */
   fontSize: number | null;
+  /** 텍스트 뷰어에서 구문 하이라이팅을 켤 언어 이름 목록. 지원 목록 밖의 이름은
+   *  백엔드가 reject 한다 (fontFamily·fontSize 와 같은 loud-fail). **빈 배열은
+   *  "하이라이팅 끄기"** 라는 유효한 설정이고, null 은 미설정이라 프론트의 기본
+   *  목록(text-view.ts DEFAULT_HIGHLIGHT_LANGUAGES)을 쓴다. */
+  highlightLanguages: string[] | null;
 }
 
 /** 앱 설정 디렉터리의 settings.json 을 읽는다. **파일이 없으면 전부 null 인

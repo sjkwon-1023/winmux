@@ -1,33 +1,114 @@
+// @vitest-environment happy-dom
+//
 // textViewer 뷰의 순수 계산 검증 (21단계 청크 C2 + 체크포인트 2 UX) — 윈도우
 // 절삭(부분행·UTF-8 파단 바이트), 가상 스크롤 슬라이스, byte offset ↔ 행 매핑,
 // 창 이동 계산·버튼 상태·키 판정·페이지 스크롤, 복원 창 시작, 스크롤 에코 가드,
-// settle 디바운스. DOM·IPC 는 이 파일의 대상이 아니다 (뷰는 이 결과를 그대로
-// 그리는 얇은 층이다).
+// settle 디바운스. 창 읽기·스크롤 왕복의 DOM·IPC 경로는 여기 대상이 아니다
+// (뷰는 위 결과를 그대로 그리는 얇은 층이라 Windows 수동 검증이 맡는다).
+//
+// 예외가 **구문 하이라이팅**(v0.3.6)이다: "즉시 플레인 → 나중에 덧입힘"이라는
+// 순서 자체가 계약이고 그 판정이 뷰 안에 있으므로, 뷰를 실제로 띄워 mount 한 뒤
+// 비동기 완료를 기다려 확인한다. 그래서 이 파일만 happy-dom 환경이다 (상단
+// @vitest-environment — pane-view.test.ts 와 같은 관례). 백엔드 IPC 와
+// highlight.js 의 dynamic import 는 vi.mock 으로 고정해 결정적으로 돌린다.
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_HIGHLIGHT_LANGUAGES,
+  HIGHLIGHT_MAX_BYTES,
   LINE_HEIGHT_PX,
   ScrollSettle,
+  TextView,
+  applyHighlightSettings,
   decodeWindow,
   formatByteRange,
+  highlightLines,
+  languageForPath,
   lineIndexForOffset,
   nextWindowStart,
   pageScrollTop,
   shouldAdoptScroll,
+  splitHighlightedLines,
   textKeyAction,
   visibleSlice,
   windowButtonsDisabled,
   windowStartForRestore,
 } from "./text-view";
+import type { HighlightApi } from "./text-view";
 import type { TimerHost } from "./ack-batcher";
 import type { KeySpec } from "./keys";
+import type { UiSettings } from "./backend";
 
 const encoder = new TextEncoder();
 
 function bytes(text: string): Uint8Array {
   return encoder.encode(text);
 }
+
+// --- 하이라이트 경로의 mock 배선 --------------------------------------------
+// vi.mock 은 hoist 되므로 팩토리가 참조하는 것은 전부 vi.hoisted 로 만든다.
+//
+// 언어 모듈 팩토리는 **처음 import 될 때 딱 한 번** 돈다 — 그래서 loads 카운터가
+// "이 모듈이 로드된 적이 있는가"의 정본이고, "로드하지 않는다"를 주장하는
+// 테스트는 자기 실행 전후의 합계 변화(0)로 잠근다 (파일 안 실행 순서에 무관).
+// python·json 은 gate 로 완료 시점을 잡아 "플레인 먼저, 색은 나중" 순서와
+// dispose 후 stale 콜백을 결정적으로 만든다.
+
+/** 백엔드가 돌려줄 파일 1개 — mount 헬퍼가 갈아 끼운다. */
+const file = vi.hoisted(() => ({ bytes: new Uint8Array(0) }));
+
+/** 언어 모듈이 실제로 import 된 횟수. */
+const loads = vi.hoisted(() => ({ python: 0, rust: 0, css: 0, json: 0 }));
+
+/** 수동으로 여는 관문 — 열기 전에는 그 언어 모듈의 import 가 끝나지 않는다. */
+const gates = vi.hoisted(() => {
+  function make(): { opened: Promise<void>; open: () => void } {
+    let open = (): void => {};
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { opened, open: () => open() };
+  }
+  return { python: make(), json: make() };
+});
+
+/** hljs 대역 — 문법은 관심사가 아니라 `def` 낱말 하나만 토큰으로 감싼다.
+ *  실제 hljs 의 이스케이프는 아래 highlightLines 테스트가 진짜 모듈로 잠근다. */
+const fakeHljs = vi.hoisted(() => ({
+  registerLanguage(_name: string, _language: unknown): void {},
+  highlight(code: string): { value: string } {
+    const escaped = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return { value: escaped.replace(/\bdef\b/g, '<span class="hljs-keyword">def</span>') };
+  },
+}));
+
+vi.mock("./backend", () => ({
+  fsStat: () => Promise.resolve({ size: file.bytes.length, mtime_ms: 0, is_dir: false }),
+  fsReadChunk: (_distro: string | null, _path: string, offset: number, len: number) =>
+    Promise.resolve(file.bytes.slice(offset, offset + len).buffer),
+}));
+
+vi.mock("highlight.js/lib/core", () => ({ default: fakeHljs }));
+vi.mock("highlight.js/styles/vs2015.css", () => ({ default: "" }));
+vi.mock("highlight.js/lib/languages/python", async () => {
+  loads.python += 1;
+  await gates.python.opened;
+  return { default: () => ({}) };
+});
+vi.mock("highlight.js/lib/languages/json", async () => {
+  loads.json += 1;
+  await gates.json.opened;
+  return { default: () => ({}) };
+});
+vi.mock("highlight.js/lib/languages/rust", () => {
+  loads.rust += 1;
+  return { default: () => ({}) };
+});
+vi.mock("highlight.js/lib/languages/css", () => {
+  loads.css += 1;
+  return { default: () => ({}) };
+});
 
 /** 수식키 없는 keydown 1개 — 붙일 수식키만 덮어쓴다. */
 function key(name: string, mods: Partial<KeySpec> = {}): KeySpec {
@@ -518,5 +599,301 @@ describe("ScrollSettle", () => {
     expect(timers.armed).toBe(0);
     timers.fire();
     expect(sent).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 구문 하이라이팅 (v0.3.6)
+// ---------------------------------------------------------------------------
+
+describe("languageForPath", () => {
+  const active = DEFAULT_HIGHLIGHT_LANGUAGES;
+
+  it("주력 스택의 확장자를 언어로 옮긴다", () => {
+    // 기본 목록 8개가 전부 확장자에서 도달 가능해야 한다 — 도달하지 못하는
+    // 기본값은 죽은 설정이다. (같은 이름 목록이 백엔드 commands.rs 의
+    // HIGHLIGHT_LANGUAGES 에도 있다 — 둘은 같이 움직인다.)
+    const table: Record<string, string> = {
+      "/w/app.py": "python",
+      "/w/api.pyi": "python",
+      "/w/next.config.js": "javascript",
+      "/w/page.jsx": "javascript",
+      "/w/util.mjs": "javascript",
+      "/w/store.ts": "typescript",
+      "/w/page.tsx": "typescript",
+      "/w/main.rs": "rust",
+      "/w/package.json": "json",
+      "/w/Cargo.toml": "toml",
+      "/w/globals.css": "css",
+      "/w/index.html": "html",
+    };
+    for (const [path, language] of Object.entries(table)) {
+      expect(languageForPath(path, active)).toBe(language);
+    }
+    // 기본 목록에 도달 못 하는 이름이 남아 있지 않다.
+    expect(new Set(Object.values(table))).toEqual(new Set(active));
+  });
+
+  it("확장자는 대소문자를 가리지 않는다", () => {
+    expect(languageForPath("/w/APP.PY", active)).toBe("python");
+  });
+
+  it("맵에 없는 확장자·확장자 없는 파일·dotfile 은 대상이 아니다", () => {
+    expect(languageForPath("/w/notes.txt", active)).toBeNull();
+    expect(languageForPath("/var/log/syslog", active)).toBeNull();
+    expect(languageForPath("/home/u/.bashrc", active)).toBeNull();
+    // 디렉터리 이름의 점은 파일 확장자가 아니다.
+    expect(languageForPath("/w/site.com/README", active)).toBeNull();
+  });
+
+  it("활성 목록 밖의 언어는 대상이 아니다 (빈 목록 = 하이라이팅 끄기)", () => {
+    expect(languageForPath("/w/main.rs", ["python"])).toBeNull();
+    expect(languageForPath("/w/app.py", ["python"])).toBe("python");
+    expect(languageForPath("/w/app.py", [])).toBeNull();
+  });
+});
+
+describe("splitHighlightedLines", () => {
+  it("태그가 없으면 그냥 개행으로 나눈다", () => {
+    expect(splitHighlightedLines("alpha\nbeta")).toEqual(["alpha", "beta"]);
+    expect(splitHighlightedLines("alpha")).toEqual(["alpha"]);
+    expect(splitHighlightedLines("")).toEqual([""]);
+    // 개행 수 + 1 — 빈 꼬리 행도 하나로 센다 (창의 행 배열과 길이를 맞춘다).
+    expect(splitHighlightedLines("a\n\nb")).toEqual(["a", "", "b"]);
+  });
+
+  it("한 행 안에서 닫히는 span 은 그대로 둔다", () => {
+    const html = '<span class="hljs-keyword">def</span> f():\nx';
+    expect(splitHighlightedLines(html)).toEqual([
+      '<span class="hljs-keyword">def</span> f():',
+      "x",
+    ]);
+  });
+
+  it("여러 행에 걸친 span 을 행마다 닫고 다시 연다", () => {
+    // 파이썬 삼중따옴표·블록 주석이 이 모양이다 — 그냥 자르면 각 행이 불균형
+    // HTML 이 되어 브라우저가 제멋대로 닫는다.
+    const html = '<span class="hljs-string">"""doc\nmore"""</span>;';
+    expect(splitHighlightedLines(html)).toEqual([
+      '<span class="hljs-string">"""doc</span>',
+      '<span class="hljs-string">more"""</span>;',
+    ]);
+  });
+
+  it("중첩 span 도 안쪽부터 닫고 같은 순서로 다시 연다", () => {
+    const html = '<span class="a"><span class="b">x\ny</span>z\n</span>w';
+    expect(splitHighlightedLines(html)).toEqual([
+      '<span class="a"><span class="b">x</span></span>',
+      '<span class="a"><span class="b">y</span>z</span>',
+      '<span class="a"></span>w',
+    ]);
+  });
+
+  it("이스케이프된 꺾쇠는 태그로 보지 않는다", () => {
+    expect(splitHighlightedLines("&lt;span&gt;\n&lt;/span&gt;")).toEqual([
+      "&lt;span&gt;",
+      "&lt;/span&gt;",
+    ]);
+  });
+});
+
+describe("highlightLines", () => {
+  /** 진짜 highlight.js — 이스케이프 보증은 대역이 아니라 실제 모듈로 잠근다.
+   *  (이 파일의 vi.mock 은 importActual 에 걸리지 않는다.) */
+  async function realHljs(): Promise<HighlightApi> {
+    const core = await vi.importActual<{ default: HighlightApi & Record<string, unknown> }>(
+      "highlight.js/lib/core",
+    );
+    const language = await vi.importActual<{ default: unknown }>(
+      "highlight.js/lib/languages/javascript",
+    );
+    const register = core.default.registerLanguage as (name: string, fn: unknown) => void;
+    register("javascript", language.default);
+    return core.default;
+  }
+
+  it("악성 내용은 마크업이 되지 못한다 (innerHTML 경로의 근거)", async () => {
+    const hljs = await realHljs();
+    const source = [
+      'const a = "<script>alert(1)</script>";',
+      "// <img src=x onerror=alert(1)>",
+      'const esc = "]0;pwned";',
+      "const amp = a && b;",
+    ];
+    const out = highlightLines(source, "javascript", hljs);
+    expect(out).not.toBeNull();
+    const html = (out ?? []).join("\n");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain("&amp;&amp;");
+
+    // 실제로 DOM 에 넣어도 남는 엘리먼트는 hljs 의 span 뿐이다.
+    const el = document.createElement("div");
+    el.innerHTML = html;
+    expect(el.querySelector("script")).toBeNull();
+    expect(el.querySelector("img")).toBeNull();
+    expect([...el.querySelectorAll("*")].every((node) => node.tagName === "SPAN")).toBe(true);
+    // ESC·BEL 은 HTML 특수문자가 아니라 문자 그대로 남는다 (터미널이 아니므로
+    // 해석되지 않는다) — 사라지지 않는다는 사실만 확인한다.
+    expect(el.textContent).toContain("]0;pwned");
+  });
+
+  it("행마다 따로 그려도 원문이 한 글자도 상하지 않는다", async () => {
+    const hljs = await realHljs();
+    // 템플릿 리터럴이 세 행에 걸친다 — 뷰가 행별 div 로 그리므로, 걸친 span 이
+    // 행마다 균형 잡혀 있지 않으면 여기서 텍스트가 어긋난다.
+    const source = ["const t = `가나다", "  <b>&</b>", "\tend`;", "", "if (x < 1) return;"];
+    const out = highlightLines(source, "javascript", hljs) ?? [];
+    expect(out).toHaveLength(source.length);
+    for (const [index, line] of source.entries()) {
+      const el = document.createElement("div");
+      el.innerHTML = out[index];
+      expect(el.textContent).toBe(line);
+      expect(el.querySelector("b")).toBeNull();
+    }
+  });
+
+  it("행 수가 어긋나면 null 을 돌려 플레인으로 남는다", () => {
+    // 행과 색이 밀린 채 그리느니 색을 포기한다.
+    const broken: HighlightApi = { highlight: () => ({ value: "one" }) };
+    expect(highlightLines(["one", "two"], "python", broken)).toBeNull();
+  });
+});
+
+describe("TextView 하이라이트 적용", () => {
+  function totalLoads(): number {
+    return loads.python + loads.rust + loads.css + loads.json;
+  }
+
+  function mount(path: string, text: string): TextView {
+    file.bytes = encoder.encode(text);
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    return new TextView(
+      parent,
+      1,
+      null,
+      { type: "textViewer", path, scrollTop: 0 },
+      () => Promise.resolve(null),
+    );
+  }
+
+  function textLines(view: TextView): HTMLElement[] {
+    return [...view.root.querySelectorAll<HTMLElement>(".text-line")];
+  }
+
+  /** 보류 중인 마이크로태스크·타이머를 흘려보낸다 — "덧입혀지지 않았다"를
+   *  주장하기 전에 붙을 기회를 충분히 준다. */
+  async function settleAll(): Promise<void> {
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  beforeEach(() => {
+    // 기본 목록으로 되돌린다 (null 은 "미설정"이라 덮지 않는다).
+    applyHighlightSettings(settings([...DEFAULT_HIGHLIGHT_LANGUAGES]));
+    document.body.replaceChildren();
+  });
+
+  function settings(highlightLanguages: string[] | null): UiSettings {
+    return { fontFamily: null, fontSize: null, highlightLanguages };
+  }
+
+  it("플레인으로 먼저 뜨고, 모듈이 도착한 뒤에 색이 덧입혀진다", async () => {
+    const view = mount("/w/app.py", "def one():\n    return 1\n");
+    await vi.waitFor(() => {
+      expect(textLines(view)).toHaveLength(2);
+    });
+    // 여기까지 모듈은 관문에 막혀 있다 — 열기는 그걸 기다리지 않았다.
+    expect(loads.python).toBe(1);
+    expect(view.root.querySelector(".hljs-keyword")).toBeNull();
+    expect(textLines(view)[0].textContent).toBe("def one():");
+
+    gates.python.open();
+    await vi.waitFor(() => {
+      expect(view.root.querySelector(".hljs-keyword")).not.toBeNull();
+    });
+    // 텍스트는 그대로이고 토큰만 감싸였다.
+    expect(textLines(view)[0].textContent).toBe("def one():");
+    expect(textLines(view)[1].textContent).toBe("    return 1");
+    view.dispose();
+  });
+
+  it("맵에 없는 확장자는 모듈을 로드하지 않는다", async () => {
+    const before = totalLoads();
+    const view = mount("/w/notes.txt", "def one():\nplain\n");
+    await vi.waitFor(() => {
+      expect(textLines(view)).toHaveLength(2);
+    });
+    await settleAll();
+    expect(view.root.querySelector(".text-line span")).toBeNull();
+    expect(totalLoads()).toBe(before);
+    view.dispose();
+  });
+
+  it("활성 목록 밖의 언어는 모듈을 로드하지 않는다", async () => {
+    applyHighlightSettings(settings(["python"]));
+    const before = totalLoads();
+    const view = mount("/w/main.rs", "fn main() { def; }\n");
+    await vi.waitFor(() => {
+      expect(textLines(view)).toHaveLength(1);
+    });
+    await settleAll();
+    expect(view.root.querySelector(".text-line span")).toBeNull();
+    expect(totalLoads()).toBe(before);
+    expect(loads.rust).toBe(0);
+    view.dispose();
+  });
+
+  it("빈 highlightLanguages 는 하이라이팅을 끈다", async () => {
+    applyHighlightSettings(settings([]));
+    const before = totalLoads();
+    const view = mount("/w/app.py", "def one():\n");
+    await vi.waitFor(() => {
+      expect(textLines(view)).toHaveLength(1);
+    });
+    await settleAll();
+    expect(view.root.querySelector(".text-line span")).toBeNull();
+    expect(totalLoads()).toBe(before);
+    view.dispose();
+  });
+
+  it("문턱을 넘는 창은 플레인으로 남는다 (모듈 로드 없음)", async () => {
+    const line = `.a${"x".repeat(60)} { color: red }\n`;
+    const count = Math.ceil((HIGHLIGHT_MAX_BYTES + 1024) / line.length);
+    const before = totalLoads();
+    const view = mount("/w/big.css", line.repeat(count));
+    await vi.waitFor(() => {
+      expect(textLines(view).length).toBeGreaterThan(0);
+    });
+    await settleAll();
+    expect(view.root.querySelector(".text-line span")).toBeNull();
+    expect(totalLoads()).toBe(before);
+    expect(loads.css).toBe(0);
+    view.dispose();
+  });
+
+  it("빈 파일은 로드도 렌더도 하지 않는다", async () => {
+    const before = totalLoads();
+    const view = mount("/w/empty.py", "");
+    await settleAll();
+    expect(textLines(view)).toHaveLength(0);
+    expect(totalLoads()).toBe(before);
+    view.dispose();
+  });
+
+  it("dispose 뒤에 도착한 모듈은 아무 것도 건드리지 않는다", async () => {
+    const view = mount("/w/package.json", '{\n  "a": 1\n}\n');
+    await vi.waitFor(() => {
+      expect(textLines(view)).toHaveLength(3);
+    });
+    expect(loads.json).toBe(1);
+    view.dispose();
+
+    // 관문을 여기서 연다 — 콜백은 이미 사라진 뷰에 도착한다.
+    gates.json.open();
+    await settleAll();
+    expect(view.root.querySelector(".text-line span")).toBeNull();
+    expect(view.root.isConnected).toBe(false);
   });
 });
