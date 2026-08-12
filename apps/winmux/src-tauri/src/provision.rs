@@ -32,7 +32,7 @@ use tauri::AppHandle;
 /// 설치 스크립트 버전. 마커 파일명(`~/.winmux/.setup-v<N>`)에 들어가므로, 스크립트
 /// 내용을 바꿔 기존 사용자에게도 다시 깔아야 할 때 이 값을 올리면 된다 (마커가
 /// 달라져 전원 재실행). 스크립트 본문의 `@SETUP_VERSION@` 자리에 치환된다.
-const SETUP_VERSION: u32 = 6;
+const SETUP_VERSION: u32 = 7;
 
 /// 프로세스 수명 캐시 — **해석된** distro 이름 기준으로 앱 실행당 1회만 스폰한다.
 /// 기본 distro(None)는 claim 전에 실제 이름으로 해석된다 (보안 리뷰 finding):
@@ -197,9 +197,11 @@ fn run(_distro: Option<&str>) -> Result<(), String> {
 /// `winmux-send` 스킬 히어독에도 걸린다: 원본은
 /// `scripts/wsl/skills/winmux-send/SKILL.md` 다.
 ///
-/// `winmux` CLI 와 `winmux-send.sh` 호환 래퍼 히어독은 레포에 별도 원본이 없다
-/// (여기가 원본이다). 다만 CLI 의 `winmux_emit` 는 notify 스크립트와 **같은 tty
-/// 해석 규율**이라 한쪽을 고치면 다른 쪽도 같이 고친다.
+/// `winmux` CLI·`winmux-send.sh` 호환 래퍼·`winmux-codex-notify.sh` 히어독은 레포에
+/// 별도 원본이 없다 (여기가 원본이다 — 계약은 `claude-hook-example.md` 가 산문으로
+/// 기술한다). 다만 CLI 의 `winmux_emit` 는 notify 스크립트와 **같은 tty 해석 규율**
+/// 이라 한쪽을 고치면 다른 쪽도 같이 고친다. Codex 쪽 스크립트는 그 복제를 늘리지
+/// 않으려고 `winmux-notify.sh` 를 자식으로 불러 방출을 위임한다.
 ///
 /// 스크립트 자체는 사용자 머신에 남는 산출물이라 주석·출력이 전부 영어다
 /// (레포 컨벤션: 사용자 대면 문자열은 영어).
@@ -217,6 +219,7 @@ WINMUX_HOME="$HOME/.winmux"
 MARKER="$WINMUX_HOME/.setup-v@SETUP_VERSION@"
 LOG="$WINMUX_HOME/setup.log"
 NOTIFY="$WINMUX_HOME/bin/winmux-notify.sh"
+CODEX_NOTIFY="$WINMUX_HOME/bin/winmux-codex-notify.sh"
 CLI="$WINMUX_HOME/bin/winmux"
 SEND="$WINMUX_HOME/bin/winmux-send.sh"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
@@ -226,6 +229,7 @@ CODEX_CONFIG="$HOME/.codex/config.toml"
 # Claude Code and Codex run these through a shell, and keeping the literal out of the
 # files means no home path (spaces, quotes) can break their syntax.
 NOTIFY_CMD='"$HOME/.winmux/bin/winmux-notify.sh"'
+CODEX_NOTIFY_CMD='"$HOME/.winmux/bin/winmux-codex-notify.sh"'
 
 if [ -f "$MARKER" ]; then
   exit 0
@@ -352,6 +356,82 @@ if [ "$status" -ne 0 ] || ! chmod +x "$NOTIFY.tmp" || ! mv -f "$NOTIFY.tmp" "$NO
   exit 1
 fi
 log "notify script installed: $NOTIFY"
+
+# --- 1b. Codex notify script -------------------------------------------------------------
+# Codex's notify program, run once per completed turn. It exists as its own script because
+# Codex hands its payload over as a final argv argument rather than on stdin, which is a
+# different shape from a Claude Code hook — and because that payload is what carries the
+# thread id the resume hint needs. The OSC emission itself is delegated to the script above
+# rather than copied: one more copy of the tty resolution is one more copy to keep in step.
+cat > "$CODEX_NOTIFY.tmp" <<'WINMUX_CODEX_NOTIFY_EOF'
+#!/usr/bin/env bash
+# Called by Codex as its `notify` program, once per completed turn (agent-turn-complete),
+# to emit winmux:idle and record how to resume the Codex thread that just finished.
+# Arguments: $1 = the notification payload, a single JSON object Codex appends as the final
+#            argv element. Nothing is read from stdin — Codex sends nothing there.
+set -euo pipefail
+
+PAYLOAD="${1:-}"
+
+# Codex 0.147 serializes the payload with kebab-case keys ("thread-id",
+# "last-assistant-message"); the same fields have appeared snake_cased, so both spellings
+# are accepted and neither field is required. Without jq, or with a payload that does not
+# parse, both stay empty and only the generic notification below goes out.
+THREAD_ID=""
+MESSAGE=""
+if [[ -n "$PAYLOAD" ]] && command -v jq > /dev/null 2>&1; then
+  THREAD_ID="$(printf '%s' "$PAYLOAD" \
+    | jq -r '."thread-id" // .thread_id // empty' 2>/dev/null || true)"
+  MESSAGE="$(printf '%s' "$PAYLOAD" \
+    | jq -r '."last-assistant-message" // .last_assistant_message // empty' 2>/dev/null || true)"
+fi
+
+# Preview body: the first line of the agent's closing message, capped at 500 characters.
+# Control characters become spaces first — this text is model output on its way into an
+# escape sequence written to a terminal, and an embedded BEL would end the sequence early
+# and hand what follows to the terminal as raw input.
+BODY="${MESSAGE%%$'\n'*}"
+BODY="${BODY//[[:cntrl:]]/ }"
+BODY="${BODY:0:500}"
+if [[ -z "$BODY" ]]; then
+  BODY="codex turn complete"
+fi
+
+# Resume hint, in the same file and the same format winmux-notify.sh writes for Claude
+# Code: line 1 the resume command, line 2 the epoch seconds it was recorded at, replaced
+# atomically through a pid-suffixed temp file. Both agents write the same per-tab path on
+# purpose — the last agent to finish a turn in a tab is the one that tab offers back, which
+# is what a user alternating between them expects. The id must be a plain token because the
+# spawn wrapper echoes line 1 into the terminal and into shell history; a Codex thread id is
+# a uuid, so the check rejects nothing real. Every failure here is swallowed: a resume hint
+# must never cost the notification, let alone the turn.
+if [[ -n "${WINMUX_TAB:-}" && "$THREAD_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  RESUME_FILE="$HOME/.winmux/resume/tab-$WINMUX_TAB"
+  if mkdir -p "$HOME/.winmux/resume" 2>/dev/null; then
+    if printf 'codex resume %s\n%s\n' "$THREAD_ID" "$(date +%s 2>/dev/null || echo 0)" \
+         > "$RESUME_FILE.tmp.$$" 2>/dev/null; then
+      mv -f "$RESUME_FILE.tmp.$$" "$RESUME_FILE" 2>/dev/null || true
+    fi
+    rm -f "$RESUME_FILE.tmp.$$" 2>/dev/null || true
+  fi
+fi
+
+# Hand the emission to the notify script: same tty resolution, same semicolon substitution,
+# one implementation. stdin is closed because that script reads it when it is not a tty.
+"$HOME/.winmux/bin/winmux-notify.sh" winmux:idle "$BODY" < /dev/null || true
+
+# Even if the emission fails, the notify program exits successfully (miss a notification
+# rather than have Codex report a failing notify command).
+exit 0
+WINMUX_CODEX_NOTIFY_EOF
+status=$?
+
+if [ "$status" -ne 0 ] || ! chmod +x "$CODEX_NOTIFY.tmp" || ! mv -f "$CODEX_NOTIFY.tmp" "$CODEX_NOTIFY"; then
+  rm -f "$CODEX_NOTIFY.tmp"
+  echo "[winmux] setup: cannot install $CODEX_NOTIFY" >&2
+  exit 1
+fi
+log "codex notify script installed: $CODEX_NOTIFY"
 
 # --- 2. winmux CLI -----------------------------------------------------------------------
 # The command line of a pane: list the open tabs, put text into another one, print this tab's
@@ -962,11 +1042,16 @@ fi
 
 # --- 6. Codex notify --------------------------------------------------------------------
 # Codex's notify program is run once per completed turn, which maps to winmux:idle.
-# We only ever *add* it: an existing notify key is the user's own integration and stays.
+# An existing notify key is the user's own integration and stays — with exactly one
+# exception: a line byte-for-byte identical to the one *winmux itself* wrote (unchanged from
+# setup v2 through v6) is
+# ours to upgrade, and is replaced with the one that runs winmux-codex-notify.sh (which the
+# older line could not, because it threw the payload away). Anything else, including a line
+# that merely mentions our scripts, is reported and left alone.
 # A missing config.toml means Codex is not installed here — we do not create one.
 if [ ! -f "$CODEX_CONFIG" ]; then
   log "codex: no $CODEX_CONFIG; skipped (Codex not installed here)"
-elif python3 - "$CODEX_CONFIG" "$NOTIFY_CMD" <<'WINMUX_CODEX_EOF' >> "$LOG" 2>&1
+elif python3 - "$CODEX_CONFIG" "$NOTIFY_CMD" "$CODEX_NOTIFY_CMD" <<'WINMUX_CODEX_EOF' >> "$LOG" 2>&1
 import os
 import re
 import shutil
@@ -977,21 +1062,24 @@ try:
 except ModuleNotFoundError:
     tomllib = None
 
-config_path, notify_cmd = sys.argv[1], sys.argv[2]
+config_path, notify_cmd, codex_notify_cmd = sys.argv[1], sys.argv[2], sys.argv[3]
 
 COMMENT = "# winmux: notify on turn completion (added automatically; delete these two lines to opt out)"
 # A TOML literal string (single quotes) holds the shell command, so the double quotes
-# inside it need no escaping. stdin is closed because the notify script reads it when it
-# is not a tty, and Codex gives the notify program no JSON on stdin (it passes it as argv).
-VALUE = 'notify = ["bash", "-lc", \'%s winmux:idle "codex turn complete" < /dev/null\']' % notify_cmd
+# inside it need no escaping. Codex appends the payload JSON as the final argv element, so
+# `bash -lc <script> <json>` puts it in "$0" — that is how it reaches the script's $1.
+COMMAND = 'exec %s "$0"' % codex_notify_cmd
+VALUE = 'notify = ["bash", "-lc", \'%s\']' % COMMAND
+EXPECTED = ["bash", "-lc", COMMAND]
+# The line setups v2 through v6 wrote, verbatim (identical across them). Only this one is
+# ever replaced.
+LEGACY_VALUE = 'notify = ["bash", "-lc", \'%s winmux:idle "codex turn complete" < /dev/null\']' % notify_cmd
+# Marks a notify line as talking about our scripts without being one we wrote.
+MARKS = ("winmux-notify.sh", "winmux-codex-notify.sh")
 
 with open(config_path, encoding="utf-8") as handle:
     text = handle.read()
 lines = text.split("\n")
-
-if any(re.match(r"\s*notify\s*=", line) for line in lines):
-    print("codex: notify already set in %s; left untouched" % config_path)
-    raise SystemExit(0)
 
 # Never rewrite a file we cannot parse — same rule as the Claude settings merge.
 if tomllib is not None:
@@ -1000,6 +1088,58 @@ if tomllib is not None:
     except Exception as err:
         print("codex: %s does not parse as TOML (%s); left untouched" % (config_path, err))
         raise SystemExit(0)
+
+existing = [index for index, line in enumerate(lines) if re.match(r"\s*notify\s*=", line)]
+if existing:
+    # More than one match means the line scan cannot tell which key is the root-table
+    # notify (a `notify =` inside a table reads the same here), so nothing is touched.
+    if len(existing) > 1:
+        print("codex: %s has more than one notify line; left untouched" % config_path)
+        raise SystemExit(0)
+    index = existing[0]
+    line = lines[index]
+    current = line.strip()
+    if current == VALUE:
+        print("codex: notify already runs winmux-codex-notify.sh in %s; left untouched"
+              % config_path)
+        raise SystemExit(0)
+    if current != LEGACY_VALUE:
+        if any(mark in current for mark in MARKS):
+            print("codex: notify in %s runs a winmux script but is not the line winmux "
+                  "wrote; left untouched — replace it with %s by hand for Codex resume "
+                  "hints" % (config_path, VALUE))
+        else:
+            print("codex: notify already set in %s; left untouched" % config_path)
+        raise SystemExit(0)
+
+    # Ours, and stale: swap the value in place. Indentation is preserved and nothing else
+    # in the file moves, so unlike the insertion path below there is no position to guess.
+    indent = line[: len(line) - len(line.lstrip())]
+    merged_lines = list(lines)
+    merged_lines[index] = indent + VALUE
+    merged = "\n".join(merged_lines)
+    if not merged.endswith("\n"):
+        merged += "\n"
+    # Same re-parse gate as the insertion path: write only what provably parses and
+    # provably lands the value we meant in the root table.
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(merged)
+        except Exception as err:
+            print("codex: refusing to write %s — the notify upgrade would break it (%s); "
+                  "left untouched" % (config_path, err))
+            raise SystemExit(0)
+        if parsed.get("notify") != EXPECTED:
+            print("codex: refusing to write %s — the notify upgrade would not land in the "
+                  "root table; left untouched" % config_path)
+            raise SystemExit(0)
+    tmp = config_path + ".winmux-tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(merged)
+    shutil.copymode(config_path, tmp)
+    os.replace(tmp, config_path)
+    print("codex: notify upgraded to winmux-codex-notify.sh in %s" % config_path)
+    raise SystemExit(0)
 
 # notify is a root-table key, so it must be inserted **before the first table header**.
 # Appending at EOF would silently make it a key of whatever table ends the file.
@@ -1030,7 +1170,7 @@ if tomllib is not None:
         print("codex: refusing to write %s — the insertion would break it (%s); "
               "add notify to the root table manually" % (config_path, err))
         raise SystemExit(0)
-    if "notify" not in parsed:
+    if parsed.get("notify") != EXPECTED:
         print("codex: refusing to write %s — notify would not land in the root table; "
               "add it manually" % config_path)
         raise SystemExit(0)

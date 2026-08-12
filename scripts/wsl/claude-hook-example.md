@@ -17,7 +17,7 @@ named pipe, or Windows helper CLI.
 
 ## Automatic provisioning
 
-**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v6`); this
+**winmux auto-provisions this on first run per distro (`~/.winmux/.setup-v7`); this
 document remains the contract and the manual path.**
 
 On launch the app streams a setup script into `wsl.exe [-d <distro>] -- bash -s` for every
@@ -26,6 +26,10 @@ guess at the WSL home path and no dependency on a distro's `interop`/`automount`
 Once per distro it:
 
 - installs the script below at `~/.winmux/bin/winmux-notify.sh` (executable),
+- installs `~/.winmux/bin/winmux-codex-notify.sh` (executable) — the Codex half, described
+  under [Resume hint](#resume-hint--winmuxresumetab-id) below. It exists separately because
+  Codex hands its payload over as a final **argv** argument rather than on stdin, and it
+  delegates the OSC write back to `winmux-notify.sh` rather than repeating it,
 - installs the **`winmux` CLI** at `~/.winmux/bin/winmux` (executable) — the command-line
   half of the send and query channels below (`winmux ls` / `winmux send` / `winmux id`), so
   nothing has to assemble an escape sequence or repeat the tty resolution by hand. Every
@@ -37,11 +41,12 @@ Once per distro it:
   send and query channels below; source: `scripts/wsl/skills/winmux-send/SKILL.md`),
 - merges the three hooks into `~/.claude/settings.json`, keeping every existing value (see
   the migration rules below),
-- adds a `notify` key to `~/.codex/config.toml` **only if** that file exists and has no
-  `notify` of its own (Codex runs it once per completed turn, which maps to `winmux:idle`);
-  a missing file means Codex is not installed there and nothing is created,
-  and when `~/.codex/` exists, a managed `winmux integration` block in `~/.codex/AGENTS.md`
-  teaches Codex the CLI and to run it outside the sandbox (delete the block to opt out),
+- adds a `notify` key to `~/.codex/config.toml` if that file exists and has no `notify` of
+  its own (Codex runs it once per completed turn, which maps to `winmux:idle`); a missing
+  file means Codex is not installed there and nothing is created, and when `~/.codex/`
+  exists, a managed `winmux integration` block in `~/.codex/AGENTS.md` teaches Codex the CLI
+  and to run it outside the sandbox (delete the block to opt out). An **existing** `notify`
+  is the user's own integration and stays — with the one exception in the table below,
 - records what it did in `~/.winmux/setup.log`, then writes the marker.
 
 The hook merge treats each of the three events on its own, and never touches a hook that is
@@ -57,6 +62,31 @@ not one of ours:
 Migration exists because a hand-wired hook points at an older copy of *this* contract, which
 goes stale as the script below changes (the tty fallback, the stdin JSON body). Nothing is
 ever duplicated: an event that has any `winmux-notify.sh` hook never gets a second one.
+
+Codex's single `notify` key is read the same way — the only line winmux will ever replace is
+the one winmux itself wrote:
+
+| Existing `notify` in `~/.codex/config.toml` | Result | Logged as |
+|---|---|---|
+| None | The line below is inserted into the **root table** (before the first `[table]` header), preceded by the opt-out comment | `notify added` |
+| Byte-for-byte the line setup **v6** wrote (`… winmux-notify.sh winmux:idle "codex turn complete" < /dev/null`) | Replaced in place with the line below, indentation kept, nothing else in the file moved | `notify upgraded to winmux-codex-notify.sh` |
+| Already the line below | Left exactly as it is | `already runs winmux-codex-notify.sh` |
+| Anything else, **including** a hand-edited line that runs one of our scripts with different wording | Left exactly as it is; the log names the line to paste if you want the Codex resume hint | `left untouched` |
+| More than one `notify =` line, or a file that does not parse as TOML | Left exactly as it is — which key is the root-table one cannot be told apart by a line scan | `left untouched` |
+
+```toml
+notify = ["bash", "-lc", 'exec "$HOME/.winmux/bin/winmux-codex-notify.sh" "$0"']
+```
+
+Codex appends the payload JSON as the **final argv element**, so `bash -lc <script> <json>`
+puts it in `"$0"` and the script receives it as `$1`. The legacy line (written unchanged by
+setups v2 through v6) predates the resume hint and named no argument at all, which is why it
+threw the payload away — and why upgrading it is the one exception to "never rewrite an
+existing `notify`". When `tomllib` is available (Python 3.11+), the merged result is re-parsed
+and the value compared against what was intended before anything is written; if either check
+fails the file is left untouched. Without `tomllib` (e.g. Ubuntu 22.04's Python 3.10), fresh
+*insertion* is refused entirely, but the legacy-line *replacement* still proceeds unverified —
+it swaps one known line in place, no position guessing involved.
 
 Any failure leaves the marker unwritten, so the next launch retries. A distro without
 `python3` gets the notify script but no hook merge (the merge has to preserve an existing
@@ -475,9 +505,10 @@ fi
 ## Resume hint — `~/.winmux/resume/tab-<id>`
 
 A restart respawns every terminal tab as a **fresh login shell**: the layout comes back, but
-the agent session that was running in the tab does not, and its id is nowhere on screen. The
-hook stdin JSON carries `.session_id`, so the hook records it per tab and the next shell in
-that tab offers it back.
+the agent session that was running in the tab does not, and its id is nowhere on screen. Both
+agents hand winmux an id when they report a turn — Claude Code's hook stdin JSON carries
+`.session_id`, Codex's notify payload carries `thread-id` — so each records it per tab and the
+next shell in that tab offers it back.
 
 **This is a hint, never an action.** The recorded command is put in front of the user in two
 places and run by neither of them.
@@ -485,12 +516,17 @@ places and run by neither of them.
 | Field | Contract |
 |---|---|
 | Path | `~/.winmux/resume/tab-<id>`, where `<id>` is the writer's `WINMUX_TAB` — the tab's stable id, which survives a restart, so the file and the tab that gets the hint are the same tab. |
-| Line 1 | The resume command, e.g. `claude --resume 11111111-2222-3333-4444-555555555555`. The reader takes **only this line**. |
+| Line 1 | The resume command: `claude --resume 11111111-2222-3333-4444-555555555555` or `codex resume 019ff5e6-d08e-7013-9cec-105030994d8d`. The reader takes **only this line**. |
 | Line 2 | Epoch seconds at the time of writing. Recorded for diagnosis; **nothing reads it** — see freshness below. |
-| Written when | Every hook invocation that has both a non-empty `WINMUX_TAB` and a `.session_id` matching `^[A-Za-z0-9_-]+$`. The tab's most recent session therefore wins. |
-| Not written when | The tab has no `WINMUX_TAB` (a tab without per-tab history), stdin is a TTY (the script run by hand, so no JSON is read at all), `jq` is missing, the JSON has no `session_id`, or the id is not a plain token. |
-| Atomicity | Written to `<path>.tmp.<pid>` and `mv`d into place, so a concurrent reader sees either the old file or the new one, never a half-written line. The pid suffix keeps two hooks firing at once in the same tab from sharing a temp name. |
-| Failure | Swallowed. Every step is guarded and the hook still exits 0 — a resume hint must never cost a notification, let alone the session. |
+| Written when | Every invocation that has both a non-empty `WINMUX_TAB` and an id matching `^[A-Za-z0-9_-]+$` — Claude Code's `.session_id`, Codex's `thread-id` (`thread_id` is accepted too; the payload has been serialized both ways). The tab's most recent session therefore wins. |
+| Not written when | The tab has no `WINMUX_TAB` (a tab without per-tab history), `jq` is missing, the payload does not parse or carries no id, or the id is not a plain token. For Claude Code, also when stdin is a TTY (the script run by hand, so no JSON is read at all). |
+| Atomicity | Written to `<path>.tmp.<pid>` and `mv`d into place, so a concurrent reader sees either the old file or the new one, never a half-written line. The pid suffix keeps two writers firing at once in the same tab from sharing a temp name. |
+| Failure | Swallowed. Every step is guarded and the writer still exits 0 — a resume hint must never cost a notification, let alone the session. |
+
+**Both agents write the same file, and the last one to finish a turn in that tab wins.** That
+is the intended behavior, not a collision to be designed away: a tab where you switched from
+Claude Code to Codex should offer the Codex thread back, and the same in reverse. There is one
+hint per tab, and it names whichever agent spoke last.
 
 The reader is `apps/winmux/src-tauri/src/host.rs::bash_argv`, the same wrapper that sets
 `WINMUX_TAB` and `HISTFILE`. Before it execs the login shell it reads line 1 and, if it is
@@ -506,13 +542,14 @@ that ends in `exec bash -l` — a broken hint must not cost you the shell. (The 
 cannot swallow is the hint `printf` failing to write to the pane's own tty, which is not a
 state a usable tab is in.)
 
-**The wrapper trusts the file; the write side is where the checking is.** The reader takes
-line 1 as-is, so the charset guard above is the only thing standing between the file and both
-a raw `printf` to the terminal and an appended shell-history line. This is the same stance as
-the send channel: anything running as you could edit `~/.bashrc` directly, so this is a
-misfire guard rather than a privilege boundary — but it does mean the file should be treated
-as trusted input, and a second guard on the reader is the obvious hardening if that ever
-stops being true.
+**Both sides check the shape.** The writer guards the id's charset, and the reader accepts
+only two exact forms — `claude --resume <token>` and `codex resume <token>`, where `<token>`
+is `[A-Za-z0-9_-]+` — dropping the hint silently otherwise, so a substituted file cannot
+become a surface for luring an ↑+Enter into running something else. That reader list is a
+**whitelist**: wiring a third agent means adding its form there as well, or its hint is
+recorded and then quietly thrown away. Anything running as you could edit `~/.bashrc`
+directly, so this is a misfire guard rather than a privilege boundary — the same stance as the
+send channel.
 
 **A restart with no new session in between re-appends the same line.** The hint is not
 consumed by being shown, so N restarts of a tab whose recorded session has not changed leave
@@ -524,10 +561,32 @@ is. An age cutoff would have to guess at a threshold, and being wrong in the str
 hides the one thing the user was looking for; the timestamp is on line 2 for anyone who wants
 to check by hand. Nothing prunes these files, exactly as nothing prunes `~/.winmux/history`.
 
-**Claude Code only, for now.** Codex's `notify` program receives its payload as a final
-**argv** argument rather than on stdin, and the entry winmux writes into `~/.codex/config.toml`
-discards it; wiring it up also means rewriting a `notify` key that the installer's own rule
-says it must never touch. See the backlog note in `CLAUDE.md`.
+### The Codex half — `winmux-codex-notify.sh`
+
+Codex's `notify` program is run once per completed turn (`agent-turn-complete`, the only
+event there is) and receives the payload as a single JSON object appended as the **final argv
+element** — not on stdin. `~/.winmux/bin/winmux-codex-notify.sh` is that program; its source
+is the `provision.rs` heredoc, and this section is its contract. Given `$1`:
+
+1. **Reads two fields, defensively.** `thread-id` and `last-assistant-message`, falling back
+   to `thread_id` / `last_assistant_message` (the payload has been serialized both kebab- and
+   snake-cased across releases; `codex-cli 0.147` is kebab). Neither is required.
+2. **Records the resume hint** — `codex resume <thread-id>` in the file described above, when
+   `WINMUX_TAB` is set and the id is a plain token. `codex resume <id>` is the same form Codex
+   prints as its own post-exit hint.
+3. **Emits `winmux:idle`** by running `winmux-notify.sh` as a child with stdin closed, so the
+   tty resolution and the `;` substitution have exactly one implementation. The body is the
+   **first line** of the agent's closing message, control characters replaced with spaces and
+   capped at 500 characters; with no message it reads `codex turn complete`.
+
+Steps 1 and 2 are best-effort and step 3 is not: a missing `jq`, an unparseable payload, or a
+payload with neither field still produces the notification, just a generic one and no hint.
+The program exits 0 whatever happens — Codex should never report a failing `notify`.
+
+The control-character scrub in step 3 is load-bearing, not hygiene: unlike Claude Code's
+`.message`, which is a canned string, `last-assistant-message` is **model output**, and it is
+on its way into an escape sequence written to a terminal. An embedded BEL would end the OSC
+early and hand whatever followed to the terminal as input.
 
 ## Emitting title and cwd from the shell prompt (OSC 0 / OSC 7)
 

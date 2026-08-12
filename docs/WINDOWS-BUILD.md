@@ -1114,8 +1114,8 @@ launch**; the wrapper half reaches only tabs opened after this build, so item 6 
    after updating shows no hint yet. Run one prompt through Claude first, then restart.
 
    The hint is shown whenever the file exists, no matter how old it is (freshness is your
-   call, and line 2 is there to check by hand). Codex sessions get no hint — see the contract
-   document and the `CLAUDE.md` backlog for why.
+   call, and line 2 is there to check by hand). Codex sessions were not recorded in this
+   version; they are as of v0.3.5 (setup v7) — see that checklist below.
 
 ### v0.3.4 — verification
 
@@ -1194,6 +1194,61 @@ batch, from a console (`npm run tauri dev`) unless an item says otherwise.
      `console.debug` line (`needsInput toast failed`) in the dev console. Confirm that, and
      treat it as correct behavior rather than a defect — the toast is an auxiliary signal,
      same discipline as the chime.
+
+### v0.3.5 — verification
+
+**Codex gets the resume hint.** Setup version **7** (`~/.winmux/.setup-v7`) installs
+`~/.winmux/bin/winmux-codex-notify.sh` and points Codex's `notify` at it, so a Codex thread
+is recorded per tab exactly as a Claude Code session already was
+([`scripts/wsl/claude-hook-example.md`](../scripts/wsl/claude-hook-example.md), "Resume
+hint"). Run these in a distro that has Codex installed, on a build of this version.
+
+1. **Provisioning replaced winmux's own `notify` line, and only that.** Launch the app once
+   and confirm `~/.winmux/.setup-v7` exists, then read `~/.codex/config.toml`: the `notify`
+   value is now
+
+   ```toml
+   notify = ["bash", "-lc", 'exec "$HOME/.winmux/bin/winmux-codex-notify.sh" "$0"']
+   ```
+
+   and **everything else in the file is untouched** (model, `[tui]`, your own keys, the
+   comment above the line). `~/.winmux/setup.log` says `notify upgraded to
+   winmux-codex-notify.sh`. Launch again after deleting the marker and it says `already runs
+   winmux-codex-notify.sh; left untouched` — the second run must not rewrite anything.
+
+2. **A hand-written `notify` is not migrated.** In a distro where you have edited that line
+   yourself (or fake it: change the wording inside the quotes, or point it at your own
+   script), delete the marker and relaunch. The line is **byte-for-byte as you left it**, and
+   the log says `left untouched` — with the line to paste, if the value mentions a winmux
+   script. This is the rule the whole step rests on; a wrongly-rewritten user config is a
+   failure of this checklist even if everything else passes.
+
+3. **A turn records the hint.** Run `codex` in a winmux tab, let one turn complete, and check
+   `~/.winmux/resume/tab-<id>` (the tab id is `winmux id`): line 1 reads `codex resume
+   <uuid>`, line 2 is the epoch. The uuid should match what Codex itself prints as its resume
+   hint when you exit it.
+
+4. **The idle notification previews Codex's last message.** As the turn completes, the pane
+   badge/sidebar preview shows the **first line of Codex's closing message**, not a fixed
+   string — that is the visible difference from v6, which always read `codex turn complete`.
+   A turn that ends with no message still notifies, with `codex turn complete` as the body.
+
+5. **Restart offers it back.** Quit and relaunch winmux. The respawned tab prints one dimmed
+   line, `[winmux] resume previous agent: codex resume <uuid>`, and a single ↑ puts that
+   command on the command line. Press Enter and confirm Codex actually reopens that thread —
+   the point of the hint is that the command works, not that it is printed.
+
+6. **Alternating agents: the last one wins.** In the same tab, run Claude Code through one
+   prompt, then Codex through one turn, then restart: the hint is the **Codex** one. Reverse
+   the order (Codex, then Claude Code) and restart: the hint is the **Claude** one. One tab
+   has one hint, and it names whichever agent spoke last.
+
+7. **A tab with no Codex and no Claude still looks untouched.** A tab that never ran an agent
+   prints no hint line at all, and ↑ recalls that tab's own history as before.
+
+Note, as with v0.3.3: recording starts with the **first turn after this build's provisioning**
+(v7). A Codex thread that ran before the update left no record, so the first restart after
+updating shows no Codex hint yet — run one turn through Codex first, then restart.
 
 ## 11. ARM64 cross-build notes
 

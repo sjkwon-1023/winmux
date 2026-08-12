@@ -116,9 +116,11 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
 /// 그대로 종료된다 — 탭이 exited 로 표시돼 실패가 드러난다 (조용한 fallback 없음).
 ///
 /// **에이전트 세션 resume 힌트**: 재시작 후 respawn 되는 셸은 새 셸이라 그 탭에서 돌던
-/// 에이전트 세션이 화면에서 사라진다. Claude Code hook 이 매 호출마다
-/// `~/.winmux/resume/tab-<id>` 에 1행 = resume 명령, 2행 = 기록 시각(epoch)을 남기므로
-/// (`provision.rs` 의 `winmux-notify.sh` — 계약은 `scripts/wsl/claude-hook-example.md`),
+/// 에이전트 세션이 화면에서 사라진다. Claude Code hook 과 Codex notify 프로그램이 매
+/// 호출마다 `~/.winmux/resume/tab-<id>` 에 1행 = resume 명령, 2행 = 기록 시각(epoch)을
+/// 남기므로 (`provision.rs` 의 `winmux-notify.sh`·`winmux-codex-notify.sh` — 계약은
+/// `scripts/wsl/claude-hook-example.md`; 두 에이전트가 같은 파일을 쓰므로 그 탭에서
+/// **마지막으로 턴을 끝낸 쪽**이 이긴다),
 /// exec 직전에 그 1행을 읽어 ① 탭의 HISTFILE 끝에 덧붙이고(↑ 한 번에 나온다)
 /// ② 흐린 안내 한 줄을 찍는다. **자동 실행은 하지 않는다** — 재개할지는 사용자가 정한다.
 /// 파일이 없으면 아무 출력도 없다. 기록 시각으로 신선도를 판단하지 않는 것은 의도된
@@ -133,11 +135,13 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
 /// 함수에서 통째로 정하므로 그런 값은 오지 않는다.
 ///
 /// 힌트 1행은 **읽는 쪽에서도 형태를 검증한다** (리뷰 finding): 기록 형식과 대칭인
-/// `claude --resume <영숫자·-·_ 토큰>` 정확 일치만 통과시키고, 그 외(escape 시퀀스·
-/// 셸 메타문자·다른 명령)는 조용히 무시한다 — 같은 uid 가 파일을 바꿔치기해도
-/// "↑+Enter 를 유도하는 임의 명령 표면"이 되지 않는다. 같은 uid 는 어차피
+/// `claude --resume <영숫자·-·_ 토큰>` 과 `codex resume <영숫자·-·_ 토큰>` 정확 일치만
+/// 통과시키고, 그 외(escape 시퀀스·셸 메타문자·다른 명령)는 조용히 무시한다 — 같은
+/// uid 가 파일을 바꿔치기해도 "↑+Enter 를 유도하는 임의 명령 표면"이 되지 않는다.
+/// **화이트리스트라 새 에이전트를 붙이려면 여기에 형태를 추가해야 한다** (쓰는 쪽만
+/// 고치면 힌트가 조용히 버려진다). 같은 uid 는 어차피
 /// `~/.bashrc` 를 고칠 수 있으니 권한 경계가 아니라 오발 방지이며, 쓰는 쪽
-/// (`winmux-notify.sh`)의 session_id charset 가드와 짝이다. 또 힌트는 표시로
+/// (`winmux-notify.sh`·`winmux-codex-notify.sh`)의 id charset 가드와 짝이다. 또 힌트는 표시로
 /// 소비되지 않으므로, 세션이 바뀌지 않은 채 재시작을 N 번 하면 같은 줄이
 /// HISTFILE 에 N 개 쌓인다 (인접하므로 ↑ 한 번은 그대로).
 ///
@@ -176,6 +180,8 @@ fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
              && if [ -s \"$RESUME\" ]; then IFS= read -r cmd < \"$RESUME\" || true; fi \
              && case \"$cmd\" in 'claude --resume '*) \
              expr \"x$cmd\" : 'xclaude --resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
+             'codex resume '*) \
+             expr \"x$cmd\" : 'xcodex resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
              *) cmd= ;; esac \
              && if [ -n \"$cmd\" ]; then \
              printf '%s\\n' \"$cmd\" >> \"$HOME/.winmux/history/tab-{tab}\"; \
@@ -256,6 +262,8 @@ mod tests {
                  && if [ -s \"$RESUME\" ]; then IFS= read -r cmd < \"$RESUME\" || true; fi \
                  && case \"$cmd\" in 'claude --resume '*) \
                  expr \"x$cmd\" : 'xclaude --resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
+                 'codex resume '*) \
+                 expr \"x$cmd\" : 'xcodex resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
                  *) cmd= ;; esac \
                  && if [ -n \"$cmd\" ]; then \
                  printf '%s\\n' \"$cmd\" >> \"$HOME/.winmux/history/tab-7\"; \

@@ -84,15 +84,23 @@ Accepted deferrals, one line each. None of these block the MVP.
   `tab-<id>.tmp.<pid>` a hook killed mid-write left behind. Open alongside it:
   whether a tab closed through the kill path writes its `HISTFILE` at all (a `history -a`
   follow-up if it does not).
-- **The resume hint is Claude-only** — the hook stdin JSON's `.session_id` is recorded per tab
-  and offered back by the spawn wrapper (contract in `scripts/wsl/claude-hook-example.md`).
-  Codex is **not** wired, deliberately: its `notify` payload arrives as the final **argv**
-  argument (not stdin), and the `notify` line winmux writes into `~/.codex/config.toml`
-  discards it, so reaching already-provisioned users would mean rewriting an existing `notify`
-  key — the one thing that step's rule says it must never do. `openai/codex` `main` does carry
-  a resumable `thread-id` in that payload (and `codex resume <uuid>` takes it), but which
-  released version first shipped the field is unverified. Doing this properly means a
-  self-migration path for winmux's own notify line plus a version probe.
+- **The resume hint covers Codex too — landed 2026-08-12** (setup v7). A new
+  `~/.winmux/bin/winmux-codex-notify.sh` reads Codex's notify payload from `$1` (it arrives as
+  the final **argv** element, not on stdin), records `codex resume <thread-id>` in the same
+  per-tab file the Claude hook writes, and delegates the `winmux:idle` emission to
+  `winmux-notify.sh` — whose body is now Codex's last message rather than a fixed string.
+  Both agents write one file, so **the last agent to finish a turn in a tab wins**, and the
+  spawn wrapper's read guard is a whitelist that now takes `codex resume <token>` as well.
+  The exclusion that blocked this was the "never rewrite an existing `notify`" rule; it is
+  resolved by a **self-migration** narrow enough to keep the rule: the *only* value ever
+  replaced is one byte-for-byte identical to the line winmux itself wrote (unchanged from
+  setup v2 through v6; re-parsed with `tomllib` and value-checked before the write when
+  `tomllib` exists — without it the in-place swap proceeds unverified). Every other `notify`, hand-edited variants of
+  our own line included, is left untouched with a log line naming the replacement. Payload
+  keys are kebab-case (`thread-id`, `last-assistant-message`) as of `codex-cli 0.147`, with
+  the snake-cased spellings accepted as a fallback; no version probe — a payload we cannot
+  read notifies without a hint. Contract: `scripts/wsl/claude-hook-example.md`. Verification:
+  WINDOWS-BUILD §10 v0.3.5.
 - **`isCommandError`'s variant table is hand-maintained** — the `formatCommandError`
   switch is compile-time exhaustive via `assertNever`, but the type guard above it is a
   literal list, so a new `CommandError` variant falls silently through to the raw-JSON
