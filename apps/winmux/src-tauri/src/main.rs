@@ -14,6 +14,9 @@
 // Windows 릴리스 빌드에서 콘솔 창을 띄우지 않는다 (디버그 빌드는 콘솔 유지).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Windows 셸 앱 신원(AUMID) 등록 — 토스트 발신자 등록용이라 Windows 전용이다.
+#[cfg(windows)]
+mod app_identity;
 mod commands;
 mod host;
 mod provision;
@@ -49,6 +52,13 @@ fn backup_label(backup: &Result<PathBuf, String>) -> String {
 }
 
 fn main() {
+    // **웹뷰·플러그인 초기화보다 먼저다.** Windows 셸에 AUMID 를 선언하고 시작 메뉴
+    // 바로가기를 맞춰야 needsInput 토스트가 winmux 발신자로 뜬다 — 미등록 발신자의
+    // 토스트를 WinRT 가 조용히 버리는 게 v0.3.5 의 "토스트가 아예 안 뜬다" 원인이었다
+    // (근거·AUMID 일치 논증은 `app_identity` 모듈 doc). 실패해도 부팅은 계속한다.
+    #[cfg(windows)]
+    app_identity::register();
+
     // 최소화 판정의 중복 emit 억제 플래그 (체크포인트 2 실기 결함 후속) — 전이
     // (false↔true)에서만 프론트에 알린다. Resized 는 드래그 리사이즈 중 연속으로
     // 오므로 매번 emit 하면 IPC 잡음이 된다. on_window_event 핸들러는

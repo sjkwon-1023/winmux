@@ -1313,6 +1313,56 @@ The v0.3.6 batch. Items are independent — run them in any order on a build of 
      is as fast as before, and moving quickly between windows never leaves colours from the
      previous window behind.
 
+3. **Shell app identity so toasts actually appear** — v0.3.5 showed no toast at all because an
+   unpackaged exe has no AppUserModelID registered with the shell, and WinRT drops toasts from
+   unregistered senders *silently*. The app now registers itself at start-up
+   ([`app_identity.rs`](../apps/winmux/src-tauri/src/app_identity.rs) module doc carries the
+   AUMID-match argument). These items are the field proof that could not be run on the Linux
+   dev box.
+
+   **Which exe to test with matters.** The plugin only puts our AUMID on the toast when the
+   exe's folder does *not* end in `\target\debug` or `\target\release`, and this module mirrors
+   that exception exactly. So an x64 `npm run tauri build -- --no-bundle` run **in place** from
+   `target\release\` exercises neither path — it keeps the old PowerShell-sender fallback and
+   proves nothing. Test with either of the two real field shapes: the exe **copied to a normal
+   folder**, or the ARM64 cross-build artifact, whose folder is
+   `target\aarch64-pc-windows-msvc\release\` and therefore does *not* match the exception even
+   when run in place. That second shape is the one the original bug report came from. The
+   start-up log tells you which branch you are on: a skipped dev build prints `start menu
+   shortcut not needed (dev build — ...)`, never `up to date`.
+
+   - **First run creates the Start-menu entry** — copy `winmux-app.exe` to a normal folder
+     (e.g. `%LocalAppData%\winmux\winmux-app.exe`) and launch it once.
+     `%AppData%\Microsoft\Windows\Start Menu\Programs\winmux.lnk` must now exist, and typing
+     `winmux` in the Start menu must find it. Right-click → Properties: **Target** is the exe
+     you just launched.
+   - **winmux appears in the notification list** — open Windows Settings › System ›
+     Notifications: there must now be a **winmux** entry (this is the thing whose absence was
+     the confirmed root cause). It may take a moment or a relaunch for the shell to index the
+     new shortcut — see the last item.
+   - **An unfocused needs-input toast really shows, from winmux** — start an agent turn that
+     ends in a prompt, click away so the window is unfocused, and let it reach needs-input: a
+     toast appears and the sender name on the card reads **winmux**, not Windows PowerShell.
+     Then check Action Center — the toast is listed under winmux there too.
+   - **Second launch is a no-op** — relaunch without moving anything. The console line reads
+     `start menu shortcut up to date`, and the `.lnk` file's modified timestamp is
+     **unchanged** (the shortcut must not be rewritten every boot).
+   - **Moving the exe refreshes the target** — quit, move the exe to a different folder, launch
+     it from there. The same `winmux.lnk` must now point at the **new** path (Properties →
+     Target), not a second shortcut, and toasts must still show as winmux. This is the version
+     swap case: the shortcut is refreshed, not created once and left stale.
+   - **A failure is loud, not fatal** — no way to force this by hand, but if the registration
+     ever fails the app must still boot normally and print a single
+     `[winmux] app-identity: FAILED ...` line. Note that release builds are
+     `windows_subsystem = "windows"` and have no console, so this line is only visible in a
+     debug build or when the exe is started from a terminal that supplies one.
+   - **Observation only — the first run may need a relaunch, and clicking does nothing.** Two
+     accepted unknowns: (a) the shell may not index a brand-new shortcut before the first toast
+     is raised, so if the very first toast is missing but the second launch works, that is the
+     known indexing lag, not a regression — record which one it was; (b) clicking the toast has
+     no activation handler wired, so nothing happening on click is acceptable for now. If it
+     *does* focus the window, note that too.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

@@ -39,3 +39,21 @@ windows-sys = { version = "0.61", features = [
 # 바이너리가 없고 ARM64 크로스 빌드에도 추가 준비물이 없다. default features
 # (xdg-portal·wayland)는 Linux 백엔드 전용이라 끈다.
 rfd = { version = "0.17", default-features = false }
+# 셸 앱 신원(AUMID) 등록 — `app_identity` 모듈. 토스트가 뜨려면 시작 메뉴 .lnk 에
+# System.AppUserModel.ID 를 심어야 하는데 그건 COM(IShellLink·IPropertyStore) 이라
+# windows-sys 의 raw FFI 로는 vtable 을 손으로 깎아야 한다 — COM 래퍼가 있는
+# `windows` 크레이트를 쓴다. 0.61 은 `tauri-winrt-notification` 이 이미 끌고 오는
+# 버전과 같아 그래프에 크레이트가 새로 늘지 않는다 (feature 는 가산이라 아래 목록만
+# 추가로 켜진다).
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    # PKEY_AppUserModel_ID 는 windows-rs 에서 여기 산다 (Shell 이 아니다).
+    "Win32_Storage_EnhancedStorage",
+    # IShellLinkW::GetPath 가 받는 WIN32_FIND_DATAW.
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }

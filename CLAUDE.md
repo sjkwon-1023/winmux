@@ -64,17 +64,25 @@ Accepted deferrals, one line each. None of these block the MVP.
   window is unfocused** (`document.hasFocus()` false) on the chime's own onset rule — one
   toast per transitioning workspace, chime alone when focused. Still a field check: toast
   sender identity for an unsigned standalone exe (WINDOWS-BUILD §10 v0.3.4).
-- **Toasts do not appear at all in the field** (user report 2026-08-12, v0.3.5): the
-  card-style Windows notification never shows, focused or not. Root cause **confirmed
-  2026-08-12**: Windows Settings › Notifications has no winmux entry at all (screenshot
-  checked), i.e. the shell has never seen an app identity to attribute toasts to — an
-  unpackaged, unsigned exe registers no AppUserModelID / Start-menu shortcut, and WinRT
-  drops toasts from unregistered senders silently. Fix direction: at startup (Windows
-  only, idempotent) create/refresh a Start-menu shortcut carrying
-  `PKEY_AppUserModel_ID` for our identifier, call
-  `SetCurrentProcessExplicitAppUserModelID`, and verify the plugin's toast AUMID matches
-  the registered one; the exe moving between versions means the shortcut target must be
-  refreshed, not just created once.
+- **Toasts do not appear at all in the field — landed 2026-08-12** (user report 2026-08-12,
+  v0.3.5): the card-style Windows notification never showed, focused or not. Root cause
+  **confirmed 2026-08-12**: Windows Settings › Notifications had no winmux entry at all
+  (screenshot checked), i.e. the shell had never seen an app identity to attribute toasts to —
+  an unpackaged, unsigned exe registers no AppUserModelID / Start-menu shortcut, and WinRT
+  drops toasts from unregistered senders silently. Fixed by `src-tauri/src/app_identity.rs`,
+  called at the very top of `main()` (before the webview and plugin init): it calls
+  `SetCurrentProcessExplicitAppUserModelID` and creates/refreshes
+  `%AppData%\...\Start Menu\Programs\winmux.lnk` with `PKEY_AppUserModel_ID`, idempotently —
+  same target + AUMID means no write, a moved exe rewrites the target (the version-swap case).
+  The AUMID is **`app.winmux.desktop`**, i.e. `tauri.conf.json`'s `identifier`, because that is
+  what the plugin puts on the toast (`tauri-plugin-notification` 2.3.3 `desktop.rs:27` takes
+  `app.config().identifier`, `desktop.rs:195-206` sets it as the app_id unless the exe sits in
+  `target\{debug,release}`); a `const` assert against `tauri.conf.json` breaks the build if the
+  two ever drift, since a mismatch would fail silently. The dev-directory exception is mirrored
+  in `plugin_uses_our_aumid` so dev builds do not litter the Start menu — they keep the
+  plugin's PowerShell-sender fallback. Failure logs one loud line and never blocks boot.
+  Verification: WINDOWS-BUILD §10 v0.3.6 item 3 (all of it is field-only — none of it could be
+  exercised on the Linux dev box).
 - **Query-reply `/tmp` confinement is string-level only** — a pre-planted symlink
   (`/tmp/x → $HOME`) routes the reply write outside; blocking it needs a
   canonicalize-at-write recheck whose 9P semantics are unverified on real hardware
