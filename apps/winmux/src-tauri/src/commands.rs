@@ -21,7 +21,6 @@ use std::time::UNIX_EPOCH;
 
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_notification::NotificationExt;
 use winmux_core::command::{Command, CommandError, CommandOutput};
 use winmux_core::session::{PtySession, SessionId};
 use winmux_core::wslpath;
@@ -365,27 +364,114 @@ pub fn reset_ui(state: State<'_, AppState>) {
     state.reset.reset_now();
 }
 
-/// needsInput OS 토스트 (백로그 2026-08-11) — `tauri-plugin-notification` 으로
-/// 제목·본문 두 줄짜리 알림 하나를 띄운다.
+/// 토스트 진단 로그 파일 — 앱 데이터 디렉터리(`%APPDATA%\app.winmux.desktop`)의
+/// `toast.log`. 다음 필드 라운드에서 "토스트가 안 보였다"를 앱 밖에서 판별하기 위한
+/// 창구다: 시도 자체가 없었는지(줄이 없다), 발송은 했는데 화면에 안 떴는지(`ok`),
+/// WinRT 가 거부했는지(`err` + 사유)가 파일 하나로 갈린다.
+#[cfg(windows)]
+const TOAST_LOG_FILE: &str = "toast.log";
+
+/// 토스트 로그 크기 상한 (64 KiB). 넘으면 잘라 내고 새로 시작한다 — 진단에 필요한
+/// 건 최근 몇 줄이고, 상시 도는 앱의 로그가 무한히 자라면 안 된다.
+#[cfg(windows)]
+const TOAST_LOG_MAX_BYTES: u64 = 64 * 1024;
+
+/// needsInput OS 토스트 (백로그 2026-08-11, v0.3.7 재작성) — WinRT 토스트를 **직접**
+/// 띄운다.
+///
+/// v0.3.6 까지는 `tauri-plugin-notification` 을 거쳤는데, 그 플러그인이 발송을
+/// `tauri::async_runtime::spawn(async move { let _ = notification.show(); })`
+/// (2.3.3 `desktop.rs:216`) 로 던져 **오류를 통째로 삼켰다** — 실기에서 토스트가 안
+/// 뜨는데 앱은 성공만 보고하는 상태라 원인 구간을 좁힐 수 없었다. 그래서 층을
+/// 걷어내고 `Toast::show()` 의 결과를 그대로 들고 온다.
+///
+/// 발신 AUMID 는 [`crate::app_identity::APP_USER_MODEL_ID`] — 셸에 **등록하는 값과
+/// 같은 상수 하나**다 (v0.3.6 의 "플러그인이 무엇을 싣는가" 추론 사슬이 사라졌다).
 ///
 /// **언제 부를지는 전적으로 프론트 계약이다**: `main.ts` 의 `notifyNeedsInput` 이
-/// needsInput 상승 전이(`chime.ts::detectNeedsInputOnset` 의 `onsets`)이면서
-/// `document.hasFocus()` 가 false 일 때만 부른다 — 창을 보고 있는 사용자에게는
-/// 차임이면 충분하다. 여기서 포커스를 다시 판정하지 않는 이유는 Tauri 쪽 포커스
-/// 신호(`on_window_event`)가 리셋 정책 전용의 별개 경로라, 판정을 두 곳에 두면
-/// 두 사실이 어긋나기 때문이다.
+/// needsInput 상승 전이(`chime.ts::detectNeedsInputOnset` 의 `onsets`) 중
+/// `chime.ts::needsInputToastTargets` 가 남긴 것만 부른다 — 창이 포커스이고 그
+/// 워크스페이스가 활성일 때(=이미 화면에 보인다)만 조용하고, 비포커스거나 다른
+/// 워크스페이스면 띄운다. 여기서 포커스를 다시 판정하지 않는 이유는 판정을 두 곳에
+/// 두면 두 사실이 어긋나기 때문이다 — 프론트가 쓰는 포커스도 결국 이 프로세스가
+/// 보낸 OS 신호(`main.rs` `window-focus`)다.
 ///
-/// 실패는 사유 문자열 그대로 올린다 — 호출측은 console 로만 남긴다 (알림은 차임과
-/// 같은 부가 신호라 실패가 UI 동작을 막으면 안 된다). 상태도 Dispatcher lock 도
-/// 타지 않고, 호출 빈도가 전이당 1회라 sync 커맨드로 둔다.
+/// 실패는 ① `toast.log` 에 한 줄, ② `Err(사유)` 로 프론트(console.debug) — 두 곳
+/// 모두에 남긴다. 삼키지 않되 UI 동작을 막지도 않는다. 상태도 Dispatcher lock 도
+/// 타지 않고, 호출 빈도가 전이당 1회라 sync 커맨드로 둔다 (sync 커맨드는 메인
+/// 스레드에서 도는데, WinRT 호출에는 그게 오히려 안전하다 — 웹뷰가 이미 초기화해 둔
+/// COM 아파트가 그 스레드에 있다).
+#[cfg(windows)]
 #[tauri::command]
 pub fn notify_toast(app: AppHandle, title: String, body: String) -> Result<(), String> {
-    app.notification()
-        .builder()
-        .title(title)
-        .body(body)
+    let result = tauri_winrt_notification::Toast::new(crate::app_identity::APP_USER_MODEL_ID)
+        .title(&title)
+        .text1(&body)
         .show()
-        .map_err(|err| format!("cannot show the notification: {err}"))
+        .map_err(|err| format!("cannot show the toast: {err}"));
+    log_toast_attempt(&app, &title, &result);
+    result
+}
+
+/// unix(개발 실행)에는 띄울 WinRT 토스트가 없다 — 조용한 성공으로 가리지 않고
+/// 명시적으로 실패한다 (`pick_workspace_folder` 의 cfg 분기와 같은 규율).
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn notify_toast(title: String, body: String) -> Result<(), String> {
+    Err(format!("toasts are Windows-only (dropped: {title} / {body})"))
+}
+
+/// 토스트 시도를 [`TOAST_LOG_FILE`] 에 한 줄 append 한다 — **베스트에포트**다.
+/// 로그를 못 남기는 것 자체는 알림 동작과 무관하므로 어떤 실패도 조용히 포기한다
+/// (여기서 다시 Err 를 만들면 진단 장치가 진단 대상을 가린다).
+///
+/// 본문(에이전트 마지막 메시지)은 **일부러 남기지 않는다** — 어느 워크스페이스에
+/// 무슨 결과로 시도했는지가 진단에 필요한 전부이고, 대화 내용을 디스크에 쌓을
+/// 이유는 없다. 제목의 줄바꿈은 공백으로 눕혀 "시도 1건 = 1줄"을 지킨다.
+#[cfg(windows)]
+fn log_toast_attempt(app: &AppHandle, title: &str, result: &Result<(), String>) {
+    use std::io::Write;
+
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(TOAST_LOG_FILE);
+    // 상한을 넘었으면 append 대신 truncate 로 연다 (회전 파일을 따로 두지 않는다 —
+    // 최근 이력만 있으면 되는 진단 로그다).
+    let rotate = std::fs::metadata(&path).is_ok_and(|meta| meta.len() > TOAST_LOG_MAX_BYTES);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true);
+    if rotate {
+        options.write(true).truncate(true);
+    } else {
+        options.append(true);
+    }
+    let Ok(mut file) = options.open(&path) else {
+        return;
+    };
+    let flat_title = title.replace(['\r', '\n'], " ");
+    let line = match result {
+        Ok(()) => format!("{} ok title=\"{flat_title}\"", local_timestamp()),
+        Err(err) => format!("{} err title=\"{flat_title}\": {err}", local_timestamp()),
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+/// 로그용 현지 시각 `YYYY-MM-DD HH:MM:SS`. 사용자가 "몇 시쯤 토스트를 못 봤다"와
+/// 대조하는 파일이라 epoch 초로 남기지 않는다.
+#[cfg(windows)]
+fn local_timestamp() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+
+    // SAFETY: 인자도 포인터도 없는 조회 호출이다 — 채워진 SYSTEMTIME 을 값으로 받는다.
+    let now = unsafe { GetLocalTime() };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
+    )
 }
 
 /// `pick_workspace_folder` 응답 — 고른 폴더를 워크스페이스 생성 인자로 편 형태.

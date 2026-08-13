@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window capability — core APIs (event listen for state-changed/osc-event) plus the notification plugin's default set. Without core:default the ACL rejects listen() and the whole frontend dies (spike 회귀 교훈); notification:default keeps the plugin's JS surface reachable alongside the Rust-side notify_toast command.",
+  "description": "Main window capability — core APIs only (event listen for state-changed/osc-event/window-hidden/window-focus, the window focus query main.ts seeds its flag from, and invoke of our own commands; all of it is inside core:default). Without core:default the ACL rejects listen() and the whole frontend dies (spike 회귀 교훈). The notification plugin and its notification:default permission were dropped in v0.3.7: toasts are raised by the Rust-side notify_toast command through tauri-winrt-notification, so no plugin JS surface exists to authorize.",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": ["core:default"]
 }

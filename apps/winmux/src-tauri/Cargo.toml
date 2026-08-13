@@ -11,13 +11,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-# needsInput OS 토스트 (백로그 2026-08-11) — 공식 플러그인. Windows 백엔드는
-# notify-rust → winrt-notification 의 **순수 Rust WinRT 바인딩**이라 C 툴체인도
-# 아키텍처별 바이너리도 없다 — ARM64 크로스 빌드에 추가 준비물이 없다 (rfd 와
-# 같은 판단). default features 는 비어 있고, `windows7-compat` 은 일부러 켜지
-# 않는다: 대상은 Windows 10/11 이고 그 feature 는 별도 창을 띄우는 win7 폴백을
-# 끌고 온다.
-tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -39,6 +32,15 @@ windows-sys = { version = "0.61", features = [
 # 바이너리가 없고 ARM64 크로스 빌드에도 추가 준비물이 없다. default features
 # (xdg-portal·wayland)는 Linux 백엔드 전용이라 끈다.
 rfd = { version = "0.17", default-features = false }
+# needsInput OS 토스트 (v0.3.7) — WinRT 토스트 API 의 얇은 래퍼를 **직접** 부른다.
+# v0.3.6 까지는 `tauri-plugin-notification` 을 거쳤는데, 그 플러그인의 Windows 경로가
+# `tauri::async_runtime::spawn(async move { let _ = notification.show(); })` 로 발송
+# 오류를 통째로 삼켜(2.3.3 `desktop.rs:216`) "토스트가 안 뜬다"의 원인을 앱에서 볼 수
+# 없었다. 같은 크레이트가 그 사슬의 맨 끝(notify-rust → 여기)이라 의존 그래프는
+# 오히려 줄고, 발송 AUMID 도 우리 상수 하나로 확정된다 (`app_identity` 모듈 doc).
+# 순수 Rust WinRT 바인딩이라 C 툴체인·아키텍처별 바이너리가 없다 — ARM64 크로스
+# 빌드에 추가 준비물이 없다 (rfd 와 같은 판단).
+tauri-winrt-notification = "0.7"
 # 셸 앱 신원(AUMID) 등록 — `app_identity` 모듈. 토스트가 뜨려면 시작 메뉴 .lnk 에
 # System.AppUserModel.ID 를 심어야 하는데 그건 COM(IShellLink·IPropertyStore) 이라
 # windows-sys 의 raw FFI 로는 vtable 을 손으로 깎아야 한다 — COM 래퍼가 있는
@@ -53,6 +55,10 @@ windows = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    # GetLocalTime — 토스트 진단 로그(`commands::notify_toast`)의 타임스탬프.
+    # 사용자가 "몇 시에 토스트를 못 봤다"와 대조하는 파일이라 epoch 초가 아니라
+    # 현지 시각으로 남긴다.
+    "Win32_System_SystemInformation",
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",

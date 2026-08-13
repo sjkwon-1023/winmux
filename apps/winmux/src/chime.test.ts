@@ -1,10 +1,19 @@
-// 차임의 계약 테스트 — (1) needsInput 상승 전이 판정(순수), (2) 재생 경로의
-// lazy 생성·resume·조용한 실패. WebAudio 는 node 환경에 없으므로 가짜 컨텍스트를
-// 주입해 스케줄된 음의 개수·주파수·길이를 그대로 관찰한다.
+// needsInput 알림의 계약 테스트 — (1) 상승 전이 판정(순수), (2) 토스트 대상 선별
+// (순수), (3) **휴면** 차임 재생 경로의 lazy 생성·resume·조용한 실패. WebAudio 는
+// node 환경에 없으므로 가짜 컨텍스트를 주입해 스케줄된 음의 개수·주파수·길이를
+// 그대로 관찰한다.
+//
+// (3) 은 v0.3.7 에서 배선이 빠진 휴면 코드의 테스트다 — 지우지 않고 남겨 되살릴 때
+// 검증을 다시 짜지 않게 한다 (chime.ts 모듈 머리 주석의 dormant 계약).
 
 import { describe, expect, it, vi } from "vitest";
 
-import { Chime, detectNeedsInputOnset, installChimeUnlock } from "./chime";
+import {
+  Chime,
+  detectNeedsInputOnset,
+  installChimeUnlock,
+  needsInputToastTargets,
+} from "./chime";
 import type { AgentStatus, WorkspaceId } from "./types";
 
 function statuses(entries: [WorkspaceId, AgentStatus][]): Map<WorkspaceId, AgentStatus> {
@@ -12,74 +21,66 @@ function statuses(entries: [WorkspaceId, AgentStatus][]): Map<WorkspaceId, Agent
 }
 
 describe("detectNeedsInputOnset", () => {
-  it("부팅 첫 스냅샷(prev=null)은 기준선으로만 쓰고 울리지 않는다", () => {
-    // WebView 리로드 직후처럼 살아 있는 needsInput 이 첫 스냅샷에 실려 와도 무음.
+  it("부팅 첫 스냅샷(prev=null)은 기준선으로만 쓰고 알리지 않는다", () => {
+    // WebView 리로드 직후처럼 살아 있는 needsInput 이 첫 스냅샷에 실려 와도 조용하다.
     const out = detectNeedsInputOnset(null, [
       { id: 1, agentStatus: "needsInput" },
       { id: 2, agentStatus: "running" },
     ]);
-    expect(out.chime).toBe(false);
     expect(out.onsets).toEqual([]);
     expect(out.next).toEqual(statuses([[1, "needsInput"], [2, "running"]]));
   });
 
-  it("idle·running → needsInput 은 울린다", () => {
+  it("idle·running → needsInput 은 onset 이다", () => {
     const fromIdle = detectNeedsInputOnset(statuses([[1, "idle"]]), [
       { id: 1, agentStatus: "needsInput" },
     ]);
-    expect(fromIdle.chime).toBe(true);
     expect(fromIdle.onsets).toEqual([1]);
     const fromRunning = detectNeedsInputOnset(statuses([[1, "running"]]), [
       { id: 1, agentStatus: "needsInput" },
     ]);
-    expect(fromRunning.chime).toBe(true);
     expect(fromRunning.onsets).toEqual([1]);
   });
 
-  it("같은 needsInput 이 유지되는 재렌더는 무음이다", () => {
+  it("같은 needsInput 이 유지되는 재렌더는 onset 이 아니다", () => {
     const out = detectNeedsInputOnset(statuses([[1, "needsInput"]]), [
       { id: 1, agentStatus: "needsInput" },
     ]);
-    expect(out.chime).toBe(false);
     expect(out.onsets).toEqual([]);
   });
 
-  it("needsInput 이 아닌 쪽으로 가는 전환은 전부 무음이다", () => {
+  it("needsInput 이 아닌 쪽으로 가는 전환은 전부 onset 이 아니다", () => {
     const toIdle = detectNeedsInputOnset(statuses([[1, "needsInput"]]), [
       { id: 1, agentStatus: "idle" },
     ]);
     const toRunning = detectNeedsInputOnset(statuses([[1, "idle"]]), [
       { id: 1, agentStatus: "running" },
     ]);
-    expect(toIdle.chime).toBe(false);
-    expect(toRunning.chime).toBe(false);
+    expect(toIdle.onsets).toEqual([]);
+    expect(toRunning.onsets).toEqual([]);
   });
 
-  it("신규 워크스페이스의 첫 상태가 needsInput 이면 울린다 (다른 첫 상태는 무음)", () => {
+  it("신규 워크스페이스의 첫 상태가 needsInput 이면 onset 이다 (다른 첫 상태는 아니다)", () => {
     const prev = statuses([[1, "idle"]]);
     const added = detectNeedsInputOnset(prev, [
       { id: 1, agentStatus: "idle" },
       { id: 2, agentStatus: "needsInput" },
     ]);
-    expect(added.chime).toBe(true);
     expect(added.onsets).toEqual([2]);
     const addedRunning = detectNeedsInputOnset(prev, [
       { id: 1, agentStatus: "idle" },
       { id: 2, agentStatus: "running" },
     ]);
-    expect(addedRunning.chime).toBe(false);
     expect(addedRunning.onsets).toEqual([]);
   });
 
-  it("동시에 여러 워크스페이스가 전이해도 차임 판정은 1회다 (토스트는 전이마다)", () => {
+  it("동시에 여러 워크스페이스가 전이하면 전부 입력 순서대로 담긴다", () => {
     const out = detectNeedsInputOnset(statuses([[1, "running"], [2, "idle"]]), [
       { id: 1, agentStatus: "needsInput" },
       { id: 2, agentStatus: "needsInput" },
     ]);
-    // chime 은 boolean 이라 호출측이 재생을 1회만 한다 (개수를 세지 않는다).
-    // 토스트는 "어느 워크스페이스가 기다리는가"가 내용이라 합칠 수 없어, 전이한
-    // 워크스페이스가 입력 순서대로 전부 onsets 에 담긴다.
-    expect(out.chime).toBe(true);
+    // 토스트는 "어느 워크스페이스가 기다리는가"가 내용이라 합칠 수 없다 — 전이한
+    // 워크스페이스가 하나도 빠지지 않고 순서 그대로 온다.
     expect(out.onsets).toEqual([1, 2]);
   });
 
@@ -87,22 +88,58 @@ describe("detectNeedsInputOnset", () => {
     const closed = detectNeedsInputOnset(statuses([[1, "needsInput"], [2, "idle"]]), [
       { id: 2, agentStatus: "idle" },
     ]);
-    expect(closed.chime).toBe(false);
+    expect(closed.onsets).toEqual([]);
     expect(closed.next).toEqual(statuses([[2, "idle"]]));
-    // 같은 id 가 needsInput 으로 되돌아오면 "아니었다가 됐다" 이므로 울린다.
+    // 같은 id 가 needsInput 으로 되돌아오면 "아니었다가 됐다" 이므로 onset 이다.
     const reappeared = detectNeedsInputOnset(closed.next, [
       { id: 1, agentStatus: "needsInput" },
       { id: 2, agentStatus: "idle" },
     ]);
-    expect(reappeared.chime).toBe(true);
     expect(reappeared.onsets).toEqual([1]);
   });
 
-  it("워크스페이스가 하나도 없으면 무음이고 기준선은 빈 맵이다", () => {
+  it("워크스페이스가 하나도 없으면 onset 이 없고 기준선은 빈 맵이다", () => {
     const out = detectNeedsInputOnset(statuses([[1, "needsInput"]]), []);
-    expect(out.chime).toBe(false);
     expect(out.onsets).toEqual([]);
     expect(out.next.size).toBe(0);
+  });
+
+  it("결과에는 onsets·next 만 있다 (v0.3.7 계약 변경 — chime 파생 필드 제거)", () => {
+    const out = detectNeedsInputOnset(statuses([[1, "idle"]]), [
+      { id: 1, agentStatus: "needsInput" },
+    ]);
+    expect(Object.keys(out).sort()).toEqual(["next", "onsets"]);
+  });
+});
+
+describe("needsInputToastTargets", () => {
+  it("포커스 중인 창의 활성 워크스페이스만 조용하다", () => {
+    // 사용자가 지금 그 화면을 보고 있다 — 사이드바 강조로 충분하다.
+    expect(needsInputToastTargets([7], 7, true)).toEqual([]);
+  });
+
+  it("포커스 중이라도 비활성 워크스페이스는 알린다", () => {
+    // v0.3.6 까지 놓치던 경우: 창은 보고 있지만 그 워크스페이스는 화면에 없다.
+    expect(needsInputToastTargets([8], 7, true)).toEqual([8]);
+  });
+
+  it("비포커스면 활성 워크스페이스라도 알린다", () => {
+    expect(needsInputToastTargets([7], 7, false)).toEqual([7]);
+    expect(needsInputToastTargets([8], 7, false)).toEqual([8]);
+  });
+
+  it("여러 전이 중 활성 워크스페이스 하나만 빠지고 순서는 유지된다", () => {
+    expect(needsInputToastTargets([5, 7, 9], 7, true)).toEqual([5, 9]);
+    expect(needsInputToastTargets([5, 7, 9], 7, false)).toEqual([5, 7, 9]);
+  });
+
+  it("활성 워크스페이스가 없으면(null) 억제 조건이 성립하지 않는다", () => {
+    expect(needsInputToastTargets([5], null, true)).toEqual([5]);
+  });
+
+  it("전이가 없으면 대상도 없다", () => {
+    expect(needsInputToastTargets([], 7, true)).toEqual([]);
+    expect(needsInputToastTargets([], 7, false)).toEqual([]);
   });
 });
 
@@ -148,7 +185,9 @@ function fakeContext(state: AudioContextState = "running") {
   return { ctx: ctx as unknown as AudioContext, tones, resume };
 }
 
-describe("Chime", () => {
+// 아래 두 describe 는 **휴면** 코드의 테스트다 (파일 머리 주석 참조) — 지금 이
+// 경로를 부르는 배선은 없지만, 되살릴 때를 위해 계약을 계속 잠가 둔다.
+describe("Chime (휴면)", () => {
   it("play 는 컨텍스트를 lazy 하게 1회만 만들고 2음을 스케줄한다 (총 ~0.3s)", () => {
     const fake = fakeContext();
     const factory = vi.fn(() => fake.ctx);
@@ -212,7 +251,7 @@ describe("Chime", () => {
   });
 });
 
-describe("installChimeUnlock", () => {
+describe("installChimeUnlock (휴면)", () => {
   it("첫 keydown 에서 1회 unlock 하고 리스너를 뗀다", () => {
     const fake = fakeContext("suspended");
     const chime = new Chime(() => fake.ctx);

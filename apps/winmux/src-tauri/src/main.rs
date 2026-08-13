@@ -43,6 +43,12 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// `WINDOW_HIDDEN_EVENT` 와 짝이다 (payload: bool, true = 최소화됨).
 const WINDOW_HIDDEN_EVENT: &str = "window-hidden";
 
+/// 창 포커스 신호 이벤트 이름 — 프론트 `main.ts` 의 `WINDOW_FOCUS_EVENT` 와 짝이다
+/// (payload: bool, true = 포커스 획득). needsInput 토스트의 억제 판정 근거다:
+/// WebView2 의 `document.hasFocus()` 는 창이 비포커스여도 true 로 남는 경우가 있어
+/// (v0.3.6 필드 진단의 용의자 중 하나) 프론트가 자기 힘으로 포커스를 알 수 없다.
+const WINDOW_FOCUS_EVENT: &str = "window-focus";
+
 /// corrupt 백업 결과를 로그용 문자열로 — rename 실패도 가리지 않고 원인 그대로.
 fn backup_label(backup: &Result<PathBuf, String>) -> String {
     match backup {
@@ -52,10 +58,11 @@ fn backup_label(backup: &Result<PathBuf, String>) -> String {
 }
 
 fn main() {
-    // **웹뷰·플러그인 초기화보다 먼저다.** Windows 셸에 AUMID 를 선언하고 시작 메뉴
-    // 바로가기를 맞춰야 needsInput 토스트가 winmux 발신자로 뜬다 — 미등록 발신자의
-    // 토스트를 WinRT 가 조용히 버리는 게 v0.3.5 의 "토스트가 아예 안 뜬다" 원인이었다
-    // (근거·AUMID 일치 논증은 `app_identity` 모듈 doc). 실패해도 부팅은 계속한다.
+    // **웹뷰 초기화보다 먼저다.** Windows 셸에 AUMID 를 선언하고 시작 메뉴 바로가기를
+    // 맞춰야 needsInput 토스트가 winmux 발신자로 뜬다 — 미등록 발신자의 토스트를
+    // WinRT 가 조용히 버리는 게 v0.3.5 의 "토스트가 아예 안 뜬다" 원인이었다
+    // (근거는 `app_identity` 모듈 doc). 등록 AUMID 는 `commands::notify_toast` 가
+    // 발신에 쓰는 상수와 같은 하나다. 실패해도 부팅은 계속한다.
     #[cfg(windows)]
     app_identity::register();
 
@@ -66,11 +73,6 @@ fn main() {
     let window_hidden = AtomicBool::new(false);
 
     tauri::Builder::default()
-        // OS 알림 플러그인 — needsInput 토스트(`commands::notify_toast`)의 백엔드다.
-        // 프론트는 플러그인의 JS API 를 직접 쓰지 않고 글루 커맨드만 부르지만,
-        // capabilities/default.json 에 `notification:default` 를 함께 둔다 (플러그인
-        // 등록과 ACL 을 한 벌로 유지 — 나중에 JS 쪽을 쓰게 돼도 조용히 막히지 않는다).
-        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let sessions = Arc::new(SessionManager::new());
@@ -195,13 +197,14 @@ fn main() {
             }
             Ok(())
         })
-        // 창 이벤트 두 갈래 — 포커스 전이는 리셋 정책 신호, 크기 전이는 프론트
-        // 폴링 게이팅 신호다 (아래 각 분기 참조. 서로 독립이고 섞이지 않는다).
+        // 창 이벤트 두 갈래 — 포커스 전이는 리셋 정책 + 프론트 토스트 억제 신호,
+        // 크기 전이는 프론트 폴링 게이팅 신호다 (아래 각 분기 참조. 서로 독립이고
+        // 섞이지 않는다).
         //
-        // 창 포커스 전이 → 리셋 정책의 hidden 판정 신호 (계획 C-2). 설정창은
-        // setup 완료 후 생성되므로 이 시점엔 항상 manage 되어 있다 — 아니라면
-        // 신호가 새고 있는 프로그램 결함이라 숨기지 않는다 (publish_state 와
-        // 같은 규율).
+        // 창 포커스 전이 → ① 리셋 정책의 hidden 판정 신호 (계획 C-2), ② 프론트의
+        // needsInput 토스트 억제 판정 신호 (v0.3.7). 설정창은 setup 완료 후
+        // 생성되므로 이 시점엔 항상 manage 되어 있다 — 아니라면 신호가 새고 있는
+        // 프로그램 결함이라 숨기지 않는다 (publish_state 와 같은 규율).
         .on_window_event(move |window, event| match event {
             tauri::WindowEvent::Focused(focused) => {
                 match window.app_handle().try_state::<state::AppState>() {
@@ -209,6 +212,19 @@ fn main() {
                     None => eprintln!(
                         "[winmux] focus event before managed state; reset signal dropped"
                     ),
+                }
+                // 프론트에도 같은 사실을 넘긴다 — 소비처가 달라(리셋 정책 vs 토스트)
+                // 경로는 나누되 판정 근거는 이 OS 신호 하나다. Resized 와 달리
+                // 중복 억제 플래그가 없는 이유는 tao 가 Focused 를 전이에서만
+                // 보내기 때문이다(드래그 중 연속으로 오는 Resized 와 다르다).
+                //
+                // 바로 그 "전이에서만" 이라 emit 을 한 번 놓치면 프론트 플래그가
+                // **다음 전이까지** 틀린 채로 남는다 (그 사이 토스트가 잘못 억제되거나
+                // 잘못 뜬다). 그래서 실패를 가리지 않고 기록하고, 프론트는 부팅 때
+                // 현재 포커스를 한 번 조회해 신호 유실에서 스스로 복구한다
+                // (main.ts installWindowFocus).
+                if let Err(err) = window.emit(WINDOW_FOCUS_EVENT, *focused) {
+                    eprintln!("[winmux] window-focus emit failed (focused={focused}): {err}");
                 }
             }
             // 최소화 → 프론트 폴링 정지 신호 (체크포인트 2 실기 결함: WebView2
@@ -252,7 +268,8 @@ fn main() {
             commands::get_ui_settings,
             // 워크스페이스 폴더 선택 (Windows 네이티브 대화상자).
             commands::pick_workspace_folder,
-            // needsInput OS 토스트 — 창이 비포커스일 때만 프론트가 부른다.
+            // needsInput OS 토스트 — 지금 화면에 보이지 않는 워크스페이스의 상승
+            // 전이에서만 프론트가 부른다 (판정 계약은 커맨드 rustdoc).
             commands::notify_toast,
             // 뷰어 파일 접근 (21단계) — 읽기 전용 콘텐츠 플레인.
             commands::fs_list_dir,

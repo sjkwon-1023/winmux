@@ -8,33 +8,36 @@
 //! 등록된 적이 없고, WinRT 는 미등록 발신자의 토스트를 **조용히 버린다**
 //! (에러도 안 난다 — `CreateToastNotifierWithId` 는 성공하고 표시만 안 된다).
 //!
-//! # 어떤 AUMID 를 등록해야 하나 (의존 크레이트 소스 추적)
+//! # 어떤 AUMID 를 등록하나 (v0.3.7 에 단순해졌다)
 //!
-//! 우리가 등록하는 AUMID 와 플러그인이 토스트에 싣는 AUMID 가 **정확히 같아야만**
-//! 동작한다. `tauri-plugin-notification` 2.3.3 기준 실제 경로는 다음과 같다:
+//! 등록 AUMID 와 토스트에 실리는 AUMID 가 **정확히 같아야만** 동작한다는 사실은 그대로다.
+//! 달라진 건 후자를 누가 정하느냐다: v0.3.6 까지는 `tauri-plugin-notification` 이
+//! `tauri.conf.json` 의 identifier 에서 유도했고(그 사슬을 여기 문서로 추적해 두었다),
+//! v0.3.7 부터는 **우리가 직접** `Toast::new(APP_USER_MODEL_ID)` 로 발신한다
+//! (`commands::notify_toast`). 그래서 지금 계약은 한 줄이다 —
+//! **등록 AUMID = 발신 AUMID = [`APP_USER_MODEL_ID`] 상수 하나.** 추론할 사슬이 없다.
 //!
-//! 1. `plugins/notification/src/desktop.rs:27` — `imp::Notification::new(app.config().identifier.clone())`
-//!    로 알림 빌더가 만들어진다. 즉 출처는 **`tauri.conf.json` 의 `identifier`**.
-//! 2. 같은 파일 `desktop.rs:195-206` — `#[cfg(windows)]` 에서 exe 의 부모 디렉터리가
-//!    `\target\debug` 나 `\target\release` 로 끝나지 **않을 때만** `notification.app_id(&identifier)`
-//!    를 호출한다 ("set the notification's System.AppUserModel.ID only when running
-//!    the installed app" 주석).
-//! 3. `notify-rust` 4.18.0 `src/windows.rs:76-81` — `app_id.unwrap_or(Toast::POWERSHELL_APP_ID)`
-//!    로 확정한 뒤 `Toast::new(app_id)`.
-//! 4. `tauri-winrt-notification` 0.7.3 `src/lib.rs:703` (`Toast::show`) —
-//!    `ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(&self.app_id))`.
-//!    (같은 호출이 684 줄의 progress 갱신 경로에도 있지만 우리가 타는 건 `show` 쪽이다.)
+//! 값은 기존 배포본과 같은 **`app.winmux.desktop`** 을 유지한다. 이미 이 AUMID 로
+//! 바로가기가 깔린 사용자 머신에서 값을 바꾸면 .lnk 재작성 + 셸 재색인이 한 번 더
+//! 일어나고, 그 사이에 토스트가 사라지는 창이 생긴다 — 바꿀 이유가 없다.
 //!
-//! 결론: 필드 배포본(exe 가 `target\{debug,release}` 밖)에서 플러그인이 쓰는 AUMID 는
-//! `tauri.conf.json` 의 identifier 인 **`app.winmux.desktop`** 이다. 그래서
-//! [`APP_USER_MODEL_ID`] 가 그 값이어야 하고, 아래 `const _` 블록이 둘의 일치를
-//! **컴파일 타임에** 강제한다 (어긋나면 토스트가 조용히 죽으므로 런타임 검사로는 늦다).
+//! 그 값이 `tauri.conf.json` 의 `identifier` 와 같다는 건 이제 **의도적 선택**이지
+//! 플러그인이 강제하는 제약이 아니다. 그래도 아래 `const _` 대조는 남긴다: 같은
+//! 문자열이 Tauri 앱 데이터 디렉터리 이름(`%APPDATA%\app.winmux.desktop` — `settings.json`
+//! 과 토스트 진단 로그 `toast.log` 가 사는 곳)이기도 해서, 둘이 갈라지면 문서와 진단
+//! 안내가 존재하지 않는 경로를 가리키게 된다.
 //!
-//! 반대로 개발 빌드(`target\debug`·`target\release`에서 직접 실행)에서는 2번 조건이
-//! 걸려 플러그인이 app_id 를 아예 안 실어 PowerShell AUMID 로 폴백한다 — 그 경로는
-//! 이미 등록된 발신자라 토스트가 (PowerShell 이름으로) 잘 뜬다. 그래서 우리도 같은
-//! 조건을 [`plugin_uses_our_aumid`] 로 **그대로 미러링**해서, 우리 AUMID 가 실제로
-//! 쓰이지 않는 개발 빌드에서는 시작 메뉴를 더럽히지 않는다.
+//! # 개발 빌드도 등록한다 (v0.3.7 에 바뀐 점)
+//!
+//! v0.3.6 에는 exe 가 `target\{debug,release}` 아래면 등록을 건너뛰는 예외가 있었다.
+//! 근거는 "그 경우 플러그인이 app_id 를 안 실어 PowerShell 발신자로 폴백하니 우리
+//! 바로가기가 쓰이지 않는다" 였는데, 이제 우리가 항상 우리 AUMID 로 발신하므로 그
+//! 근거가 사라졌다 — 예외를 남겨 두면 **개발 빌드에서 토스트가 조용히 죽는다**(미등록
+//! 발신자). 그래서 예외를 없애고 항상 등록한다.
+//!
+//! 대가는 `npm run tauri dev` 도 시작 메뉴에 `winmux.lnk` 를 만든다는 것이고, 개발
+//! 빌드와 배포본을 번갈아 실행하면 바로가기 target 이 그때그때 바뀐다. 멱등 판정
+//! ([`needs_rewrite`])이 있어 같은 exe 를 다시 실행할 때는 무작업이다.
 //!
 //! # 등록 방법 (Win32 정석)
 //!
@@ -57,10 +60,8 @@ macro_rules! aumid_literal {
     };
 }
 
-/// 셸에 등록하고 플러그인이 토스트에 싣는 AppUserModelID.
-///
-/// `tauri.conf.json` 의 `identifier` 와 **반드시 같아야 한다** — 근거는 모듈 doc 의
-/// "어떤 AUMID 를 등록해야 하나" 참조.
+/// 셸에 등록하고 `commands::notify_toast` 가 토스트에 싣는 AppUserModelID — **하나의
+/// 상수**다 (모듈 doc "어떤 AUMID 를 등록하나" 참조).
 pub const APP_USER_MODEL_ID: &str = aumid_literal!();
 
 /// 시작 메뉴에 만들 바로가기 파일명. 사용자에게 그대로 보이는 이름이라
@@ -71,8 +72,10 @@ const SHORTCUT_FILE_NAME: &str = "winmux.lnk";
 const START_MENU_RELATIVE: &str = r"Microsoft\Windows\Start Menu\Programs";
 
 /// [`APP_USER_MODEL_ID`] 가 `tauri.conf.json` 의 `identifier` 와 어긋나면 **빌드를
-/// 깬다**. 어긋나도 앱은 멀쩡히 뜨고 토스트만 조용히 사라지므로 런타임에 잡을 방법이
-/// 없다 — 그래서 컴파일 타임 대조다.
+/// 깬다**. 토스트 발신 자체는 이제 identifier 와 무관하지만(우리 상수로 직접 발신),
+/// identifier 는 앱 데이터 디렉터리 이름이라 둘이 갈라지면 진단 안내
+/// (`%APPDATA%\app.winmux.desktop\toast.log`)가 거짓이 된다. 갈라져도 앱은 멀쩡히
+/// 뜨므로 런타임에 잡을 방법이 없다 — 그래서 컴파일 타임 대조다.
 ///
 /// JSON 을 const 로 파싱할 수는 없어서 따옴표까지 포함한 값 문자열이 conf 안에
 /// 있는지만 본다. identifier 를 바꾸면 이 assert 가 먼저 터져서 여기까지 같이
@@ -104,25 +107,6 @@ const fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         start += 1;
     }
     false
-}
-
-/// 플러그인이 이 exe 위치에서 우리 AUMID 를 실제로 쓰는지 — `tauri-plugin-notification`
-/// 2.3.3 `desktop.rs:201-202` 의 조건을 그대로 미러링한다.
-///
-/// `exe_dir` 은 실행 파일의 **부모 디렉터리**이며, 플러그인과 같게 보려면 **canonical**
-/// 경로여야 한다 (호출측 주석 참조). 개발 빌드(`...\target\debug`, `...\target\release`)면
-/// 플러그인이 app_id 를 안 실으므로 등록도 건너뛴다.
-///
-/// **유지보수 계약**: 이건 플러그인의 내부 휴리스틱을 복제한 것이라 `cargo update` 로
-/// 조용히 어긋날 수 있다 (AUMID 값 쪽은 위 `const` assert 가 막지만 이 조건은 못 막는다).
-/// `tauri-plugin-notification` 을 올릴 때 `src/desktop.rs` 의 `#[cfg(windows)]` 블록을
-/// 다시 대조할 것. 어긋나도 최악은 dev 전용 증상(개발 빌드에서 토스트 소실)이고 필드
-/// 배포본은 깨지지 않는다.
-fn plugin_uses_our_aumid(exe_dir: &Path) -> bool {
-    let dir = exe_dir.to_string_lossy();
-    let sep = std::path::MAIN_SEPARATOR;
-    !(dir.ends_with(&format!("{sep}target{sep}debug"))
-        || dir.ends_with(&format!("{sep}target{sep}release")))
 }
 
 /// 시작 메뉴 바로가기의 전체 경로.
@@ -167,9 +151,6 @@ enum ShortcutOutcome {
     Updated,
     /// 이미 우리 값과 같아 아무것도 안 했다.
     UpToDate,
-    /// 개발 빌드라 아예 만들지 않았다 — 플러그인이 PowerShell AUMID 로 폴백하는
-    /// 경로다. "up to date" 와 **구분해서** 찍어야 검증자가 로그를 오해하지 않는다.
-    SkippedDevBuild,
 }
 
 impl ShortcutOutcome {
@@ -178,9 +159,6 @@ impl ShortcutOutcome {
             Self::Created => "created",
             Self::Updated => "updated",
             Self::UpToDate => "up to date",
-            Self::SkippedDevBuild => {
-                "not needed (dev build — the plugin falls back to the PowerShell sender)"
-            }
         }
     }
 }
@@ -191,8 +169,9 @@ impl ShortcutOutcome {
 /// `SetCurrentProcessExplicitAppUserModelID` 는 프로세스가 창·타스크바와 얽히기 전에
 /// 불려야 유효하기 때문이다.
 ///
-/// 실패해도 앱을 죽이지 않는다 — 토스트는 차임에 딸린 부가 신호라 이것 때문에 부팅이
-/// 막히면 손해가 크다. 대신 조용히 삼키지 않고 원인을 한 줄로 남긴다.
+/// 실패해도 앱을 죽이지 않는다 — 알림 하나 때문에 부팅이 막히면 손해가 크다. 대신
+/// 조용히 삼키지 않고 원인을 한 줄로 남긴다 (v0.3.7 부터는 이게 실패하면 알림 경로가
+/// 통째로 죽는다 — 차임이라는 대체 신호가 없다).
 pub fn register() {
     match register_inner() {
         Ok(outcome) => {
@@ -215,34 +194,15 @@ fn register_inner() -> Result<ShortcutOutcome, String> {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
+    // 바로가기 target 은 **canonicalize 하지 않은** 경로다 — Windows 의 canonicalize 는
+    // `\\?\` verbatim 경로를 돌려주는데 그건 .lnk target 으로 부적절하다.
     let exe = std::env::current_exe().map_err(|err| format!("cannot resolve the exe path: {err}"))?;
 
-    // 프로세스 AUMID 선언은 플러그인의 dev 예외와 무관하게 늘 해 둔다 — 타스크바
-    // 그룹화·창 신원에도 쓰이고, 부작용이 없다.
+    // 프로세스 AUMID 선언 — 토스트 발신자 신원의 절반이고, 타스크바 그룹화·창
+    // 신원에도 쓰인다.
     let wide_aumid = to_wide(APP_USER_MODEL_ID);
     unsafe { SetCurrentProcessExplicitAppUserModelID(PCWSTR(wide_aumid.as_ptr())) }
         .map_err(|err| format!("SetCurrentProcessExplicitAppUserModelID failed: {err}"))?;
-
-    // **dev 예외 판정만은 canonical 경로로 한다.** 플러그인이 보는 경로는
-    // `tauri::utils::platform::current_exe()` = `STARTING_BINARY` 이고, 그건
-    // `std::env::current_exe()` 를 **canonicalize 한** 값이다 (tauri-utils 2.9.3
-    // `src/platform/starting_binary.rs:37`, "we canonicalize the path to resolve any
-    // symlinks to the real exe path"). raw 경로로 판정하면 심볼릭 링크로 실행됐을 때
-    // 플러그인은 dev 예외를 타는데 우리는 안 타서 미러링이 어긋난다.
-    //
-    // 반면 **바로가기 target 에는 canonical 경로를 쓰지 않는다** — canonicalize 는
-    // Windows 에서 `\\?\` verbatim 경로를 돌려주는데 그건 .lnk target 으로 부적절하다.
-    // 판정은 canonical, 기록은 원래 경로다.
-    let canonical = exe.canonicalize().unwrap_or_else(|_| exe.clone());
-    let exe_dir = canonical
-        .parent()
-        .ok_or_else(|| "the exe path has no parent directory".to_string())?;
-
-    if !plugin_uses_our_aumid(exe_dir) {
-        // 개발 빌드 — 플러그인이 PowerShell AUMID 로 폴백하므로 바로가기가 필요 없다
-        // (모듈 doc 의 미러링 근거 참조). 시작 메뉴를 더럽히지 않고 끝낸다.
-        return Ok(ShortcutOutcome::SkippedDevBuild);
-    }
 
     let appdata = std::env::var_os("APPDATA")
         .ok_or_else(|| "the APPDATA environment variable is not set".to_string())?;
@@ -486,26 +446,6 @@ mod tests {
                 r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\winmux.lnk"
             )
         );
-    }
-
-    #[test]
-    fn dev_build_directories_fall_back_to_the_plugin_powershell_path() {
-        // 플러그인이 app_id 를 안 싣는 두 디렉터리 — 우리도 등록을 건너뛴다.
-        assert!(!plugin_uses_our_aumid(Path::new(
-            r"C:\code\winmux\target\debug"
-        )));
-        assert!(!plugin_uses_our_aumid(Path::new(
-            r"C:\code\winmux\target\release"
-        )));
-    }
-
-    #[test]
-    fn installed_locations_use_our_aumid() {
-        assert!(plugin_uses_our_aumid(Path::new(r"C:\Users\me\Desktop")));
-        assert!(plugin_uses_our_aumid(Path::new(r"C:\Program Files\winmux")));
-        // 이름만 비슷한 디렉터리는 dev 예외가 아니다.
-        assert!(plugin_uses_our_aumid(Path::new(r"C:\apps\target\staging")));
-        assert!(plugin_uses_our_aumid(Path::new(r"C:\my-target\release-notes")));
     }
 
     #[test]

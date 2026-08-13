@@ -64,6 +64,8 @@ Accepted deferrals, one line each. None of these block the MVP.
   window is unfocused** (`document.hasFocus()` false) on the chime's own onset rule — one
   toast per transitioning workspace, chime alone when focused. Still a field check: toast
   sender identity for an unsigned standalone exe (WINDOWS-BUILD §10 v0.3.4).
+  **Superseded by the v0.3.7 entry below** — the plugin, that focus source and the chime are
+  all gone.
 - **Toasts do not appear at all in the field — landed 2026-08-12** (user report 2026-08-12,
   v0.3.5): the card-style Windows notification never showed, focused or not. Root cause
   **confirmed 2026-08-12**: Windows Settings › Notifications had no winmux entry at all
@@ -82,7 +84,54 @@ Accepted deferrals, one line each. None of these block the MVP.
   in `plugin_uses_our_aumid` so dev builds do not litter the Start menu — they keep the
   plugin's PowerShell-sender fallback. Failure logs one loud line and never blocks boot.
   Verification: WINDOWS-BUILD §10 v0.3.6 item 3 (all of it is field-only — none of it could be
-  exercised on the Linux dev box).
+  exercised on the Linux dev box). The AUMID-derivation and dev-exception halves of this entry
+  were rewritten in v0.3.7 (next entry); the registration mechanism itself is unchanged.
+- **Toasts still did not appear once the identity was registered — redesigned 2026-08-13**
+  (field diagnosis, v0.3.6). The identity work above was *correct*: `Get-StartApps` lists
+  `winmux app.winmux.desktop`, and a hand-run
+  `CreateToastNotifier("app.winmux.desktop").Show(...)` in PowerShell puts a card on screen, so
+  the OS pipeline is proven. Inside the app the onset fired (the chime rang) and no toast
+  followed, leaving **two suspects that could not be told apart from inside the app**: (a)
+  WebView2's `document.hasFocus()` staying `true` while the window is unfocused, which would
+  make the front-end suppress every toast, and (b) `tauri-plugin-notification` swallowing send
+  errors — 2.3.3 `desktop.rs:216` is literally
+  `tauri::async_runtime::spawn(async move { let _ = notification.show(); })`. Rather than guess,
+  **both layers were removed**:
+  - Focus comes from the OS: `main.rs` already had `WindowEvent::Focused` for the reset policy
+    and now also emits `window-focus` (bool) to the front-end, which keeps a `windowFocused`
+    flag. `document.hasFocus()` is no longer used anywhere. The flag is **subscribed and then
+    seeded**: window events only fire on a *change*, but this front-end also restarts on the
+    automatic webview reload — whose main trigger is "hidden/unfocused for N minutes", i.e. the
+    reloaded page comes up unfocused with the transition long past. Assuming focus there would
+    suppress exactly the toast the user stepped away to receive, so `installWindowFocus`
+    subscribes first, then asks `getCurrentWindow().isFocused()` once and applies the answer only
+    if no event beat it (review finding 2026-08-13; the query is inside `core:default`, so the
+    capability did not change).
+  - Sending is direct: `notify_toast` calls `tauri-winrt-notification`'s
+    `Toast::new(app_identity::APP_USER_MODEL_ID)` itself — **sender AUMID = registered AUMID =
+    one constant** — and returns the `show()` error instead of dropping it. The plugin, its
+    `notification:default` capability and its lock entries are gone; the crate that used to sit
+    at the end of that chain is now a direct dependency, so the graph shrank. Because we now
+    always send under our own AUMID, `plugin_uses_our_aumid`'s dev-build exception lost its
+    basis and was deleted — dev builds register the Start-menu shortcut like any other, or their
+    toasts would die silently.
+  - Diagnosis has a field-visible window: every attempt appends one timestamped `ok`/`err` line
+    to `%AppData%\app.winmux.desktop\toast.log` (best-effort, body not logged, truncated past
+    64 KiB), so the next round can separate "never called" from "sent but not shown" from
+    "WinRT refused" without a dev console.
+  - The rule also widened, since the old one leaned on the chime: a toast is suppressed **only**
+    when the window is focused *and* the workspace is the active one (it is already on screen).
+    Unfocused, or focused-but-another-workspace, both toast. The judgment is the pure
+    `chime.ts::needsInputToastTargets`, locked by vitest.
+  Verification: WINDOWS-BUILD §10 v0.3.7 item 2 (field-only, as before).
+- **needs-input chime removed — decided 2026-08-13** (user decision): the signal is the toast
+  alone. The chime could not say *which* workspace was waiting, and its existence was the
+  argument for suppressing toasts whenever the window had focus — the rule that hid a second
+  project going quiet. `Chime`/`installChimeUnlock` and their tests stay in `chime.ts` as
+  **dormant** code (the send-mode precedent: entry point unwired, contract still tested, reason
+  recorded in the module header); only the wiring in `main.ts` was cut. `detectNeedsInputOnset`
+  stays as the onset engine, minus its now-meaningless `chime` derived field — a **contract
+  change**: `NeedsInputOnset` is `{ onsets, next }`.
 - **Query-reply `/tmp` confinement is string-level only** — a pre-planted symlink
   (`/tmp/x → $HOME`) routes the reply write outside; blocking it needs a
   canonicalize-at-write recheck whose 9P semantics are unverified on real hardware

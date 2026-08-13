@@ -917,7 +917,8 @@ launch** — no manual cleanup. Run the app from a console so its stderr is visi
    background). Check the same for another TUI you have handy (`htop`, `mc`) so the palette
    is not merely tuned to one app, and confirm normal ANSI colours in `ls`/`git diff` still
    look right.
-5. **The needs-input chime** — with the app focused, click or press a key once (the audio
+5. **The needs-input chime** *(historical — the chime was removed in v0.3.7; run §10 v0.3.7
+   item 2 instead on any current build)* — with the app focused, click or press a key once (the audio
    context unlocks on the first gesture), then run a Claude Code session and let it ask a
    question: a short two-tone chime plays **once** as the workspace turns `needs input`.
    Then confirm the quiet cases: no sound on `running` or `idle`, no repeat while it stays
@@ -1160,7 +1161,10 @@ batch, from a console (`npm run tauri dev`) unless an item says otherwise.
    - **`Ctrl+0` is not a workspace switch** — with several workspaces open, `Ctrl+0` only
      resets the font (workspace ordinals stay `Ctrl+1`-`Ctrl+9`).
 
-2. **needsInput toast — fires only while the window is unfocused.** The chime already covers
+2. **needsInput toast — fires only while the window is unfocused.** *(Historical: v0.3.7
+   replaced this rule and removed the chime — a focused window now still toasts for workspaces
+   it is not showing, and nothing makes a sound. Run §10 v0.3.7 item 2 on any current build.)*
+   The chime already covers
    the focused case; the toast exists for the moment winmux is *not* the window you are
    looking at. It rides the same onset rule as the chime
    ([`apps/winmux/src/chime.ts`](../apps/winmux/src/chime.ts), `detectNeedsInputOnset`), so
@@ -1411,6 +1415,86 @@ Every `settings.json` edit needs the app closed and relaunched (there is no sett
      the status line and boots with default fonts *everywhere*, viewers included; a blank
      `fontFamily` still reports itself. The viewers consume the same validated values the
      terminal does, so there is no second validation path to disagree.
+
+2. **needs-input notification — toast only, and it now fires for workspaces you cannot see.**
+   In v0.3.6 the chime rang but no toast ever appeared, and the two suspects could not be told
+   apart from inside the app: WebView2's `document.hasFocus()` can stay `true` while the window
+   is unfocused (so the front-end may have suppressed every toast), and
+   `tauri-plugin-notification` throws the send into
+   `tauri::async_runtime::spawn(async move { let _ = notification.show(); })` (2.3.3
+   `desktop.rs:216`), swallowing any error. **Both layers are gone.** Focus is now decided by the
+   OS window event the glue forwards (`main.rs` `window-focus` → `main.ts`), and the toast is
+   raised directly through `tauri-winrt-notification` under the AUMID we register
+   ([`app_identity.rs`](../apps/winmux/src-tauri/src/app_identity.rs)), with the result written to
+   a log file. The chime was removed with it (user decision 2026-08-13) — the sound could never
+   say *which* project was waiting, which is the whole content of the notification.
+
+   Drive it with two workspaces open, side by side in the sidebar. In a terminal of the
+   workspace you are *not* looking at, run
+
+   ```bash
+   sleep 5; ~/.winmux/bin/winmux-notify.sh winmux:needsInput "toast test"
+   ```
+
+   and use those five seconds to put the window into the state each case names. A real agent
+   (Claude Code hitting a permission prompt) exercises the same path; the helper just makes the
+   timing yours.
+
+   - **Unfocused → toast** — click another window (an editor, Explorer) before the five seconds
+     are up. A Windows toast appears bottom-right, titled `winmux — <workspace name>`, with the
+     first line of the agent's last message as the body (`toast test` here); with no message
+     recorded it reads `agent needs your input`. The workspace name is the point — it is how you
+     know which project is waiting.
+   - **Focused, but a workspace you are not viewing → toast** — this is the case v0.3.6 got
+     wrong. Keep winmux focused (click into a terminal of the *other* workspace) and let the
+     five seconds run out: **the toast still appears**, because that workspace is not on screen.
+     Previously any focus at all suppressed it, so a second project going quiet was invisible.
+   - **Focused, and it is the workspace on screen → nothing** — run the same command in the
+     workspace you are actually looking at, with winmux focused. **No toast.** The sidebar card
+     highlights and that is all — a toast on top of the window you are already reading is noise.
+     Switching workspaces after the fact does not retro-fire it; only the rising transition
+     notifies, so staying in `needs input` (later redraws, tab activity) produces nothing.
+   - **No winmux chime, ever** — the app's own two-tone chime is gone, including in the focused
+     case that used to be sound-only: if you hear it, this build is not the one you think it is.
+     (The synthesiser is kept dormant in [`chime.ts`](../apps/winmux/src/chime.ts), unwired.)
+     What you *may* still hear is **Windows' own notification sound** when a toast appears — we
+     do not set an `<audio>` element, so the OS plays its default. That is Windows, not winmux,
+     and it is silenced in Windows' notification settings, not here.
+   - **The auto-reset case — a toast must still arrive after the webview reloads.** This is the
+     one that unit tests cannot reach and the one v0.3.7's design turns on. Launch with
+     `WINMUX_RESET_HIDDEN_SECS=20` (§9), leave the window unfocused (or minimized) for half a
+     minute so the reset fires — the console prints `reset: reloading webview` — and then, still
+     without touching winmux, trigger needs-input in the **active** workspace. The toast must
+     appear. It relies on the front-end asking Windows for the current focus after each reload
+     (`main.ts` `installWindowFocus`): the focus *event* only fires on a change, and that change
+     happened long before the reload, so without the query the reloaded page would assume it is
+     focused and swallow exactly the notification you are away from the machine to receive.
+   - **When a toast does not show, read the log** — every attempt appends one line to
+     `%AppData%\app.winmux.desktop\toast.log` (same folder as `settings.json`), local time first:
+
+     ```text
+     2026-08-13 21:04:11 ok title="winmux — winmux"
+     2026-08-13 21:07:02 err title="winmux — winmux": cannot show the toast: <reason>
+     ```
+
+     That splits the failure three ways without a dev console: **no line** means the front-end
+     never called (focus/onset judgment — check which case you were in), `ok` means Windows
+     accepted it and the toast was suppressed downstream (notifications turned off for the app,
+     Focus Assist, or the shell not having indexed the Start-menu shortcut yet), and `err` names
+     the WinRT refusal. The message body is deliberately not logged. The file is capped at 64 KiB
+     and starts over past that, so it cannot grow without bound.
+   - **Failure still may not break anything else** — with notifications turned off for the app,
+     the UI must keep working normally; the only traces are the `err`/`ok` line above and a
+     `console.debug` (`needsInput toast failed`) in the dev console.
+   - **Dev builds now register too** *(field note)* — the Start-menu shortcut used to be skipped
+     when the exe sat in `target\debug`/`target\release`, because the plugin fell back to the
+     PowerShell sender there. We always send under our own AUMID now, so that exception would
+     silently kill dev-build toasts and was removed. Expect `npm run tauri dev` to create/refresh
+     `winmux.lnk`, and expect alternating between a dev build and a release exe to rewrite its
+     target each time (the log line `app-identity: ... shortcut updated` says so). The accepted
+     cost: after a dev run, the Start-menu entry points at `target\debug\winmux-app.exe`, and
+     wiping `target/` leaves it dangling until the next launch of whichever exe you keep. Deleting
+     the shortcut by hand is safe — the next launch recreates it.
 
 ## 11. ARM64 cross-build notes
 

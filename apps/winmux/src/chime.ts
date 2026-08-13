@@ -1,7 +1,22 @@
-// needsInput 알림 차임 — WebAudio 로 짧은 2음을 합성해 "에이전트가 사용자 입력을
-// 기다린다"를 소리로 알린다 (실기 결함: 알림 소리 경로 자체가 없어 대기 상태를
-// 놓쳤다). 이 모듈은 (1) 소리 합성·재생과 (2) 언제 울릴지의 순수 판정
-// (detectNeedsInputOnset) 둘을 담고, DOM 배선은 main.ts 몫이다.
+// needsInput 알림 판정 (+ 휴면 상태의 알림 차임).
+//
+// **살아 있는 부분은 순수 판정 둘이다**: detectNeedsInputOnset 이 "언제 알릴지"
+// (needsInput 상승 전이)를, needsInputToastTargets 가 "어느 워크스페이스를 알릴지"
+// (지금 화면에 보이지 않는 것만)를 정한다. DOM·IPC 배선은 main.ts 몫이다.
+//
+// **차임 재생은 v0.3.7 에서 배선에서 빠졌다 — 휴면이다** (사용자 결정 2026-08-13:
+// 알림 신호를 OS 토스트로 일원화). 배경: v0.3.6 필드에서 차임은 울리는데 토스트가
+// 전혀 안 뜨는 상태였고, 그 진단에서 "차임이 있으니 포커스 중에는 토스트를 억제한다"
+// 라는 설계 자체가 알림을 반쪽으로 만들고 있었다. 차임은 어느 워크스페이스가
+// 기다리는지를 말해 주지 못한다.
+//
+// Chime 클래스와 installChimeUnlock 은 **지우지 않고 남긴다** — send-mode 와 같은
+// 취급이다(진입점만 UI 에서 빠진 검증된 코드). 소리를 되살리기로 하면 main.ts 에서
+// installChimeUnlock + play() 두 줄을 다시 잇는 것이 전부이고, 그동안 아래 테스트가
+// 이 코드를 계속 컴파일·검증한다. 휴면 코드는 번들에 남지만 tree-shaking 대상이고
+// (import 가 없다) AudioContext 는 어차피 lazy 라 런타임 비용이 없다.
+//
+// --- 아래는 휴면 차임의 설계 근거 (되살릴 때 필요한 맥락) -------------------------
 //
 // 외부 오디오 에셋을 쓰지 않고 오실레이터로 합성하는 이유: 앱은 오프라인·CSP
 // 아래서 도는 WebView 라 번들 밖 리소스를 가져올 수 없고, 0.3초짜리 알림음 하나에
@@ -13,9 +28,6 @@
 // unlock 패턴을 installChimeUnlock 이 배선한다. 그럼에도 재생 시점에 컨텍스트가
 // 안 돌고 있으면 resume 을 한 번 더 시도하고, 실패는 조용히 넘긴다 — 알림음은
 // 보조 신호라서 실패가 UI 동작을 막으면 안 된다 (원인은 console.debug 로만 남긴다).
-//
-// 백로그: mute/볼륨 설정은 이번 범위 밖이다 (앱에 설정 표면 자체가 아직 없다).
-// 설정이 생기면 play() 앞단의 게이트로 붙인다 — 재생 로직은 건드릴 것이 없다.
 
 import type { AgentStatus, WorkspaceId } from "./types";
 
@@ -43,6 +55,7 @@ const TONES: readonly { freq: number; at: number; dur: number }[] = [
   { freq: 1320, at: 0.14, dur: 0.16 },
 ];
 
+/** **휴면** (모듈 머리 주석 참조) — 지금 이 클래스를 부르는 배선은 없다. */
 export class Chime {
   private ctx: AudioContext | null = null;
   /** 컨텍스트 생성이 실패한 환경 표시 — 재시도하지 않는다 (WebAudio 자체가 없는
@@ -115,7 +128,8 @@ export class Chime {
   }
 }
 
-/** 사용자 제스처 unlock 배선 — 첫 keydown/mousedown 에서 1회 resume 한다.
+/** 사용자 제스처 unlock 배선 (**휴면** — 모듈 머리 주석 참조) — 첫 keydown/mousedown
+ *  에서 1회 resume 한다.
  *  capture 단계로 다는 이유는 활동 핑과 같다: xterm 이 포커스를 쥐고 있어도 window
  *  까지 도달한다. 1회 뒤 리스너를 떼는 것은 이후 재생 경로가 알아서 resume 을
  *  재시도하기 때문이다 — 상시 리스너를 남길 이유가 없다. */
@@ -141,12 +155,13 @@ export interface AgentStatusEntry {
 }
 
 export interface NeedsInputOnset {
-  /** 이번 스냅샷에 needsInput 상승 전이가 하나라도 있었나 — 여러 워크스페이스가
-   *  동시에 전이해도 소리는 1회다 (소음 방지). `onsets.length > 0` 과 항상 같다. */
-  chime: boolean;
-  /** needsInput 으로 **새로 전이한** 워크스페이스들 (입력 순서 그대로). 소리는
-   *  전체를 1회로 합치지만 OS 토스트는 워크스페이스마다 하나다 — "어느 프로젝트가
-   *  기다리는가"가 토스트의 내용 자체라, 합치면 알림의 의미가 사라진다. */
+  /** needsInput 으로 **새로 전이한** 워크스페이스들 (입력 순서 그대로). 알림은
+   *  워크스페이스마다 하나다 — "어느 프로젝트가 기다리는가"가 토스트의 내용
+   *  자체라, 합치면 알림의 의미가 사라진다.
+   *
+   *  **계약 변경 (v0.3.7)**: 예전에는 `chime: boolean`(= `onsets.length > 0`)이
+   *  같이 실렸다. 차임 배선이 빠져 그 파생값을 쓸 곳이 없어졌으므로 제거했다 —
+   *  같은 사실을 두 모양으로 들고 다니면 어긋날 수 있다. */
   onsets: WorkspaceId[];
   /** 다음 판정의 기준선이 될 상태 맵 — 사라진 워크스페이스는 빠지므로 맵이 무한히
    *  자라지 않고, 같은 id 가 다시 나타나면 신규로 취급된다. */
@@ -154,19 +169,18 @@ export interface NeedsInputOnset {
 }
 
 /** needsInput **상승 전이** 판정 (순수) — 어느 워크스페이스든 직전에 needsInput 이
- *  아니었다가 needsInput 이 된 경우에만 chime=true 이고, 그 워크스페이스들이
- *  `onsets` 에 담긴다 (소리는 1회, 토스트는 전이마다 — 판정 규칙은 하나다).
+ *  아니었다가 needsInput 이 된 경우에만 그 워크스페이스가 `onsets` 에 담긴다.
  *
- *  - 같은 상태 반복(needsInput → needsInput)은 무음. 스냅샷은 무관한 변경
- *    (탭 활동·git 등)으로도 자주 오므로, 반복까지 울리면 소음이 된다.
- *  - running·idle 로의 전환은 전부 무음 — 사용자의 개입을 기다리는 상태는
+ *  - 같은 상태 반복(needsInput → needsInput)은 무알림. 스냅샷은 무관한 변경
+ *    (탭 활동·git 등)으로도 자주 오므로, 반복까지 알리면 소음이 된다.
+ *  - running·idle 로의 전환은 전부 무알림 — 사용자의 개입을 기다리는 상태는
  *    needsInput 하나뿐이다 (sidebar 의 강조 규칙과 같은 판단).
- *  - 신규 워크스페이스의 첫 상태가 needsInput 이면 울린다 (prev 에 없는 id 는
+ *  - 신규 워크스페이스의 첫 상태가 needsInput 이면 알린다 (prev 에 없는 id 는
  *    "needsInput 이 아니었다" 로 친다).
- *  - `prev === null` 은 **부팅 첫 스냅샷**이다: 소리 없이 기준선만 채운다. 재시작
- *    복원은 코어 sanitize 가 agent_status 를 Idle 로 초기화하므로 자연히 무음이지만,
+ *  - `prev === null` 은 **부팅 첫 스냅샷**이다: 알림 없이 기준선만 채운다. 재시작
+ *    복원은 코어 sanitize 가 agent_status 를 Idle 로 초기화하므로 자연히 조용하지만,
  *    WebView 리로드·자동 리셋에서는 살아 있는 세션의 needsInput 이 그대로 첫
- *    스냅샷에 실려 온다 — 그때 울리면 "전이"가 아닌 것에 울리는 셈이라 명시적으로
+ *    스냅샷에 실려 온다 — 그때 알리면 "전이"가 아닌 것에 알리는 셈이라 명시적으로
  *    기준선 취급한다. */
 export function detectNeedsInputOnset(
   prev: ReadonlyMap<WorkspaceId, AgentStatus> | null,
@@ -181,8 +195,30 @@ export function detectNeedsInputOnset(
     if (prev.get(ws.id) === "needsInput") continue;
     onsets.push(ws.id);
   }
-  // chime 은 onsets 에서 파생한다 — 두 값을 따로 세면 어긋날 수 있고, "소리는
-  // 1회·토스트는 전이마다"라는 규칙 차이는 호출측(main.ts)이 이 둘을 어떻게
-  // 쓰느냐로 표현된다.
-  return { chime: onsets.length > 0, onsets, next };
+  return { onsets, next };
+}
+
+/** 토스트를 실제로 띄울 워크스페이스 선별 (순수) — 상승 전이 중 **지금 화면에
+ *  보이지 않는** 것만 남긴다.
+ *
+ *  규칙은 하나다: **창이 포커스 상태이고 그 워크스페이스가 활성**이면 띄우지
+ *  않는다 (사용자가 이미 그 화면을 보고 있고, 사이드바 강조가 같은 사실을 말한다).
+ *  나머지는 전부 띄운다 — 창이 비포커스면 물론이고, **포커스 중이라도 지금 안 보이는
+ *  다른 워크스페이스**는 알려야 한다. v0.3.6 까지는 포커스면 전부 억제해서, 옆
+ *  워크스페이스가 기다리기 시작한 것을 놓쳤다 (v0.3.7 재설계).
+ *
+ *  `windowFocused` 는 **OS 창 이벤트**(main.rs 의 `window-focus`)에서 온 값이어야
+ *  한다. `document.hasFocus()` 는 WebView2 에서 창이 비포커스인데도 true 로 남는
+ *  quirk 가 있어(v0.3.6 "토스트가 아예 안 뜬다"의 용의자 중 하나) 판정 근거로 쓸 수
+ *  없다.
+ *
+ *  `activeWorkspace` 가 null(워크스페이스가 하나도 없음)이면 억제 조건이 성립하지
+ *  않으므로 전부 대상이다 — 그 상태에서 전이가 오는 경우는 사실상 없지만, 규칙을
+ *  분기 없이 그대로 쓴다. */
+export function needsInputToastTargets(
+  onsets: readonly WorkspaceId[],
+  activeWorkspace: WorkspaceId | null,
+  windowFocused: boolean,
+): WorkspaceId[] {
+  return onsets.filter((id) => !(windowFocused && id === activeWorkspace));
 }

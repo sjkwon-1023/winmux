@@ -96,9 +96,11 @@ export function resetUi(): Promise<void> {
 
 /** needsInput OS 토스트 — 제목·본문 그대로 Windows 알림 하나를 띄운다.
  *  **언제 부를지의 판정은 호출측(main.ts notifyNeedsInput) 계약이다**: needsInput
- *  상승 전이이면서 창이 비포커스일 때만 부른다. 실패는 사유 문자열로 reject 되고
- *  호출측은 console 로만 남긴다 — 알림은 차임과 같은 부가 신호라 실패가 UI 동작을
- *  막지 않는다. */
+ *  상승 전이 중 지금 화면에 보이지 않는 워크스페이스(비포커스 전체 + 포커스 중
+ *  비활성 워크스페이스)만 부른다. 실패는 사유 문자열로 reject 되고 호출측은
+ *  console 로만 남긴다 — 알림 하나가 UI 동작을 막지 않는다. 백엔드도 같은 시도를
+ *  `%APPDATA%\app.winmux.desktop\toast.log` 에 한 줄 남기므로, 실패가 조용히
+ *  사라지지는 않는다 (commands.rs notify_toast). */
 export function notifyToast(title: string, body: string): Promise<void> {
   return invoke<void>("notify_toast", { title, body });
 }

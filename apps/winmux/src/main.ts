@@ -8,6 +8,9 @@
 // window.__winmux 는 유지한다 — 콘솔에서 raw dispatch/getState 를 직접 부르는
 // 조작 표면 (주의: dispatchUI 를 우회하므로 focus 보상·에러 표면화가 없다).
 
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
 import { ActivityPing } from "./activity-ping";
 import {
   dispatch,
@@ -18,7 +21,7 @@ import {
   resetUi,
   userActivity,
 } from "./backend";
-import { Chime, detectNeedsInputOnset, installChimeUnlock } from "./chime";
+import { detectNeedsInputOnset, needsInputToastTargets } from "./chime";
 import { formatCommandError } from "./command-error";
 import {
   activeTerminalCwd,
@@ -98,6 +101,11 @@ function installActivityPing(): void {
 /** one-shot 에러 표시 유지 시간 — 이 뒤엔 타이머로 소거한다 (폴링 금지). */
 const ERROR_TTL_MS = 5000;
 
+/** 창 포커스 신호 이벤트 이름 — 글루 `main.rs` 의 `WINDOW_FOCUS_EVENT` 와 짝이다
+ *  (payload: bool, true = 포커스 획득). 창 숨김 신호(window-visibility.ts)와 같은
+ *  모양이되 별개 사실이다: 이건 포커스, 저건 최소화다. */
+const WINDOW_FOCUS_EVENT = "window-focus";
+
 /** needsInput 토스트 본문 — 에이전트의 마지막 메시지 **첫 줄**이다. 여러 줄 메시지를
  *  통째로 넣으면 OS 가 어차피 잘라 내며 첫 줄이 가장 정보가 많고, 메시지가 없거나
  *  공백뿐이면 무엇을 알리는 알림인지는 남겨야 하므로 고정 문구로 대체한다. */
@@ -143,12 +151,21 @@ class App {
     // 여는 비일관 제거) — 픽커는 createWorkspaceHere 의 무워크스페이스 폴백뿐이다.
     () => this.createWorkspaceHere(),
   );
-  /** needsInput 알림음 (chime.ts) — AudioContext 는 첫 제스처 unlock 까지 lazy 다. */
-  private readonly chime = new Chime();
   /** 직전 스냅샷의 워크스페이스별 agentStatus — needsInput 상승 전이 판정 기준선.
-   *  부팅 첫 렌더 전까지 null 이고, 그 첫 스냅샷은 소리 없이 기준선으로만
+   *  부팅 첫 렌더 전까지 null 이고, 그 첫 스냅샷은 알림 없이 기준선으로만
    *  채워진다 (notifyNeedsInput 주석). */
   private agentStatuses: Map<WorkspaceId, AgentStatus> | null = null;
+  /** 창이 지금 포커스를 쥐고 있나 — 토스트 억제 판정의 근거다. 갱신은 OS 창
+   *  이벤트(WINDOW_FOCUS_EVENT)와 부팅 시 1회 조회로만 하고 document.hasFocus()
+   *  는 쓰지 않는다 (chime.ts needsInputToastTargets 주석의 WebView2 quirk).
+   *
+   *  초기값 true 는 조회가 도착하기 전까지의 임시값일 뿐이다 — 왜 조회가 필요한지는
+   *  installWindowFocus 주석 참조. 두 경로가 다 실패해 true 로 굳어도 손해는 활성
+   *  워크스페이스의 토스트뿐이다 (다른 워크스페이스는 여전히 뜬다). */
+  private windowFocused = true;
+  /** 포커스 전이 신호가 한 번이라도 도착했나 — 부팅 조회 응답이 그 사이 도착한
+   *  전이를 덮어쓰지 않게 하는 가드 (installWindowFocus). */
+  private focusEventSeen = false;
   private errorText: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
   /** 폴더 선택 in-flight 가드 — 대화상자가 떠 있는 동안 버튼 연타·키 반복으로
@@ -170,9 +187,7 @@ class App {
     };
     installReloadKey();
     installActivityPing();
-    // 알림음 unlock — 브라우저 autoplay 정책상 사용자 제스처 전에는 소리가 나지
-    // 않으므로, 첫 keydown/mousedown 에서 AudioContext 를 resume 해 둔다.
-    installChimeUnlock(this.chime);
+    this.installWindowFocus();
     // 창 숨김(최소화) 신호 구독 — WebView2 가 주지 않는 visibility 를 글루 창
     // 이벤트로 대체한다 (window-visibility.ts). 실패는 폴링 게이팅 신호의
     // 유실일 뿐 UI 동작과 무관하므로(최소화 중에도 폴링이 도는 기존 동작으로
@@ -202,6 +217,43 @@ class App {
     }
     this.store.subscribe((snapshot) => this.render(snapshot));
     await this.store.init();
+  }
+
+  /** 창 포커스 추적 배선 — needsInput 토스트 억제 판정의 유일한 근거다 (WebView2 의
+   *  document.hasFocus() 는 비포커스에도 true 로 남을 수 있어 못 쓴다).
+   *
+   *  **구독만으로는 부족하다.** 창 이벤트는 포커스가 **바뀔 때만** 오는데, 이 프론트는
+   *  앱 부팅뿐 아니라 **자동 리셋(webview reload)** 으로도 처음부터 다시 시작한다 —
+   *  그리고 그 리셋의 주 트리거가 하필 "창이 숨겨진/비포커스 상태로 N 분"이다
+   *  (reset_supervisor). 즉 리로드 직후의 창은 대개 비포커스인데 전이는 이미 지나가서
+   *  다시 오지 않으므로, 초기값 true 로 두면 사용자가 자리를 비운 동안 활성
+   *  워크스페이스의 토스트가 통째로 억제된다 — 이 기능이 존재하는 바로 그 상황이다.
+   *  그래서 부팅 때 OS 에 현재 포커스를 **한 번 물어본다** (core:default 로 이미
+   *  허용된 창 조회다 — capabilities 추가 없음).
+   *
+   *  순서가 계약이다: **구독 먼저, 조회 나중.** 그래야 조회가 도는 사이 일어난 전이를
+   *  놓치지 않는다. 반대로 늦게 도착한 조회 응답이 그 전이를 되돌리지 않도록
+   *  focusEventSeen 으로 가드한다.
+   *
+   *  둘 다 실패해도 부트스트랩은 막지 않고 콘솔에만 남긴다 — 활동 핑·창 가시성과 같은
+   *  규율 (알림 하나 때문에 앱이 안 뜨면 손해가 더 크다). */
+  private installWindowFocus(): void {
+    listen<boolean>(WINDOW_FOCUS_EVENT, (event) => {
+      this.focusEventSeen = true;
+      this.windowFocused = event.payload;
+    }).catch((err: unknown) => {
+      console.error("window focus listen failed", err);
+    });
+    // getCurrentWindow() 는 동기 호출이라 프로미스 체인 **안에서** 부른다 — 그래야
+    // 예외가 여기서 잡히고 부트스트랩(init 을 await 하는 main)까지 올라가지 않는다.
+    void (async () => {
+      try {
+        const focused = await getCurrentWindow().isFocused();
+        if (!this.focusEventSeen) this.windowFocused = focused;
+      } catch (err) {
+        console.error("window focus query failed", err);
+      }
+    })();
   }
 
   /** 키보드 3층 이동 배선 (20단계) — capture 단계 window 리스너라 xterm 보다
@@ -521,40 +573,38 @@ class App {
     this.tracer.settle();
   }
 
-  /** needsInput 알림 트리거 (실기 결함: 에이전트가 입력을 기다리는데 소리가 전혀
+  /** needsInput 토스트 트리거 (실기 결함: 에이전트가 입력을 기다리는데 알림이 전혀
    *  없어 대기를 놓친다) — 어느 워크스페이스든 needsInput 이 **아니었다가**
-   *  needsInput 이 된 순간에만 1회 울린다. 판정은 순수 함수 detectNeedsInputOnset
-   *  몫이고(같은 상태 반복·running/idle 전환은 무음 — 소음 방지) 여기는 기준선
-   *  보관과 재생·토스트 배선만 한다.
+   *  needsInput 이 된 순간에 그 워크스페이스마다 토스트 1건을 띄운다. 판정은 순수
+   *  함수 둘(detectNeedsInputOnset = 상승 전이, needsInputToastTargets = 억제)
+   *  몫이고 여기는 기준선 보관과 발송 배선만 한다.
    *
-   *  같은 전이에 신호가 둘이고 조건이 다르다: **차임은 항상**(포커스 여부 무관,
-   *  여러 워크스페이스가 동시에 전이해도 1회), **토스트는 비포커스일 때만**
-   *  (워크스페이스마다 1건). 아래 분기의 주석이 그 이유를 담는다.
+   *  억제 규칙은 "이미 보이는 것만 조용히"다: 창이 포커스이고 그 워크스페이스가
+   *  활성일 때만 안 띄우고, 비포커스거나 다른 워크스페이스면 띄운다. v0.3.6 까지는
+   *  차임이 있다는 전제로 포커스면 전부 억제했는데, 차임이 사라진 지금은 물론이고
+   *  그때도 "옆 워크스페이스가 기다리기 시작한 것"을 놓치게 만드는 규칙이었다.
+   *  포커스 판정을 document.hasFocus() 대신 OS 신호(windowFocused)로 하는 이유는
+   *  chime.ts needsInputToastTargets 주석 참조.
    *
-   *  부팅 첫 스냅샷은 기준선으로만 쓴다(prev=null → 무음). 재시작 복원은 코어
-   *  sanitize 가 agent_status 를 Idle 로 되돌리므로 자연히 무음이지만, WebView
+   *  부팅 첫 스냅샷은 기준선으로만 쓴다(prev=null → 무알림). 재시작 복원은 코어
+   *  sanitize 가 agent_status 를 Idle 로 되돌리므로 자연히 조용하지만, WebView
    *  리로드·자동 리셋에서는 살아 있는 세션의 needsInput 이 그대로 첫 스냅샷에
-   *  실려 오므로 "전이"가 아닌 것에 울리지 않게 명시적으로 기준선 취급한다. */
+   *  실려 오므로 "전이"가 아닌 것에 알리지 않게 명시적으로 기준선 취급한다. */
   private notifyNeedsInput(snapshot: StateSnapshot): void {
-    const { chime, onsets, next } = detectNeedsInputOnset(
-      this.agentStatuses,
-      snapshot.state.workspaces,
-    );
+    const { onsets, next } = detectNeedsInputOnset(this.agentStatuses, snapshot.state.workspaces);
     this.agentStatuses = next;
-    if (chime) this.chime.play();
-    // OS 토스트는 **창이 비포커스일 때만** (백로그 2026-08-11). 창을 보고 있는
-    // 사용자에게는 사이드바 강조 + 차임이면 충분하고, 그 위에 토스트까지 뜨면
-    // 방해다 — 토스트의 값은 "winmux 를 안 보고 있을 때 불러 준다"에 있다.
-    // document.hasFocus() 를 쓰는 이유: 백엔드의 창 포커스 신호는 자동 리셋 정책
-    // 전용 경로(main.rs on_window_event)라 프론트로 오지 않고, 사실 자체는 WebView
-    // 안에서 그대로 읽힌다. 차임과 달리 워크스페이스마다 1건이다 — 어느 프로젝트가
-    // 기다리는지가 알림의 내용이라 합칠 수 없다.
-    if (onsets.length === 0 || document.hasFocus()) return;
-    const pending = new Set(onsets);
+    const targets = needsInputToastTargets(
+      onsets,
+      snapshot.state.activeWorkspace,
+      this.windowFocused,
+    );
+    if (targets.length === 0) return;
+    const pending = new Set(targets);
     for (const ws of snapshot.state.workspaces) {
       if (!pending.has(ws.id)) continue;
-      // 실패는 console 로만 — 알림은 차임과 같은 부가 신호라 UI 동작을 막지 않는다
-      // (알림 차단·플러그인 실패 어느 쪽이든 앱은 그대로 돈다).
+      // 실패는 console 로만 — 알림 하나가 UI 동작을 막지 않는다. 백엔드는 같은
+      // 실패를 %APPDATA%\app.winmux.desktop\toast.log 에도 한 줄 남기므로,
+      // 필드에서 dev 콘솔 없이도 시도·결과를 확인할 수 있다 (commands.rs).
       notifyToast(`winmux — ${ws.name}`, toastBody(ws.lastAgentMessage)).catch((err) => {
         console.debug("[winmux] needsInput toast failed", err);
       });
