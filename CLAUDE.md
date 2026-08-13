@@ -25,9 +25,15 @@ the hard-won ConPTY findings (0004), inter-pane text passing and its UI retireme
 interception list (0007), viewer tabs (0008). Stage 19 (git branch display) is deferred
 to v2 with `git_branch`/`git_dirty` reserved on the model.
 
-One batch landed after re-verification and has **not** been through a Windows round yet
-(Shift+Enter as ESC CR, sidebar reflow fix, folder-first workspace creation, retired send
-buttons, redrawn icons) — its checklist is WINDOWS-BUILD §10's last subsection.
+Every release through **v0.3.8 is field-verified** (2026-08-13 round): the toast pipeline
+end to end (AUMID registration, OS-signal focus gate, direct WinRT delivery, the widened
+focused-but-other-workspace case), viewer fonts and viewer zoom, Codex resume hints, and
+the earlier post-re-verification batch (Shift+Enter as ESC CR, sidebar reflow, workspace
+creation, icons). The WINDOWS-BUILD §10 subsections per release stay as regression
+checklists. One field lesson worth keeping: synthetic needs-input tests must reset state
+first (`winmux:idle` then `winmux:needsInput`) — the onset only fires on a transition, and
+two rounds were burned on stale-state and wrong-token test artifacts that looked like app
+defects.
 
 ### Backlog
 
