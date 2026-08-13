@@ -39,7 +39,11 @@ import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
 import { adjustFontSize, applyTerminalSettings, resetFontSize } from "./terminal-view";
 import { applyHighlightSettings } from "./text-view";
-import { applyViewerFontSettings } from "./viewer-font";
+import {
+  adjustViewerFontSize,
+  applyViewerFontSettings,
+  resetViewerFontSize,
+} from "./viewer-font";
 import { initWindowVisibility } from "./window-visibility";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { AgentStatus, Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
@@ -312,15 +316,25 @@ class App {
       this.sidebar.closeActive();
       return;
     }
-    // 줌도 스냅샷 가드 앞이다 — 글꼴 크기는 모델 상태가 아니라 terminal-view 의
-    // 모듈 상태라 대상 해석(활성 워크스페이스·pane)이 필요 없고, 스냅샷이 아직
-    // 없는 부트 직후에도 그냥 걸린다. 세션 한정이라 dispatch 도 하지 않는다.
+    // 줌도 스냅샷 가드 앞이다 — 글꼴 크기는 모델 상태가 아니라 terminal-view ·
+    // viewer-font 의 모듈 상태라 대상 해석(활성 워크스페이스·pane)이 필요 없고,
+    // 스냅샷이 아직 없는 부트 직후에도 그냥 걸린다. 세션 한정이라 dispatch 도
+    // 하지 않는다.
+    //
+    // **한 키가 두 표면을 같이 움직인다** (v0.3.8): 터미널(xterm 옵션)과 뷰어
+    // (CSS 변수 + 행 격자)는 그리는 층이 달라 적용 함수가 둘이지만, 사용자에게는
+    // "이 창의 글자 크기" 하나다 — 여기가 그 둘을 묶는 유일한 자리다. 표면별
+    // 독립 줌(포커스 따라 갈리는 줌)은 만들지 않는다: 어느 표면이 커졌는지
+    // 기억해야 하는 순간 Ctrl+0 의 뜻이 흐려진다. 기준값은 각자 다르므로
+    // (터미널 13px · 뷰어 12px) 리셋도 각자의 값으로 돌아간다.
     if (action.type === "zoom") {
       adjustFontSize(action.delta);
+      adjustViewerFontSize(action.delta);
       return;
     }
     if (action.type === "zoomReset") {
       resetFontSize();
+      resetViewerFontSize();
       return;
     }
     const snapshot = this.store.snapshot;

@@ -45,6 +45,24 @@ Accepted deferrals, one line each. None of these block the MVP.
   relaunch returns to the `settings.json` size, Ctrl+0 resets to it), window-wide across all
   tabs, clamped to the backend's 6-72 range; Ctrl+- shadows the terminal's C-_ (emacs undo)
   as an accepted trade-off, same class as Ctrl+1-9. Verification: WINDOWS-BUILD §10 v0.3.4.
+  - **Extended to the viewers — landed 2026-08-13** (user request, v0.3.8), reversing the
+    v0.3.7 decision to keep zoom terminal-only. One key moves **both** surfaces by the same
+    step — no per-surface zoom, because the moment you have to remember which surface grew,
+    Ctrl+0 stops having one meaning. The two surfaces keep separate effective sizes and
+    separate baselines (terminal 13px, viewers 12px) and clamp independently, so at 6/72 one
+    can stop while the other still moves. What made this more than a CSS-variable write is that
+    two viewers hold coordinates the resize invalidates, so `viewer-font.ts` now owns a live-view
+    registry (the counterpart of `terminal-view.ts`'s `liveViews`) driven in **two phases** —
+    every view anchors its position *before* the variable changes, then re-seats itself after.
+    `TextView` re-lays row height, spacer height and `scrollTop` around the **topmost visible
+    line** (model coordinates are byte offsets, so holding the line holds the position and
+    nothing goes back to the model). `MarkdownView` holds a **relative** anchor instead — its
+    scroll coordinate is px and the prose reflows — and deliberately does not write the post-zoom
+    px back, since a relaunch renders at the `settings.json` size where that px means a different
+    place. The folder listing needs neither. The "never call this again after boot" warning on
+    `viewer-font.ts` is gone with the hazard. Markdown prose now follows the **size** too (its
+    face is still not the code font) — otherwise zooming a document left the prose behind, which
+    partly supersedes a v0.3.7 decision. Verification: WINDOWS-BUILD §10 v0.3.8.
 - **Syntax highlighting in the text viewer — landed 2026-08-12** (user request 2026-08-11)
   with highlight.js 11 behind **dynamic import only**: the entry bundle carries zero
   highlighter bytes (verified on the build output — core, one chunk per language and the

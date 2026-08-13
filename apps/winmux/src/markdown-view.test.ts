@@ -1,4 +1,4 @@
-// markdownViewer 의 두 위험 지점 검증 (21단계 청크 D).
+// markdownViewer 의 위험 지점 검증 (21단계 청크 D + v0.3.8 줌).
 //
 // 1. **raw HTML escape** — 이 WebView 는 dispatch·fs_* IPC 를 쥐고 있어서, 파일
 //    내용발 HTML 이 DOM 에 들어가면 마크다운 파일 하나로 앱 권한이 넘어간다.
@@ -7,12 +7,22 @@
 //    업그레이드로 무력화되면 여기서 깨져야 한다).
 // 2. **폴링 상태기계** — 변화 감지·hidden 정지·dispose 정리. 타이머를 주입해
 //    결정적으로 돌린다 (AckBatcher·ScrollSettle 전례).
+// 3. **줌 앵커** (v0.3.8) — 글자 크기가 바뀌면 산문이 리플로우돼 이 뷰의 px
+//    좌표가 무의미해진다. 줌 앞뒤를 잇는 상대 위치 계산이 그 유일한 다리다.
 //
 // DOM·IPC 는 이 파일의 대상이 아니다 (뷰는 이 결과를 그대로 그리는 얇은 층이다).
+// 앵커도 계산만 여기서 보고, 실제 리플로우 뒤 화면 위치는 레이아웃이 필요하므로
+// Windows 수동 검증(§10 v0.3.8 item 3)이 맡는다 — happy-dom 은 scrollHeight 가
+// 0 이라 이 경로를 재현하지 못한다.
 
 import { describe, expect, it } from "vitest";
 
-import { MtimePoller, renderMarkdown } from "./markdown-view";
+import {
+  MtimePoller,
+  renderMarkdown,
+  scrollAnchorRatio,
+  scrollTopForAnchor,
+} from "./markdown-view";
 import type { TimerHost } from "./ack-batcher";
 
 /** 수동 진행 가짜 타이머 — 등록된 콜백을 fire 로 직접 발화시킨다
@@ -330,5 +340,40 @@ describe("MtimePoller", () => {
     await cycle(h);
     // 기준이 이미 7_000 이라 같은 값은 변화가 아니다.
     expect(h.changes).toEqual([]);
+  });
+});
+
+// 줌 앵커 — 산문 리플로우를 건너 화면 위치를 잇는 유일한 좌표다. 이 뷰에는
+// textViewer 의 행 인덱스 같은 안정 좌표가 없어서 상대 위치를 쓴다.
+describe("줌 앵커", () => {
+  it("문서 안 상대 위치를 붙든다", () => {
+    // 스크롤 여지 = 2000 - 500 = 1500, 그 절반 지점.
+    expect(scrollAnchorRatio(750, 2000, 500)).toBe(0.5);
+    expect(scrollAnchorRatio(0, 2000, 500)).toBe(0);
+    expect(scrollAnchorRatio(1500, 2000, 500)).toBe(1);
+  });
+
+  it("스크롤 여지가 없으면 0 이다 (되돌릴 것이 없다)", () => {
+    expect(scrollAnchorRatio(0, 400, 500)).toBe(0);
+    expect(scrollAnchorRatio(120, 500, 500)).toBe(0);
+  });
+
+  it("줌으로 문서가 커져도 같은 자리를 가리킨다", () => {
+    // 12 → 14px 이면 높이가 대략 같은 비율로 늘어난다. px 를 그대로 두면
+    // 750 이 여전히 750 이라 읽던 자리가 밀린다 — 비율은 따라 올라간다.
+    const ratio = scrollAnchorRatio(750, 2000, 500);
+    expect(scrollTopForAnchor(ratio, 2333, 500)).toBe(917);
+    // 되돌아오면 원래 자리다 (정수 반올림 오차 안).
+    expect(scrollTopForAnchor(ratio, 2000, 500)).toBe(750);
+  });
+
+  it("문서가 뷰포트보다 짧아지면 맨 위다", () => {
+    expect(scrollTopForAnchor(1, 400, 500)).toBe(0);
+  });
+
+  it("범위 밖 입력은 경계에 멈춘다 (정수 px)", () => {
+    expect(scrollTopForAnchor(2, 2000, 500)).toBe(1500);
+    expect(scrollTopForAnchor(-1, 2000, 500)).toBe(0);
+    expect(Number.isInteger(scrollTopForAnchor(1 / 3, 2000, 500))).toBe(true);
   });
 });

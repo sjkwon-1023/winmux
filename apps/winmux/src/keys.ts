@@ -25,9 +25,9 @@
 // | `Ctrl+Shift+N` | 새 워크스페이스 — 활성 터미널의 현재 경로로 즉시 생성 (임의 폴더는 사이드바 + 버튼의 픽커) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+[` / `Ctrl+Shift+]` | 이전/다음 워크스페이스 (사이드바 순서, 끝에서 순환) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+Q` | 활성 워크스페이스 닫기 (실행 중인 터미널 세션이 있으면 confirm — 사이드바 × 버튼과 같은 경로) | keys.ts 판정 + main.ts window keydown capture |
-// | `Ctrl+=` / `Ctrl++` | 터미널 글꼴 확대 (세션 한정 — settings.json 은 그대로) | keys.ts 판정 + main.ts window keydown capture |
-// | `Ctrl+-` | 터미널 글꼴 축소 (세션 한정) | keys.ts 판정 + main.ts window keydown capture |
-// | `Ctrl+0` | 터미널 글꼴 크기를 settings.json 기본값으로 리셋 | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+=` / `Ctrl++` | 터미널 **+ 뷰어** 글꼴 확대 (세션 한정 — settings.json 은 그대로) | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+-` | 터미널 **+ 뷰어** 글꼴 축소 (세션 한정) | keys.ts 판정 + main.ts window keydown capture |
+// | `Ctrl+0` | 터미널·뷰어 글꼴 크기를 각자의 settings.json 기준값으로 리셋 | keys.ts 판정 + main.ts window keydown capture |
 // | `F2` | 활성 워크스페이스 이름 변경 (사이드바 카드 인라인 편집) | keys.ts 판정 + main.ts window keydown capture |
 // | `Ctrl+Shift+R` | WebView 리로드 (F5 는 쓰지 않는다 — main.ts 주석 참조) | main.ts installReloadKey |
 // | `Ctrl+V` / `Ctrl+Shift+V` / `Shift+Insert` | 붙여넣기 (클립보드 → xterm paste) | terminal-view.ts customKeyEventHandler |
@@ -111,10 +111,12 @@ export type KeyAction =
   /** 활성 워크스페이스 이름의 인라인 편집 시작 — dispatch 가 아닌 UI 액션이다
    *  (편집 확정 시점에 글루가 renameWorkspace 를 보낸다). */
   | { type: "renameWorkspace" }
-  /** 터미널 글꼴 크기 ±1px (`Ctrl+=`/`Ctrl++` · `Ctrl+-`). 클램프·적용은
-   *  terminal-view 의 모듈 상태 소관이고, 상태 스냅샷과 무관한 UI 액션이다. */
+  /** 글꼴 크기 ±1px (`Ctrl+=`/`Ctrl++` · `Ctrl+-`) — **터미널과 뷰어 둘 다**를
+   *  같은 스텝으로 움직인다 (표면별 독립 줌은 없다). 클램프·적용은 terminal-view
+   *  ·viewer-font 의 모듈 상태 소관이고, 상태 스냅샷과 무관한 UI 액션이다. */
   | { type: "zoom"; delta: 1 | -1 }
-  /** 터미널 글꼴 크기를 settings.json 기본값으로 되돌린다 (`Ctrl+0`). */
+  /** 터미널·뷰어 글꼴 크기를 각자의 settings.json 기준값으로 되돌린다 (`Ctrl+0`).
+   *  두 표면의 기준값은 서로 다를 수 있다 (터미널 기본 13px · 뷰어 12px). */
   | { type: "zoomReset" };
 
 const ARROW_DIRS: Record<string, PaneDirection | undefined> = {

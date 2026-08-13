@@ -29,15 +29,22 @@ import {
   lineIndexForOffset,
   nextWindowStart,
   pageScrollTop,
+  scrollTopForLineHeight,
   shouldAdoptScroll,
   splitHighlightedLines,
   textKeyAction,
+  topLineIndex,
   visibleSlice,
   windowButtonsDisabled,
   windowStartForRestore,
 } from "./text-view";
 import type { HighlightApi } from "./text-view";
-import { DEFAULT_VIEWER_FONT_SIZE, applyViewerFontSettings } from "./viewer-font";
+import {
+  DEFAULT_VIEWER_FONT_SIZE,
+  adjustViewerFontSize,
+  applyViewerFontSettings,
+  resetViewerFontSize,
+} from "./viewer-font";
 import type { TimerHost } from "./ack-batcher";
 import type { KeySpec } from "./keys";
 import type { UiSettings } from "./backend";
@@ -261,6 +268,50 @@ describe("visibleSlice", () => {
     const slice = visibleSlice(0, 0, 100, LINE_HEIGHT_PX, 20);
     expect(slice.first).toBe(0);
     expect(slice.last).toBe(21);
+  });
+});
+
+describe("topLineIndex", () => {
+  it("스크롤 위치를 행 격자로 내림한다", () => {
+    expect(topLineIndex(0, 16, 100)).toBe(0);
+    expect(topLineIndex(15, 16, 100)).toBe(0);
+    expect(topLineIndex(16, 16, 100)).toBe(1);
+    expect(topLineIndex(170, 16, 100)).toBe(10);
+  });
+
+  it("마지막 행을 넘지 않고 음수는 0 이다", () => {
+    expect(topLineIndex(99999, 16, 5)).toBe(4);
+    expect(topLineIndex(-40, 16, 5)).toBe(0);
+  });
+
+  it("빈 창·무의미한 격자는 0 이다 (호출자가 분기하지 않아도 되게)", () => {
+    expect(topLineIndex(500, 16, 0)).toBe(0);
+    expect(topLineIndex(500, 0, 10)).toBe(0);
+  });
+});
+
+// 줌으로 행높이가 바뀔 때 화면이 어디에 멈추는가 — 뷰어 줌(v0.3.8)의 핵심
+// 불변식이다. 지키는 것은 **최상단 가시 행**이고, px 비율이 아니다.
+describe("scrollTopForLineHeight", () => {
+  it("최상단 가시 행이 유지된다 (확대·축소 양쪽)", () => {
+    // 16px 격자에서 10번째 행이 맨 위 → 19px 격자에서도 10번째 행이 맨 위.
+    expect(scrollTopForLineHeight(160, 16, 19, 100)).toBe(190);
+    expect(scrollTopForLineHeight(190, 19, 16, 100)).toBe(160);
+  });
+
+  it("격자에서 벗어나 있던 위치는 그 행의 머리로 스냅한다", () => {
+    // 드래그·End 로 격자 밖에 멈춘 상태라도 결과는 항상 행 배수다 — 소수를
+    // 허용하면 최상단 행이 반쯤 잘린 채 멈춘다.
+    expect(scrollTopForLineHeight(171, 16, 16, 100)).toBe(160);
+    expect(scrollTopForLineHeight(171, 16, 24, 100)).toBe(240);
+  });
+
+  it("행높이가 그대로면 위치도 그대로다 (행 머리 기준)", () => {
+    expect(scrollTopForLineHeight(320, 16, 16, 100)).toBe(320);
+  });
+
+  it("빈 창은 맨 위다", () => {
+    expect(scrollTopForLineHeight(320, 16, 24, 0)).toBe(0);
   });
 });
 
@@ -904,6 +955,9 @@ describe("TextView 하이라이트 적용", () => {
 // 위치·scrollTop)는 CSS 가 아니라 TS 가 계산하므로, 글자만 키우면 큰 글자가 16px
 // 행 안에서 잘린다. 그 연결이 이 파일의 다른 계약(가상 스크롤)과 붙어 있어 뷰를
 // 실제로 띄워 확인한다.
+//
+// v0.3.8 부터는 **떠 있는 뷰**에도 같은 일이 일어난다 (줌) — 그래서 이 describe
+// 는 부팅 경로뿐 아니라 라이브 재적용과 레지스트리 수명까지 본다.
 describe("TextView 행 격자와 설정 글꼴", () => {
   function mount(text: string): TextView {
     file.bytes = encoder.encode(text);
@@ -969,5 +1023,58 @@ describe("TextView 행 격자와 설정 글꼴", () => {
     expect(view.root.style.getPropertyValue("--text-line-height")).toBe(`${lineHeight}px`);
     expect(spacerHeight(view)).toBe(`${3 * lineHeight}px`);
     view.dispose();
+  });
+
+  /** 뷰의 실스크롤 컨테이너 — 줌 전후 scrollTop 을 직접 본다. */
+  function scrollEl(view: TextView): HTMLElement {
+    const el = view.root.querySelector<HTMLElement>(".text-scroll");
+    if (el === null) throw new Error("text-scroll not found");
+    return el;
+  }
+
+  /** 한 창에 다 들어가는 여러 행. 행 수는 overscan(20) 안에 두어 happy-dom 의
+   *  clientHeight 0 에서도 전 행이 실제로 그려지게 한다 — 그래야 `mounted` 의
+   *  대기 조건이 성립한다. */
+  const ZOOM_LINES = 20;
+  function manyLines(count: number): string {
+    return `${Array.from({ length: count }, (_, i) => `line ${i}`).join("\n")}\n`;
+  }
+
+  it("줌이 떠 있는 뷰의 행 격자를 다시 앉힌다 — 최상단 가시 행은 그대로", async () => {
+    const view = await mounted(manyLines(ZOOM_LINES), ZOOM_LINES);
+    scrollEl(view).scrollTop = 10 * LINE_HEIGHT_PX; // 10번째 행이 맨 위
+
+    adjustViewerFontSize(2); // 12 → 14px
+    const lineHeight = lineHeightForFontSize(14);
+    expect(lineHeight).toBe(19);
+    expect(view.root.style.getPropertyValue("--text-line-height")).toBe(`${lineHeight}px`);
+    expect(spacerHeight(view)).toBe(`${ZOOM_LINES * lineHeight}px`);
+    // 픽셀이 아니라 **행**이 보존된다.
+    expect(scrollEl(view).scrollTop).toBe(10 * lineHeight);
+
+    resetViewerFontSize();
+    expect(view.root.style.getPropertyValue("--text-line-height")).toBe(`${LINE_HEIGHT_PX}px`);
+    expect(spacerHeight(view)).toBe(`${ZOOM_LINES * LINE_HEIGHT_PX}px`);
+    expect(scrollEl(view).scrollTop).toBe(10 * LINE_HEIGHT_PX);
+    view.dispose();
+  });
+
+  it("줌 뒤에 열리는 뷰는 현재 줌 크기로 열린다", async () => {
+    adjustViewerFontSize(6); // 12 → 18px
+    const view = await mounted("one\ntwo\n", 2);
+    const lineHeight = lineHeightForFontSize(18);
+    expect(lineHeight).toBe(24);
+    expect(view.root.style.getPropertyValue("--text-line-height")).toBe(`${lineHeight}px`);
+    expect(spacerHeight(view)).toBe(`${2 * lineHeight}px`);
+    view.dispose();
+  });
+
+  it("dispose 된 뷰는 줌을 더 받지 않는다 (등록/해제 짝)", async () => {
+    const view = await mounted("one\ntwo\n", 2);
+    view.dispose();
+    adjustViewerFontSize(6);
+    // 레지스트리에서 빠졌으므로 격자는 dispose 시점 그대로다.
+    expect(view.root.style.getPropertyValue("--text-line-height")).toBe(`${LINE_HEIGHT_PX}px`);
+    expect(spacerHeight(view)).toBe(`${2 * LINE_HEIGHT_PX}px`);
   });
 });

@@ -38,6 +38,12 @@
 // 한정**이라 settings.json 에 되쓰지 않는다 (adjustFontSize 주석 참조). 키 판정
 // 자체는 keys.ts(가로채기 표가 정본) + main.ts 글루 소관이다.
 //
+// **줌 키는 이제 터미널 전용이 아니다** (v0.3.8): 같은 키가 뷰어 표면에도 같은
+// 스텝으로 걸린다 — 이 모듈과 짝을 이루는 뷰어 쪽 경로가 viewer-font.ts 의
+// adjustViewerFontSize/resetViewerFontSize 이고, 둘을 같이 부르는 자리는 main.ts
+// runNavAction 한 곳이다. 두 표면은 유효 크기·기준값을 **따로** 들고 있다
+// (터미널 기본 13px · 뷰어 기본 12px). 클램프 범위만 font-size.ts 로 공유한다.
+//
 // 세션 수명은 dispatcher(CloseTab/ClosePane/CloseWorkspace) 소유다 — dispose 는
 // 뷰만 해제하고 세션을 죽이지 않는다.
 
@@ -52,8 +58,14 @@ import { AttachGate } from "./attach-gate";
 import type { GateResult } from "./attach-gate";
 import { ackOutput, attachTerminal, detachTerminal, resizeTerminal, writeStdin } from "./backend";
 import type { OutputChunk, UiSettings } from "./backend";
+import { clampFontSize } from "./font-size";
 import { parseAttachBody, parseFrame } from "./frame";
 import type { SessionId } from "./types";
+
+// 클램프는 뷰어 줌과 공유한다 (font-size.ts) — 여기서 다시 내보내는 이유는 줌
+// 규칙이 터미널 API 의 일부로 계속 보여야 하기 때문이다 (호출자·테스트는 종전
+// 그대로 이 모듈에서 가져온다).
+export { clampFontSize };
 
 /** 터미널 색 테마 — VS Code 기본 다크 터미널 팔레트 전체(16색 ANSI 포함).
  *
@@ -109,26 +121,10 @@ let fontFamily = DEFAULT_FONT_FAMILY;
 let fontSize = DEFAULT_FONT_SIZE;
 let baseFontSize = DEFAULT_FONT_SIZE;
 
-/** 줌 클램프 범위 — **백엔드와의 동기화 계약**: `src-tauri/src/commands.rs` 의
- *  `FONT_SIZE_RANGE`(6..=72)와 같은 값이어야 한다. 그쪽은 settings.json 의
- *  fontSize 를 검증해 범위 밖이면 부트에서 에러로 표면화하고, 여기는 런타임 줌이
- *  그 범위를 넘지 않게 막는다 — 갈라지면 줌으로만 도달 가능한 크기가 생겨
- *  "설정으로는 못 쓰는 값이 화면에는 있는" 비일관이 된다. 한쪽을 바꾸면 둘 다 바꾼다. */
-const FONT_SIZE_MIN = 6;
-const FONT_SIZE_MAX = 72;
-
 /** 살아있는 TerminalView 레지스트리 — 줌은 "지금 열려 있는 모든 터미널"에
  *  동시에 걸리므로 인스턴스 목록이 필요하다. 등록·해제는 생성자와 dispose 가
  *  짝으로 맡는다 (dispose 된 뷰가 남아 이미 죽은 xterm 을 건드리지 않게). */
 const liveViews = new Set<TerminalView>();
-
-/** 줌 후 글꼴 크기 (순수) — 클램프 규칙의 단일 소스라 테스트가 여기를 잡는다.
- *  정수 px 로 유지한다 (xterm 이 소수 크기도 받지만 셀 폭 반올림이 fit 계산과
- *  어긋나기 쉽다). 범위를 벗어난 요청은 에러가 아니라 경계에 멈춘다 — 키를 더
- *  눌러도 아무 일이 없는 것 자체가 피드백이다 (키보드 조작의 조용한 no-op 규율). */
-export function clampFontSize(size: number): number {
-  return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(size)));
-}
 
 /** 줌 ±1px (`Ctrl+=` / `Ctrl+-`) — 현재 유효 크기에 delta 를 더해 클램프하고,
  *  살아있는 모든 뷰에 적용한다. 이후 새로 열리는 탭도 모듈 상태를 읽으므로 같은
@@ -137,13 +133,19 @@ export function clampFontSize(size: number): number {
  *  **줌은 세션 한정이다 — settings.json 에 되쓰지 않는다** (백로그 결정
  *  2026-08-12). 줌은 "지금 이 화면을 잠깐 키우는" 조작이고 영구 설정은 파일이
  *  담당한다: 되쓰면 임시 확대가 다음 부팅의 기본값이 되고, 손으로 쓴 설정 파일을
- *  앱이 말없이 고치게 된다. 영구 변경은 settings.json 을 직접 고치는 경로다. */
+ *  앱이 말없이 고치게 된다. 영구 변경은 settings.json 을 직접 고치는 경로다.
+ *
+ *  **여기는 터미널 표면만 움직인다.** 같은 키가 뷰어도 같은 스텝으로 움직이지만
+ *  그건 호출자(main.ts runNavAction)가 viewer-font 의 짝 함수를 같이 부르기
+ *  때문이다 — 두 표면은 기준값이 달라(13px 대 12px) 유효 크기를 따로 들고,
+ *  경계(6·72)에도 각자 걸린다. */
 export function adjustFontSize(delta: number): void {
   applyFontSize(clampFontSize(fontSize + delta));
 }
 
 /** 줌 리셋 (`Ctrl+0`) — settings.json 부팅값(설정이 없으면 기본 13px)으로 되돌린다.
- *  "0 = 원래대로"의 원래는 앱 기본값이 아니라 **사용자가 설정한 값**이다. */
+ *  "0 = 원래대로"의 원래는 앱 기본값이 아니라 **사용자가 설정한 값**이다.
+ *  뷰어 쪽 리셋은 viewer-font 의 resetViewerFontSize 가 짝으로 맡는다. */
 export function resetFontSize(): void {
   applyFontSize(baseFontSize);
 }

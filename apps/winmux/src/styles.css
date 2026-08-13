@@ -14,15 +14,25 @@
 }
 
 /* 뷰어 글꼴 — `--viewer-font-family` / `--viewer-font-size` 는 여기에 **선언하지
-   않는다**. settings.json 에 fontFamily/fontSize 가 있을 때만 부팅 1회 경로가
-   :root 에 심고(viewer-font.ts), 없으면 아래 var() 의 fallback 이 그대로 쓰인다 —
+   않는다**. settings.json 에 fontFamily/fontSize 가 있을 때(또는 줌이 걸렸을 때)만
+   viewer-font.ts 가 :root 에 심고, 없으면 아래 var() 의 fallback 이 그대로 쓰인다 —
    그 fallback 이 화면 기본값의 정본이라 기본값이 두 곳에 갈리지 않는다.
-   읽는 곳은 모노스페이스 **콘텐츠** 표면뿐이다: `.text-lines`/`.text-line`(텍스트
-   뷰어 행), `.folder-row`(폴더 목록), `.markdown-body code`(마크다운 code). UI
-   크롬(사이드바·탭바·상태줄·배너)과 마크다운 산문은 대상이 아니고, 터미널은 CSS
-   가 아니라 xterm 옵션으로 같은 설정을 받는다. `--viewer-font-size` 의 fallback
-   12px 는 viewer-font.ts 의 DEFAULT_VIEWER_FONT_SIZE 와 짝이다 (텍스트 뷰어의 행
-   격자가 이 크기에서 행높이를 계산한다 — 갈라지면 행이 잘린다). */
+   `--viewer-font-size` 는 부팅 값이자 **런타임 줌**(Ctrl+= / Ctrl+- / Ctrl+0)의
+   라이브 값이다.
+
+   두 변수의 대상 범위가 다르다.
+   - family: 모노스페이스 **콘텐츠** 표면뿐 — `.text-lines`(텍스트 뷰어 행),
+     `.folder-row`(폴더 목록), `.markdown-body code`(마크다운 code). UI 크롬
+     (사이드바·탭바·상태줄·배너)과 마크다운 **산문**은 사용자가 고른 "코드 글꼴"의
+     대상이 아니다.
+   - size: 위에 더해 마크다운 산문(`.markdown-body`)도 따른다 — 줌이 "보고 있는
+     이 문서를 키우는" 조작이라 산문만 제자리에 남으면 반쪽이기 때문이다. 대신
+     UI 크롬은 여전히 비대상이다 (줌은 콘텐츠 줌이지 UI 스케일이 아니다).
+
+   터미널은 CSS 가 아니라 xterm 옵션으로 같은 설정·같은 줌을 받는다.
+   `--viewer-font-size` 의 fallback 12px 는 viewer-font.ts 의
+   DEFAULT_VIEWER_FONT_SIZE 와 짝이다 (텍스트 뷰어의 행 격자가 이 크기에서
+   행높이를 계산한다 — 갈라지면 행이 잘린다). */
 
 * {
   box-sizing: border-box;
@@ -680,10 +690,14 @@ body {
   outline: none; /* 프로그램적 focus(tabindex -1) 표시는 하지 않는다 */
 }
 
+/* 산문은 **크기만** 설정·줌을 따른다 (글꼴 family 는 비대상 — 아래 code 참조).
+   더하기로 쓰는 이유는 `.folder-row-size` 의 빼기와 같다: 크기를 키우면 그 관계가
+   유지돼야 하고, 13px 로 못박으면 code 만 커지고 산문은 그대로 남아 문서가 깨져
+   보인다. 기본값에서는 12+1 = 13px 로 종전과 같다. 헤딩은 em 이라 따라온다. */
 .markdown-body {
   max-width: 80ch;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: calc(var(--viewer-font-size, 12px) + 1px);
   line-height: 1.55;
   /* 긴 URL·식별자가 가로 스크롤을 만들지 않게 */
   overflow-wrap: break-word;

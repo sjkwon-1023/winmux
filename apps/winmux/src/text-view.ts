@@ -36,10 +36,17 @@
 // 리사이즈는 **자체 ResizeObserver** 로 받는다 (계획 프론트 계약): pane 의
 // observer 는 터미널 fit 전용이라 뷰어까지 겸하게 만들지 않는다.
 //
-// 글꼴은 settings.json 값을 따른다 — 부팅 1회 경로가 :root 커스텀 프로퍼티로
-// 심고(viewer-font.ts) 행높이는 그 글자 크기에서 파생한다
-// (lineHeightForFontSize). 터미널 줌(Ctrl+= / Ctrl+-)은 뷰어에 오지 않으므로 뷰
-// 수명 동안 행 격자가 고정이라는 위 계약이 그대로 유지된다.
+// 글꼴은 settings.json 값을 따르고 런타임 줌(Ctrl+= / Ctrl+- / Ctrl+0)도 따른다 —
+// :root 커스텀 프로퍼티는 viewer-font.ts 가 심고, 행높이는 그 글자 크기에서
+// 파생한다(lineHeightForFontSize). 즉 **행 격자는 뷰 수명 동안 고정이 아니다**
+// (v0.3.8): 뷰는 생성 시 viewer-font 의 레지스트리에 자신을 등록하고, 크기가
+// 바뀌면 setViewerFontSize 로 행높이·spacer·scrollTop 을 다시 앉힌다. 위 두
+// 계약은 그대로다 — 재적용은 창을 다시 읽지 않고(계약 1), 모델 좌표가 byte
+// offset 이라 **최상단 가시 행**만 붙들면 위치가 보존되므로 평소에는 스크롤을
+// 되돌려 보낼 일이 없다(계약 2). 예외는 문서 말미에서 줌아웃할 때다: 목표
+// scrollTop 이 줄어든 문서 높이를 넘어 브라우저가 클램프하면 최상단 행이 실제로
+// 바뀌므로 그 새 위치가 정상적으로 기록된다 (markdown-view 의 라이브 리로드와
+// 같은 판단).
 //
 // 구문 하이라이팅(v0.3.6)은 위 두 계약 **위에 덧입히는** 층이라 셋째 계약이 아니다:
 // 파일 열기는 언제나 플레인 렌더로 즉시 끝나고, highlight.js 는 **dynamic import
@@ -55,7 +62,13 @@ import type { TimerHost } from "./ack-batcher";
 import { fsReadChunk, fsStat } from "./backend";
 import type { UiSettings } from "./backend";
 import type { KeySpec } from "./keys";
-import { DEFAULT_VIEWER_FONT_SIZE, viewerFontSize } from "./viewer-font";
+import {
+  DEFAULT_VIEWER_FONT_SIZE,
+  registerViewerFontTarget,
+  unregisterViewerFontTarget,
+  viewerFontSize,
+} from "./viewer-font";
+import type { ViewerFontTarget } from "./viewer-font";
 import type { ViewerKind, ViewerView } from "./viewer-view";
 import type { Command, CommandOutput, TabId } from "./types";
 
@@ -212,6 +225,31 @@ export function visibleSlice(
   const first = Math.max(0, firstVisible - overscan);
   const last = Math.min(totalLines, firstVisible + visibleCount + overscan);
   return { first, last, top: first * lineHeight };
+}
+
+/** 최상단 가시 행의 인덱스 (순수) — 스크롤 위치를 행 격자로 되읽는 유일한 규칙
+ *  이다. 모델의 scrollTop 시맨틱(최상단 가시 행의 byte offset)과 줌의 스크롤
+ *  유지가 둘 다 이 값 위에 선다. 창이 비었거나 격자가 무의미하면 0 이다. */
+export function topLineIndex(scrollTop: number, lineHeight: number, totalLines: number): number {
+  if (totalLines <= 0 || lineHeight <= 0) return 0;
+  return Math.min(totalLines - 1, Math.max(0, Math.floor(Math.max(0, scrollTop) / lineHeight)));
+}
+
+/** 행높이가 바뀔 때의 새 scrollTop (순수) — **최상단 가시 행을 유지**한다.
+ *
+ *  줌은 창을 다시 읽지 않으므로 행 배열도 lineStarts 도 그대로이고, 바뀌는 것은
+ *  격자 간격뿐이다. 그래서 보존해야 할 것은 픽셀이 아니라 **행 인덱스**다:
+ *  px 비율(scrollTop × new/old)로 옮기면 반올림 오차가 격자에서 벗어나 최상단
+ *  행이 반쯤 잘린 채 멈춘다(pageScrollTop 과 같은 이유). 행 인덱스를 붙들면
+ *  그 행의 byte offset 도 그대로라 모델에 되돌려 보낼 위치 변화가 없다. */
+export function scrollTopForLineHeight(
+  scrollTop: number,
+  fromLineHeight: number,
+  toLineHeight: number,
+  totalLines: number,
+): number {
+  if (toLineHeight <= 0) return Math.max(0, scrollTop);
+  return topLineIndex(scrollTop, fromLineHeight, totalLines) * toLineHeight;
 }
 
 /** 전역 byte offset → 그 offset 을 담는 행 인덱스 (순수, 이분 탐색).
@@ -661,7 +699,7 @@ export interface TextViewOptions {
   settleMs?: number;
 }
 
-export class TextView implements ViewerView {
+export class TextView implements ViewerView, ViewerFontTarget {
   readonly root: HTMLDivElement;
   private readonly bannerEl: HTMLDivElement;
   private readonly barEl: HTMLDivElement;
@@ -672,10 +710,13 @@ export class TextView implements ViewerView {
   private readonly linesEl: HTMLDivElement;
   private readonly resizeObserver: ResizeObserver;
   private readonly settle: ScrollSettle;
-  /** 이 뷰의 행높이(px) — 설정 글자 크기에서 파생한다. 설정 적용은 부팅 1회이고
-   *  터미널 줌은 뷰어에 오지 않으므로(viewer-font.ts 모듈 주석) 뷰 수명 동안
-   *  고정이다. spacer 높이·슬라이스 위치·scrollTop 이 전부 이 값의 배수다. */
-  private readonly lineHeight = lineHeightForFontSize(viewerFontSize());
+  /** 이 뷰의 행높이(px) — 지금 뷰어 글자 크기에서 파생한다. spacer 높이·슬라이스
+   *  위치·scrollTop 이 전부 이 값의 배수다.
+   *
+   *  **고정이 아니다** — 줌(Ctrl+= / Ctrl+-)이 걸리면 setViewerFontSize 가 여기를
+   *  갈고 격자를 다시 앉힌다. 반대로 생성 시점의 초기값이 모듈 상태에서 오므로
+   *  줌 뒤에 열리는 뷰도 현재 크기로 열린다. */
+  private lineHeight = lineHeightForFontSize(viewerFontSize());
 
   private path: string;
   private size = 0;
@@ -781,8 +822,55 @@ export class TextView implements ViewerView {
     // 전용이다. 크기가 바뀌면 viewport 에 들어오는 행 수가 달라진다.
     this.resizeObserver = new ResizeObserver(() => this.renderSlice());
     this.resizeObserver.observe(this.root);
+    // 줌 대상 등록 — 해제는 dispose 가 짝으로 맡는다 (터미널 줌의 liveViews 와
+    // 같은 관례).
+    registerViewerFontTarget(this);
 
     this.load(this.pendingOffset ?? 0, true);
+  }
+
+  /** 뷰어 글자 크기 라이브 재적용 (줌 경로 전용 — viewer-font 의
+   *  adjustViewerFontSize/resetViewerFontSize 가 부른다).
+   *
+   *  글리프 크기는 CSS 변수가 이미 바꿔 놨다. 여기서 할 일은 **TS 가 계산하는 행
+   *  격자**를 그 크기에 다시 맞추는 것이다 — 행높이(뷰가 CSS 로 내려주는
+   *  `--text-line-height` 포함) · spacer 전체 높이 · scrollTop · 슬라이스.
+   *
+   *  스크롤은 **최상단 가시 행을 유지**한다 (scrollTopForLineHeight). 창을 다시
+   *  읽지 않으므로 그 행의 byte offset 도 그대로이고, 따라서 **보통은** 모델에
+   *  새로 보낼 위치가 없다 — scrollTop 대입이 발화시키는 scroll 이벤트는 기존
+   *  경로를 타서 같은 offset 을 보고, ScrollSettle 이 "이미 합의된 위치"로
+   *  걸러낸다. 그래서 markSynced 로 따로 잠재우지 않는다 (창 이동과 달리 위치가
+   *  안 바뀐다). 예외는 문서 말미의 줌아웃이다: 목표가 줄어든 문서 높이를 넘어
+   *  브라우저가 클램프하면 최상단 행이 정말 바뀌므로 그 위치가 나가는 것이 맞다.
+   *
+   *  순서가 계약이다: spacer 높이를 **먼저** 키워야 스크롤 가능 범위가 새 격자
+   *  기준이 되고, 그 뒤의 scrollTop 대입이 브라우저 클램프에 먹히지 않는다. */
+  setViewerFontSize(size: number): void {
+    if (this.disposed) return;
+    const next = lineHeightForFontSize(size);
+    // 크기가 달라도 행높이가 같으면 화면이 달라질 것이 없다. 실제로는 걸리지
+    // 않는다 — 파생 비율이 4/3 > 1 이라 인접한 두 크기의 행높이는 반드시 다르다.
+    if (next === this.lineHeight) return;
+    const scrollTop = scrollTopForLineHeight(
+      this.scrollEl.scrollTop,
+      this.lineHeight,
+      next,
+      this.win.lines.length,
+    );
+    this.lineHeight = next;
+    this.root.style.setProperty("--text-line-height", `${next}px`);
+    this.spacerEl.style.height = `${this.win.lines.length * next}px`;
+    // 구간이 그대로여도 격자가 바뀌었으므로 renderSlice 의 no-op 을 푼다
+    // (블록 top offset 이 행높이 배수라 다시 앉혀야 한다).
+    this.slice = null;
+    // 로드가 진행 중이면(마운트·경로 변경) scrollTop 은 건드리지 않는다: 지금
+    // 화면에 있는 것은 **이전 창**이고, 여기서 옮기면 그 scroll 이벤트가 이전
+    // 파일의 byte offset 을 새 경로의 위치로 기록할 수 있다 (settle 은 아직
+    // markSynced(null) 상태라 걸러 주지 못한다). 어차피 곧 showWindow 가 복원
+    // 위치를 새 격자로 앉힌다.
+    if (this.pendingOffset === null) this.scrollEl.scrollTop = scrollTop;
+    this.renderSlice();
   }
 
   /** 스냅샷 반영. 같은 파일이면 **아무것도 하지 않는다** — 스크롤 dispatch 가
@@ -816,6 +904,7 @@ export class TextView implements ViewerView {
   dispose(): void {
     this.disposed = true;
     this.settle.dispose();
+    unregisterViewerFontTarget(this);
     this.resizeObserver.disconnect();
     this.scrollEl.removeEventListener("scroll", this.onScroll);
     this.root.removeEventListener("keydown", this.onKeyDown);
@@ -867,11 +956,7 @@ export class TextView implements ViewerView {
   private topLineOffset(): number | null {
     const starts = this.win.lineStarts;
     if (starts.length === 0) return null;
-    const index = Math.min(
-      starts.length - 1,
-      Math.max(0, Math.floor(this.scrollEl.scrollTop / this.lineHeight)),
-    );
-    return starts[index];
+    return starts[topLineIndex(this.scrollEl.scrollTop, this.lineHeight, starts.length)];
   }
 
   /** 버튼·단축키 공통 경로. 창이 실제로 움직이지 않는 액션(첫 창에서 prev 등)은

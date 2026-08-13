@@ -75,8 +75,10 @@ file reports itself in the status line instead of being silently ignored.
 
 `fontFamily`/`fontSize` set the font for the terminal **and** for the viewers' monospace
 content — the text viewer's lines, the folder listing, and markdown code spans and blocks.
-The rest of the UI (sidebar, tab bars, status line) and markdown prose keep their own font, and
-`Ctrl+=`/`Ctrl+-` zoom stays terminal-only, so the viewers always render at the size set here.
+Markdown prose keeps its own face but follows the *size*, so a larger `fontSize` scales the
+whole document. The rest of the UI (sidebar, tab bars, status line) is never affected.
+`Ctrl+=`/`Ctrl+-`/`Ctrl+0` zoom moves the terminal and all three viewer surfaces together. Zoom
+is session-only: a relaunch comes back at the size set here, and `Ctrl+0` returns to it.
 
 `highlightLanguages` picks which languages the text viewer syntax-highlights; the list above is
 also what you get when the key is absent, and those eight names are the entire supported set —

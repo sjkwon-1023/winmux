@@ -30,12 +30,19 @@
 // 스크롤 왕복은 textViewer 의 인프라(ScrollSettle·shouldAdoptScroll)를 그대로
 // 재사용한다. 단위만 다르다: textViewer 는 전역 byte offset, markdownViewer 는
 // 렌더 컨테이너의 **px** 다 (모델 TabKind rustdoc 이 정본).
+//
+// 그 px 좌표가 **줌**(v0.3.8)과 정면으로 부딪힌다: 글자 크기가 바뀌면 산문이
+// 리플로우돼 문서 전체 높이가 달라지므로 같은 px 가 다른 자리를 가리킨다. 그래서
+// 이 뷰는 viewer-font 의 레지스트리에 등록해 크기가 바뀔 때 상대 위치 앵커로
+// 화면을 되돌린다 (beforeViewerFontSize / setViewerFontSize).
 
 import { Marked } from "marked";
 
 import type { TimerHost } from "./ack-batcher";
 import { fsReadChunk, fsStat } from "./backend";
 import { ScrollSettle, SCROLL_SETTLE_MS, shouldAdoptScroll } from "./text-view";
+import { registerViewerFontTarget, unregisterViewerFontTarget } from "./viewer-font";
+import type { ViewerFontTarget } from "./viewer-font";
 import { isWindowHidden, onWindowHiddenChange } from "./window-visibility";
 import type { ViewerKind, ViewerView } from "./viewer-view";
 import type { Command, CommandOutput, PaneId, TabId } from "./types";
@@ -217,7 +224,34 @@ export interface MarkdownViewOptions {
   pollMs?: number;
 }
 
-export class MarkdownView implements ViewerView {
+/** 지금 보고 있는 자리 → 문서 안 **상대 위치**(0~1) (순수).
+ *
+ *  줌 앞뒤를 잇는 유일한 좌표다 — px 는 리플로우로 무의미해지고, 이 뷰에는
+ *  textViewer 의 행 인덱스 같은 안정 좌표가 없다. 스크롤 여지가 없으면(문서가
+ *  뷰포트보다 짧다) 0 이다: 그때는 어차피 되돌릴 것이 없다. */
+export function scrollAnchorRatio(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+): number {
+  const max = scrollHeight - clientHeight;
+  if (max <= 0) return 0;
+  return Math.min(1, Math.max(0, scrollTop / max));
+}
+
+/** 상대 위치 → 리플로우 뒤의 scrollTop (순수, scrollAnchorRatio 의 역). 정수 px
+ *  로 떨어뜨린다 — 소수 scrollTop 은 브라우저가 어차피 반올림해 되읽으므로
+ *  기록·비교(ScrollSettle.markSynced)에서 어긋나지 않게 여기서 맞춘다. */
+export function scrollTopForAnchor(
+  ratio: number,
+  scrollHeight: number,
+  clientHeight: number,
+): number {
+  const max = Math.max(0, scrollHeight - clientHeight);
+  return Math.round(Math.min(1, Math.max(0, ratio)) * max);
+}
+
+export class MarkdownView implements ViewerView, ViewerFontTarget {
   readonly root: HTMLDivElement;
   private readonly bannerEl: HTMLDivElement;
   private readonly scrollEl: HTMLDivElement;
@@ -235,6 +269,9 @@ export class MarkdownView implements ViewerView {
   private adopted: { path: string } | null = null;
   /** 렌더가 끝나면 적용할 px (마운트·경로 변경 시 1회). */
   private pendingScroll: number | null = null;
+  /** 줌 직전에 붙든 화면 위치 — 스크롤 가능 범위 안의 **상대 위치**(0~1)다.
+   *  setViewerFontSize 가 리플로우 뒤에 이 비율로 되돌리고 비운다. */
+  private zoomAnchor: number | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -302,8 +339,53 @@ export class MarkdownView implements ViewerView {
     // 해제를 정한다. 창 구독 해제 함수는 dispose 까지 들고 있는다 (누수 금지).
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     this.unsubscribeWindow = onWindowHiddenChange(this.onWindowHidden);
+    // 줌 대상 등록 — 해제는 dispose 가 짝으로 맡는다.
+    registerViewerFontTarget(this);
 
     this.load(false);
+  }
+
+  /** 줌 직전 — 지금 보고 있는 자리를 문서 안 **상대 위치**로 붙든다 (파일 상단
+   *  주석의 px 좌표 문제). CSS 변수가 아직 옛 크기인 이 순간이 리플로우 전
+   *  scrollHeight 를 읽을 수 있는 유일한 지점이다.
+   *
+   *  비율 앵커를 쓰는 이유: 줌은 문서를 통째로 균일하게 확대하므로 상대 위치가
+   *  거의 그대로 보존된다. 뷰포트 최상단 요소를 찾아 그 offsetTop 을 맞추는 쪽이
+   *  더 정확하지만, 이 뷰는 편집기가 아니라 읽기 표면이고 그 정확도 차이는 몇 줄
+   *  수준이라 DOM 순회를 들이지 않는다.
+   *
+   *  붙들기 전에 flush 하는 이유는 창 이동 전 flush 와 같다 — 리플로우로 좌표가
+   *  달라지기 전에 **줌 전 위치**를 모델에 확정해 둔다. 그 값이 재시작 때(설정
+   *  크기로 그린 문서에서) 올바른 자리다. */
+  beforeViewerFontSize(): void {
+    if (this.disposed) return;
+    this.settle.flush();
+    this.zoomAnchor = scrollAnchorRatio(
+      this.scrollEl.scrollTop,
+      this.scrollEl.scrollHeight,
+      this.scrollEl.clientHeight,
+    );
+  }
+
+  /** 줌 적용 — 리플로우가 끝난 새 높이에 앵커를 되앉힌다. 크기 인자는 쓰지 않는다
+   *  (글리프는 CSS 가 이미 그렸고, 이 뷰가 계산하는 격자는 없다).
+   *
+   *  **새 px 를 모델에 되쓰지 않는다**: 줌은 세션 한정이라 재시작하면 설정 크기로
+   *  돌아가는데, 그때의 문서에 줌 크기 좌표를 얹으면 엉뚱한 자리가 열린다. 모델은
+   *  beforeViewerFontSize 가 확정해 둔 줌 전 px 를 그대로 들고 있어야 하므로,
+   *  scrollTop 대입이 발화시킬 scroll 이벤트를 markSynced 로 삼킨다. */
+  setViewerFontSize(): void {
+    if (this.disposed) return;
+    const ratio = this.zoomAnchor;
+    this.zoomAnchor = null;
+    if (ratio === null) return;
+    const top = scrollTopForAnchor(
+      ratio,
+      this.scrollEl.scrollHeight,
+      this.scrollEl.clientHeight,
+    );
+    this.settle.markSynced(top);
+    this.scrollEl.scrollTop = top;
   }
 
   /** 스냅샷 반영. 같은 파일이면 **아무것도 하지 않는다** — 스크롤 dispatch 가
@@ -339,6 +421,7 @@ export class MarkdownView implements ViewerView {
     this.poller.dispose();
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.unsubscribeWindow();
+    unregisterViewerFontTarget(this);
     this.settle.dispose();
     this.scrollEl.removeEventListener("scroll", this.onScroll);
     this.bodyEl.removeEventListener("click", this.onBodyClick);

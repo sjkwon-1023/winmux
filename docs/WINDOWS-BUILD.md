@@ -1394,9 +1394,12 @@ Every `settings.json` edit needs the app closed and relaunched (there is no sett
      in half, and that `PageUp`/`PageDown` still stop on a line boundary. Close the tab and
      reopen the same file — it must come back at the same place. On a `.py` or `.rs` file the
      syntax colours must land on the same rows as the text (a grid mismatch shows up here first).
-   - **Markdown prose is deliberately unchanged** — in the markdown viewer the body text
-     (paragraphs, headings, lists) keeps its previous look at any `fontSize`; only `code` takes
-     the setting. The keys name the *code* font, not the document font.
+   - **Markdown prose is deliberately unchanged** *(partly superseded in v0.3.8: the prose now
+     follows the **size** so that zoom moves the whole document — its face is still untouched.
+     On a current build expect the body text to scale with `fontSize` and with zoom; run §10
+     v0.3.8 item 1 instead.)* — in the markdown viewer the body text (paragraphs, headings,
+     lists) keeps its previous look at any `fontSize`; only `code` takes the setting. The keys
+     name the *code* font, not the document font.
    - **The chrome is not in scope** — the workspace sidebar, the pane tab bar, the tab/window
      buttons, the viewer banners and the top status line must look exactly as before at any
      `fontSize`. If the sidebar grew, the scope leaked.
@@ -1405,12 +1408,14 @@ Every `settings.json` edit needs the app closed and relaunched (there is no sett
      `monospace` at 12px, the folder size column one notch smaller than the name, and the text
      viewer on its original row grid. The CSS fallbacks exist for precisely this case, so a
      viewer that looks even slightly different from a pre-v0.3.7 build is a failure.
-   - **Terminal zoom still does not touch the viewers** — with a size set (say 20) and a text
-     viewer open beside a terminal, press `Ctrl+=`/`Ctrl+-` several times in the terminal, then
-     `Ctrl+0`. The terminal font changes each time; the text viewer, the folder listing and
-     markdown code must not move a pixel and their row grid must not shift. Zoom stays a
-     terminal-only, session-only control (backlog 2026-08-12) — the viewers are pinned to the
-     file's value.
+   - **Terminal zoom still does not touch the viewers** *(Historical — v0.3.8 extended zoom to
+     the viewers on user request, so on any current build this item is expected to fail: the
+     viewers move with the terminal. Zoom is still session-only. Run §10 v0.3.8 items 1-5
+     instead.)* — with a size set (say 20) and a text viewer open beside a terminal, press
+     `Ctrl+=`/`Ctrl+-` several times in the terminal, then `Ctrl+0`. The terminal font changes
+     each time; the text viewer, the folder listing and markdown code must not move a pixel and
+     their row grid must not shift. Zoom stays a terminal-only, session-only control (backlog
+     2026-08-12) — the viewers are pinned to the file's value.
    - **The loud-fail rules are unchanged** — `{"fontSize": 200}` still reports the 6-72 range in
      the status line and boots with default fonts *everywhere*, viewers included; a blank
      `fontFamily` still reports itself. The viewers consume the same validated values the
@@ -1495,6 +1500,84 @@ Every `settings.json` edit needs the app closed and relaunched (there is no sett
      cost: after a dev run, the Start-menu entry points at `target\debug\winmux-app.exe`, and
      wiping `target/` leaves it dangling until the next launch of whichever exe you keep. Deleting
      the shortcut by hand is safe — the next launch recreates it.
+
+### v0.3.8 — verification
+
+Zoom (`Ctrl+=` / `Ctrl+-` / `Ctrl+0`) now moves the **viewers** as well as the terminal, on one
+key and one step. Until v0.3.7 it was terminal-only because re-sizing a live text viewer means
+re-laying its row grid, not just its glyphs — so that grid is what most of this section is
+about. Zoom stays session-only: nothing is written back to `settings.json`.
+
+1. **All three viewer surfaces zoom** — open one workspace with a folder tab, a `.txt`/`.log`
+   text viewer and a `.md` markdown viewer (split panes so you can see two at once, and keep a
+   terminal visible in a third). Press `Ctrl+=` five times, then `Ctrl+-` five times. The folder
+   rows, the text viewer's lines, the markdown body **and** its `code` spans must grow and shrink
+   on every press. The markdown body must keep the document face — only its *size* follows zoom,
+   never the code font.
+
+2. **The text viewer keeps its place and its grid** — this is the item that can actually break.
+   Open a file long enough to scroll (a few thousand lines), scroll to somewhere in the middle,
+   and note the top visible line's text. Now zoom in three steps and out three steps.
+
+   - The line that was at the top stays at the top at every step (not pixel-identical, but the
+     *same line*, sitting flush against the top edge — never cut in half).
+   - No line is clipped, overlapping or oddly spaced at any step: every glyph sits inside its own
+     row exactly as at the default size.
+   - The scrollbar thumb resizes as the content height changes; the view never jumps to the top
+     or the bottom.
+   - `PageUp`/`PageDown` still stop on a line boundary *after* zooming, and `Ctrl+PageUp`/
+     `Ctrl+PageDown`/`Ctrl+Home`/`Ctrl+End` still move windows normally.
+   - On a `.py` or `.rs` file the syntax colours stay on the same rows as the text at every zoom
+     step (a grid mismatch shows up here first).
+   - Switch to another tab and back, then close the tab and reopen the same file: it must come
+     back at the same place *and* at the current zoom size, not the `settings.json` size.
+   - **At the end of the file**, press `End` and then zoom *out* three steps: the view must stay
+     pinned to the bottom. Here the top line is allowed to move (the document got shorter than
+     the viewport could hold at that offset, so the browser clamps) and the topmost row may be
+     cut — that is the one place the row grid does not hold, and it is accepted. Zooming back in
+     will *not* return you to the line you started on; that is expected too.
+
+   These two run in a real browser only: the unit tests cannot reach scroll clamping or the
+   scroll events an assignment fires, so this item is the whole net for both.
+
+3. **The markdown viewer keeps your place** — open a `.md` long enough to scroll (this repo's
+   `WINDOWS-BUILD.md` will do), scroll to a paragraph in the middle and note it. Zoom in five
+   steps, then out five steps. That paragraph must stay on screen at every step — the prose
+   reflows, so it will drift by a line or two, but it must not scroll away. Then scroll to the
+   very bottom and zoom out: the view stays at the bottom. Finally close the tab, reopen the
+   file and press `Ctrl+0`: it must come back where you left it, at the `settings.json` size —
+   zoom must not have written a zoomed position into the saved one.
+
+4. **Zoom is responsive on a big file** — open the largest log you have (tens of MB is fine; the
+   viewer only holds one 512 KiB window) and hold `Ctrl+=` down so the key repeats. The window
+   must keep up without visible stalling or flicker and must not walk off its scroll position.
+   Then hold `Ctrl+-` back down to the minimum. At the 6px floor and the 72px ceiling further
+   presses must do *nothing* — no flicker, no scroll jump.
+
+5. **Terminal and viewers move together** — with a terminal and a text viewer side by side, press
+   `Ctrl+=` a few times: both grow on the same presses. They are not the same number (the terminal
+   starts at 13px, the viewers at 12px when nothing is configured), so do not expect identical
+   glyph sizes — expect them to move on every press. Each surface stops at its own 6/72 boundary,
+   so at the extremes one can stop while the other still moves; that is expected. The terminal
+   must reflow (its `cols`/`rows` change, and a running TUI redraws to the new size).
+
+6. **`Ctrl+0` resets both to the file's values** — set
+   `%AppData%\app.winmux.desktop\settings.json` to `{"fontFamily": "Cascadia Code, monospace",
+   "fontSize": 20}` and relaunch. Zoom up and down a few steps in any pane, then press `Ctrl+0`:
+   the terminal *and* all three viewer surfaces must land back on 20px Cascadia Code. Now delete
+   the font keys (or the file), relaunch, zoom, and press `Ctrl+0` again: the viewers must return
+   to exactly the pre-v0.3.7 look — `monospace` 12px, markdown body 13px, folder size column one
+   notch smaller than the name.
+
+7. **Relaunch discards zoom** — zoom several steps up, then close the app and relaunch. Every
+   surface must come back at the `settings.json` size (or the defaults if unset). Nothing about
+   the zoom may survive, and `settings.json` must be byte-identical to what you wrote — open it
+   and confirm the app did not rewrite it.
+
+8. **The chrome still does not scale** — at any zoom level the workspace sidebar, the pane tab
+   bar, the tab/window buttons, the viewer banners, the text viewer's window-navigation bar and
+   the top status line must look exactly as they did at the default. This is a content zoom, not
+   a UI scale; if the sidebar grew, the scope leaked.
 
 ## 11. ARM64 cross-build notes
 
