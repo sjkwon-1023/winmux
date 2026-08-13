@@ -73,13 +73,17 @@ file reports itself in the status line instead of being silently ignored.
 }
 ```
 
-`fontFamily`/`fontSize` set the terminal font. `highlightLanguages` picks which languages the
-text viewer syntax-highlights; the list above is also what you get when the key is absent, and
-those eight names are the entire supported set — an unknown name is reported rather than
-ignored. The language comes from the file extension (`.jsx` highlights as `javascript`, `.tsx`
-as `typescript`), and anything outside the set stays plain text. `[]` turns highlighting off.
-The highlighter is loaded on demand, so a session that never opens a matching file never pays
-for it.
+`fontFamily`/`fontSize` set the font for the terminal **and** for the viewers' monospace
+content — the text viewer's lines, the folder listing, and markdown code spans and blocks.
+The rest of the UI (sidebar, tab bars, status line) and markdown prose keep their own font, and
+`Ctrl+=`/`Ctrl+-` zoom stays terminal-only, so the viewers always render at the size set here.
+
+`highlightLanguages` picks which languages the text viewer syntax-highlights; the list above is
+also what you get when the key is absent, and those eight names are the entire supported set —
+an unknown name is reported rather than ignored. The language comes from the file extension
+(`.jsx` highlights as `javascript`, `.tsx` as `typescript`), and anything outside the set stays
+plain text. `[]` turns highlighting off. The highlighter is loaded on demand, so a session that
+never opens a matching file never pays for it.
 
 ## Setup
 

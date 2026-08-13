@@ -13,6 +13,17 @@
   --send: #c586c0; /* send-mode 대상 하이라이트 (17단계) — accent·error 와 구분 */
 }
 
+/* 뷰어 글꼴 — `--viewer-font-family` / `--viewer-font-size` 는 여기에 **선언하지
+   않는다**. settings.json 에 fontFamily/fontSize 가 있을 때만 부팅 1회 경로가
+   :root 에 심고(viewer-font.ts), 없으면 아래 var() 의 fallback 이 그대로 쓰인다 —
+   그 fallback 이 화면 기본값의 정본이라 기본값이 두 곳에 갈리지 않는다.
+   읽는 곳은 모노스페이스 **콘텐츠** 표면뿐이다: `.text-lines`/`.text-line`(텍스트
+   뷰어 행), `.folder-row`(폴더 목록), `.markdown-body code`(마크다운 code). UI
+   크롬(사이드바·탭바·상태줄·배너)과 마크다운 산문은 대상이 아니고, 터미널은 CSS
+   가 아니라 xterm 옵션으로 같은 설정을 받는다. `--viewer-font-size` 의 fallback
+   12px 는 viewer-font.ts 의 DEFAULT_VIEWER_FONT_SIZE 와 짝이다 (텍스트 뷰어의 행
+   격자가 이 크기에서 행높이를 계산한다 — 갈라지면 행이 잘린다). */
+
 * {
   box-sizing: border-box;
 }
@@ -475,7 +486,8 @@ body {
   color: var(--fg);
   border: none;
   font: inherit;
-  font-size: 12px;
+  font-family: var(--viewer-font-family, monospace);
+  font-size: var(--viewer-font-size, 12px);
   text-align: left;
   cursor: pointer;
 }
@@ -519,17 +531,21 @@ body {
   white-space: nowrap;
 }
 
+/* 크기 열은 이름보다 한 눈금 작다. 뺄셈으로 쓰는 이유는 설정으로 글자를 키웠을
+   때도 그 관계가 유지돼야 하기 때문이다 — 11px 로 못박으면 이름만 커지고 크기
+   열은 그대로 남아 행이 깨져 보인다. 기본값에서는 12-1 = 11px 로 종전과 같다. */
 .folder-row-size {
   flex: 0 0 auto;
   color: var(--fg-muted);
-  font-size: 11px;
+  font-size: calc(var(--viewer-font-size, 12px) - 1px);
 }
 
 /* ── 뷰어 탭 — textViewer (21단계) ────────────────────────────────────
    folderBrowser 와 같은 세로 스택(배너 + 본문)에 창 이동 바가 하나 더 붙는다.
-   본문은 **고정 행높이 + no-wrap 실스크롤**이다: 행높이의 정본은 TS 상수
-   (text-view.ts LINE_HEIGHT_PX)이고 뷰가 --text-line-height 로 내려준다 —
-   여기서 다른 값을 쓰면 spacer 높이·슬라이스 위치가 어긋나 행이 밀린다. */
+   본문은 **고정 행높이 + no-wrap 실스크롤**이다: 행높이의 정본은 TS 쪽
+   (text-view.ts lineHeightForFontSize — 글자 크기에서 파생)이고 뷰가
+   --text-line-height 로 내려준다 — 여기서 다른 값을 쓰면 spacer 높이·슬라이스
+   위치가 어긋나 행이 밀린다. */
 
 .text-view {
   height: 100%;
@@ -618,13 +634,13 @@ body {
   /* 가장 긴 행만큼 넓어져 가로 스크롤이 성립한다 */
   width: max-content;
   min-width: 100%;
-  font-family: monospace;
+  font-family: var(--viewer-font-family, monospace);
 }
 
 .text-line {
   height: var(--text-line-height);
   line-height: var(--text-line-height);
-  font-size: 12px;
+  font-size: var(--viewer-font-size, 12px);
   white-space: pre;
   tab-size: 8;
 }
@@ -704,9 +720,11 @@ body {
   margin: 0.6em 0;
 }
 
+/* code 만 설정 글꼴을 따른다 — 본문 산문(.markdown-body)은 사용자가 고른 "코드
+   글꼴"의 대상이 아니라 종전 그대로다 */
 .markdown-body code {
-  font-family: monospace;
-  font-size: 12px;
+  font-family: var(--viewer-font-family, monospace);
+  font-size: var(--viewer-font-size, 12px);
   background: var(--bg-panel);
   padding: 0 3px;
   border-radius: 2px;

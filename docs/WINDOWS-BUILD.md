@@ -1363,6 +1363,55 @@ The v0.3.6 batch. Items are independent — run them in any order on a build of 
      no activation handler wired, so nothing happening on click is acceptable for now. If it
      *does* focus the window, note that too.
 
+### v0.3.7 — verification
+
+The v0.3.7 batch. Items are independent — run them in any order on a build of this batch.
+Every `settings.json` edit needs the app closed and relaunched (there is no settings UI).
+
+1. **`settings.json` fonts reach the viewers, not just the terminal** — `fontFamily`/`fontSize`
+   used to be consumed by xterm alone, so a user who picked a bigger font saw the terminal grow
+   while the text viewer, the folder listing and markdown code stayed on their hard-coded
+   `monospace` 12px (field report). The boot path now also plants the pair as `:root` custom
+   properties those surfaces read; the scope argument and the deliberate exclusions live in the
+   [`apps/winmux/src/viewer-font.ts`](../apps/winmux/src/viewer-font.ts) module doc.
+
+   - **All three viewer surfaces follow the setting** — write
+     `%AppData%\app.winmux.desktop\settings.json` as
+     `{"fontFamily": "Cascadia Code, monospace", "fontSize": 20}` and relaunch. In one
+     workspace open a folder tab (the listing), open a `.txt` or `.log` from it (the text
+     viewer), and open a `.md` (the markdown viewer). The folder rows, the text viewer's lines
+     and the markdown **code** spans and fenced blocks must all be Cascadia Code at 20px — the
+     same face and size as the terminal in a neighbouring pane.
+   - **The text viewer's row grid follows the size** — this is the item that can actually
+     break, because the virtual scroller computes the grid in TypeScript while the glyphs are
+     sized by CSS. In that 20px text viewer: lines must not be clipped or overlapping, each
+     sitting in its own row with the same relative spacing as at the default size. Scroll into
+     the middle of a long file and confirm the topmost visible line is a whole line, not one cut
+     in half, and that `PageUp`/`PageDown` still stop on a line boundary. Close the tab and
+     reopen the same file — it must come back at the same place. On a `.py` or `.rs` file the
+     syntax colours must land on the same rows as the text (a grid mismatch shows up here first).
+   - **Markdown prose is deliberately unchanged** — in the markdown viewer the body text
+     (paragraphs, headings, lists) keeps its previous look at any `fontSize`; only `code` takes
+     the setting. The keys name the *code* font, not the document font.
+   - **The chrome is not in scope** — the workspace sidebar, the pane tab bar, the tab/window
+     buttons, the viewer banners and the top status line must look exactly as before at any
+     `fontSize`. If the sidebar grew, the scope leaked.
+   - **Unset must be indistinguishable from the old build** — quit, delete `settings.json` (or
+     remove both font keys) and relaunch. The viewers must be back to the old rendering exactly:
+     `monospace` at 12px, the folder size column one notch smaller than the name, and the text
+     viewer on its original row grid. The CSS fallbacks exist for precisely this case, so a
+     viewer that looks even slightly different from a pre-v0.3.7 build is a failure.
+   - **Terminal zoom still does not touch the viewers** — with a size set (say 20) and a text
+     viewer open beside a terminal, press `Ctrl+=`/`Ctrl+-` several times in the terminal, then
+     `Ctrl+0`. The terminal font changes each time; the text viewer, the folder listing and
+     markdown code must not move a pixel and their row grid must not shift. Zoom stays a
+     terminal-only, session-only control (backlog 2026-08-12) — the viewers are pinned to the
+     file's value.
+   - **The loud-fail rules are unchanged** — `{"fontSize": 200}` still reports the 6-72 range in
+     the status line and boots with default fonts *everywhere*, viewers included; a blank
+     `fontFamily` still reports itself. The viewers consume the same validated values the
+     terminal does, so there is no second validation path to disagree.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

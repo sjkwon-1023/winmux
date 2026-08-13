@@ -12,7 +12,7 @@
 // @vitest-environment — pane-view.test.ts 와 같은 관례). 백엔드 IPC 와
 // highlight.js 의 dynamic import 는 vi.mock 으로 고정해 결정적으로 돌린다.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_HIGHLIGHT_LANGUAGES,
@@ -25,6 +25,7 @@ import {
   formatByteRange,
   highlightLines,
   languageForPath,
+  lineHeightForFontSize,
   lineIndexForOffset,
   nextWindowStart,
   pageScrollTop,
@@ -36,6 +37,7 @@ import {
   windowStartForRestore,
 } from "./text-view";
 import type { HighlightApi } from "./text-view";
+import { DEFAULT_VIEWER_FONT_SIZE, applyViewerFontSettings } from "./viewer-font";
 import type { TimerHost } from "./ack-batcher";
 import type { KeySpec } from "./keys";
 import type { UiSettings } from "./backend";
@@ -895,5 +897,77 @@ describe("TextView 하이라이트 적용", () => {
     await settleAll();
     expect(view.root.querySelector(".text-line span")).toBeNull();
     expect(view.root.isConnected).toBe(false);
+  });
+});
+
+// 설정 글꼴이 커지면 **행 격자도 같이** 커져야 한다 — 격자(spacer 높이·슬라이스
+// 위치·scrollTop)는 CSS 가 아니라 TS 가 계산하므로, 글자만 키우면 큰 글자가 16px
+// 행 안에서 잘린다. 그 연결이 이 파일의 다른 계약(가상 스크롤)과 붙어 있어 뷰를
+// 실제로 띄워 확인한다.
+describe("TextView 행 격자와 설정 글꼴", () => {
+  function mount(text: string): TextView {
+    file.bytes = encoder.encode(text);
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    return new TextView(
+      parent,
+      1,
+      null,
+      { type: "textViewer", path: "/w/notes.txt", scrollTop: 0 },
+      () => Promise.resolve(null),
+    );
+  }
+
+  async function mounted(text: string, lines: number): Promise<TextView> {
+    const view = mount(text);
+    await vi.waitFor(() => {
+      expect(view.root.querySelectorAll(".text-line")).toHaveLength(lines);
+    });
+    return view;
+  }
+
+  function spacerHeight(view: TextView): string {
+    return view.root.querySelector<HTMLElement>(".text-spacer")?.style.height ?? "";
+  }
+
+  beforeEach(() => {
+    applyViewerFontSettings({ fontFamily: null, fontSize: null, highlightLanguages: null });
+    document.body.replaceChildren();
+  });
+
+  // 글꼴은 **모듈 수준** 상태라 이 describe 를 벗어나서도 남는다 — 뒤에 TextView
+  // 를 띄우는 describe 가 추가되면 여기서 키운 격자를 물려받아 영문 모를 실패를
+  // 본다. 나갈 때 되돌려 파일 안 실행 순서에 무관하게 만든다.
+  afterAll(() => {
+    applyViewerFontSettings({ fontFamily: null, fontSize: null, highlightLanguages: null });
+  });
+
+  it("기본 크기의 행높이는 종전 상수 그대로다", () => {
+    expect(lineHeightForFontSize(DEFAULT_VIEWER_FONT_SIZE)).toBe(LINE_HEIGHT_PX);
+  });
+
+  it("행높이는 글자 크기에 비례하고 정수 px 로 떨어진다", () => {
+    // 백엔드가 허용하는 범위(6~72)의 양 끝과 그 사이 — 비율 16/12 를 유지한다.
+    expect(lineHeightForFontSize(6)).toBe(8);
+    expect(lineHeightForFontSize(15)).toBe(20);
+    expect(lineHeightForFontSize(20)).toBe(27); // 26.67 → 반올림, 소수 금지
+    expect(lineHeightForFontSize(72)).toBe(96);
+  });
+
+  it("미설정이면 격자가 종전과 같다", async () => {
+    const view = await mounted("one\ntwo\n", 2);
+    expect(view.root.style.getPropertyValue("--text-line-height")).toBe(`${LINE_HEIGHT_PX}px`);
+    expect(spacerHeight(view)).toBe(`${2 * LINE_HEIGHT_PX}px`);
+    view.dispose();
+  });
+
+  it("설정 크기를 키우면 행높이·spacer 가 같이 커진다", async () => {
+    applyViewerFontSettings({ fontFamily: null, fontSize: 24, highlightLanguages: null });
+    const view = await mounted("one\ntwo\nthree\n", 3);
+    const lineHeight = lineHeightForFontSize(24);
+    expect(lineHeight).toBe(32);
+    expect(view.root.style.getPropertyValue("--text-line-height")).toBe(`${lineHeight}px`);
+    expect(spacerHeight(view)).toBe(`${3 * lineHeight}px`);
+    view.dispose();
   });
 });

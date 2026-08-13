@@ -19,8 +19,8 @@
 // 이 keydown 은 전역 가로채기(keys.ts 의 window capture)와 층이 다르고, 전역
 // 목록에 없는 조합만 소비하므로 Ctrl+Tab·Ctrl+1~9·Alt+방향키와 겹치지 않는다.
 // 수식키 없는 PageUp/PageDown 은 창을 옮기지 않고 **행높이 배수로 정렬된 페이지
-// 스크롤**이다 — 브라우저 기본 페이지 스텝(Blink 는 viewport-40px 류)은 16px
-// 행 격자와 어긋나 최상단 행이 반쯤 잘린 채 멈춘다. Home/End·방향키·휠은 손대지
+// 스크롤**이다 — 브라우저 기본 페이지 스텝(Blink 는 viewport-40px 류)은 행
+// 격자와 어긋나 최상단 행이 반쯤 잘린 채 멈춘다. Home/End·방향키·휠은 손대지
 // 않고 네이티브 스크롤 그대로 둔다.
 //
 // 재시작 복원은 저장된 offset T 를 창 **시작**이 아니라 창 **중앙 부근**에
@@ -36,6 +36,11 @@
 // 리사이즈는 **자체 ResizeObserver** 로 받는다 (계획 프론트 계약): pane 의
 // observer 는 터미널 fit 전용이라 뷰어까지 겸하게 만들지 않는다.
 //
+// 글꼴은 settings.json 값을 따른다 — 부팅 1회 경로가 :root 커스텀 프로퍼티로
+// 심고(viewer-font.ts) 행높이는 그 글자 크기에서 파생한다
+// (lineHeightForFontSize). 터미널 줌(Ctrl+= / Ctrl+-)은 뷰어에 오지 않으므로 뷰
+// 수명 동안 행 격자가 고정이라는 위 계약이 그대로 유지된다.
+//
 // 구문 하이라이팅(v0.3.6)은 위 두 계약 **위에 덧입히는** 층이라 셋째 계약이 아니다:
 // 파일 열기는 언제나 플레인 렌더로 즉시 끝나고, highlight.js 는 **dynamic import
 // 로만** 들어와(앱 시작 경로·비대상 파일 경로에는 바이트가 하나도 실리지 않는다)
@@ -50,6 +55,7 @@ import type { TimerHost } from "./ack-batcher";
 import { fsReadChunk, fsStat } from "./backend";
 import type { UiSettings } from "./backend";
 import type { KeySpec } from "./keys";
+import { DEFAULT_VIEWER_FONT_SIZE, viewerFontSize } from "./viewer-font";
 import type { ViewerKind, ViewerView } from "./viewer-view";
 import type { Command, CommandOutput, TabId } from "./types";
 
@@ -58,9 +64,22 @@ type DispatchFn = (cmd: Command) => Promise<CommandOutput | null>;
 
 /** 한 번에 읽어 상주시키는 바이트 수. 글루 상한(4MiB)보다 한참 아래다. */
 export const WINDOW_BYTES = 512 * 1024;
-/** 고정 행높이(px). 가상 스크롤의 spacer 높이·슬라이스 계산이 전부 이 값 기준
- *  이라 CSS 가 아니라 여기가 정본이다 (뷰가 `--text-line-height` 로 내려준다). */
+/** **기본 글자 크기**(viewer-font.ts DEFAULT_VIEWER_FONT_SIZE)에서의 고정
+ *  행높이(px). 가상 스크롤의 spacer 높이·슬라이스 계산이 전부 행높이 기준이라 CSS
+ *  가 아니라 여기가 정본이다 (뷰가 `--text-line-height` 로 내려준다).
+ *
+ *  settings.json 으로 글자를 키우면 행도 같이 커져야 하므로 실제로 쓰는 값은
+ *  lineHeightForFontSize 가 여기서 파생한다 — 이 상수를 그대로 쓰면 큰 글자가
+ *  16px 행 안에서 잘린다. */
 export const LINE_HEIGHT_PX = 16;
+
+/** 글자 크기(px) → 행높이(px) (순수). 기본 크기에서의 비율(16/12)을 유지하고
+ *  **정수 px** 로 떨어뜨린다: spacer 높이·슬라이스 top·복원 scrollTop 이 전부 이
+ *  값의 배수라, 소수를 허용하면 누적 오차로 최상단 행이 반쯤 잘린 채 멈춘다. */
+export function lineHeightForFontSize(size: number): number {
+  return Math.max(1, Math.round((size * LINE_HEIGHT_PX) / DEFAULT_VIEWER_FONT_SIZE));
+}
+
 /** viewport 위아래로 더 그리는 행 수 — 스크롤 중 빈 줄이 스치지 않게. */
 export const OVERSCAN_LINES = 20;
 /** 스크롤이 멎었다고 보는 시간 — 이 시간 뒤에 위치 1개만 dispatch 한다. */
@@ -653,6 +672,10 @@ export class TextView implements ViewerView {
   private readonly linesEl: HTMLDivElement;
   private readonly resizeObserver: ResizeObserver;
   private readonly settle: ScrollSettle;
+  /** 이 뷰의 행높이(px) — 설정 글자 크기에서 파생한다. 설정 적용은 부팅 1회이고
+   *  터미널 줌은 뷰어에 오지 않으므로(viewer-font.ts 모듈 주석) 뷰 수명 동안
+   *  고정이다. spacer 높이·슬라이스 위치·scrollTop 이 전부 이 값의 배수다. */
+  private readonly lineHeight = lineHeightForFontSize(viewerFontSize());
 
   private path: string;
   private size = 0;
@@ -699,9 +722,9 @@ export class TextView implements ViewerView {
 
     this.root = document.createElement("div");
     this.root.className = "text-view";
-    // 행높이의 정본은 TS 상수다 (LINE_HEIGHT_PX) — CSS 가 다른 값을 쓰면 spacer
-    // 높이와 슬라이스 위치가 어긋나므로 커스텀 속성으로 내려준다.
-    this.root.style.setProperty("--text-line-height", `${LINE_HEIGHT_PX}px`);
+    // 행높이의 정본은 TS 다 (lineHeightForFontSize) — CSS 가 다른 값을 쓰면
+    // spacer 높이와 슬라이스 위치가 어긋나므로 커스텀 속성으로 내려준다.
+    this.root.style.setProperty("--text-line-height", `${this.lineHeight}px`);
 
     this.bannerEl = document.createElement("div");
     this.bannerEl.className = "text-banner";
@@ -829,6 +852,7 @@ export class TextView implements ViewerView {
       this.scrollEl.clientHeight,
       max,
       delta,
+      this.lineHeight,
     );
   }
 
@@ -845,7 +869,7 @@ export class TextView implements ViewerView {
     if (starts.length === 0) return null;
     const index = Math.min(
       starts.length - 1,
-      Math.max(0, Math.floor(this.scrollEl.scrollTop / LINE_HEIGHT_PX)),
+      Math.max(0, Math.floor(this.scrollEl.scrollTop / this.lineHeight)),
     );
     return starts[index];
   }
@@ -942,7 +966,7 @@ export class TextView implements ViewerView {
   private showWindow(win: TextWindow, size: number): void {
     this.win = win;
     this.size = size;
-    this.spacerEl.style.height = `${win.lines.length * LINE_HEIGHT_PX}px`;
+    this.spacerEl.style.height = `${win.lines.length * this.lineHeight}px`;
     this.slice = null;
     // 행별 하이라이트는 창에 붙어 있다 — 새 창은 다시 계산되기 전까지 플레인이다.
     this.highlighted = null;
@@ -963,7 +987,7 @@ export class TextView implements ViewerView {
     // 대입이 발화시키는 scroll 이벤트를 markSynced 로 잠재운다. 반대로 창 이동은
     // 새 위치를 모델에 남겨야 재마운트가 그 창으로 돌아온다.
     this.settle.markSynced(restore === null ? null : top);
-    this.scrollEl.scrollTop = index * LINE_HEIGHT_PX;
+    this.scrollEl.scrollTop = index * this.lineHeight;
     this.renderSlice();
     if (restore === null && top !== null) this.settle.observe(top);
   }
@@ -982,6 +1006,7 @@ export class TextView implements ViewerView {
       this.scrollEl.scrollTop,
       this.scrollEl.clientHeight,
       this.win.lines.length,
+      this.lineHeight,
     );
     if (this.slice !== null && this.slice.first === range.first && this.slice.last === range.last) {
       return;

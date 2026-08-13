@@ -36,6 +36,7 @@ import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
 import { adjustFontSize, applyTerminalSettings, resetFontSize } from "./terminal-view";
 import { applyHighlightSettings } from "./text-view";
+import { applyViewerFontSettings } from "./viewer-font";
 import { initWindowVisibility } from "./window-visibility";
 import { WorkspaceView, activeWorkspace } from "./workspace-view";
 import type { AgentStatus, Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
@@ -180,16 +181,20 @@ class App {
       console.error("window visibility listen failed", err);
     });
     this.installNavKeys();
-    // UI 설정(터미널 폰트 + 뷰어 하이라이트 언어) — **store.init() 앞**이어야
+    // UI 설정(터미널·뷰어 폰트 + 뷰어 하이라이트 언어) — **store.init() 앞**이어야
     // 한다. 뷰는 첫 스냅샷 렌더부터 생기므로 그 전에 모듈 기본값을 갈아 끼워야
-    // 모든 탭이 같은 설정으로 열린다 (applyTerminalSettings·applyHighlightSettings
-    // 의 순서 계약). 읽기 실패(파싱 오류·범위 밖 값·모르는 언어 이름)는 사유를
-    // 상태 라인에 띄우고 **기본값으로 진행한다** — 설정 하나로 부트를 막지 않는다
-    // (활동 핑·창 가시성과 같은 규율). 파일이 없는 경우는 에러가 아니라 전부
-    // null 인 기본값으로 온다.
+    // 모든 탭이 같은 설정으로 열린다 (applyTerminalSettings·applyViewerFontSettings
+    // ·applyHighlightSettings 의 순서 계약). fontFamily/fontSize 를 소비하는 곳이
+    // 둘인 이유는 표면이 둘이기 때문이다: xterm 은 캔버스라 옵션으로, 뷰어는
+    // DOM 이라 CSS 커스텀 프로퍼티로 받는다 (viewer-font.ts 모듈 주석). 읽기
+    // 실패(파싱 오류·범위 밖 값·모르는 언어 이름)는 사유를 상태 라인에 띄우고
+    // **기본값으로 진행한다** — 설정 하나로 부트를 막지 않는다 (활동 핑·창
+    // 가시성과 같은 규율). 파일이 없는 경우는 에러가 아니라 전부 null 인
+    // 기본값으로 온다.
     try {
       const settings = await getUiSettings();
       applyTerminalSettings(settings);
+      applyViewerFontSettings(settings);
       applyHighlightSettings(settings);
     } catch (err) {
       console.error("get_ui_settings failed", err);
