@@ -177,6 +177,20 @@ export function applyTerminalSettings(settings: UiSettings): void {
   }
 }
 
+/** 클립보드에 이미지 항목이 있는지 묻는다 — Ctrl+V 를 PTY 로 넘길지의 판정
+ *  (pasteFromClipboard 주석 참조). 권한 거부·미지원으로 물어보지 못하면 false 다:
+ *  모르는 상태에서 키를 넘기면 셸이 quoted-insert 로 들어가므로, 모를 때는 넘기지
+ *  않는 쪽이 안전하다. */
+async function clipboardHasImage(): Promise<boolean> {
+  try {
+    const items = await navigator.clipboard.read();
+    return items.some((item) => item.types.some((type) => type.startsWith("image/")));
+  } catch (err) {
+    console.error("clipboard inspect failed", err);
+    return false;
+  }
+}
+
 export class TerminalView {
   readonly root: HTMLDivElement;
   private readonly term: Terminal;
@@ -538,14 +552,32 @@ export class TerminalView {
 
   /** 붙여넣기 경로: 클립보드를 읽어 xterm paste 로 주입한다. WebView2 가
    *  clipboard-read 권한을 거부하는 환경이면 여기 로그가 그 증거가 되고, 그 경우
-   *  Tauri clipboard-manager 플러그인 경로로 전환한다 (spike 검증 메모 승계). */
+   *  Tauri clipboard-manager 플러그인 경로로 전환한다 (spike 검증 메모 승계).
+   *
+   *  클립보드에 **이미지가** 있으면 Ctrl+V 자체(\x16)를 PTY 로 흘려보낸다. 이미지
+   *  붙여넣기는 터미널이 바이트를 날라 주는 일이 아니라 터미널 안의 앱이 OS 클립보드를
+   *  스스로 읽는 일이기 때문이다 (Claude Code 는 xclip → wl-paste → powershell.exe 의
+   *  Clipboard::GetImage 순으로 폴백하므로 WSL 에서도 Windows 클립보드를 읽는다). 즉
+   *  터미널이 할 일은 키를 전달하는 것뿐이고, 여기서 키를 삼키면 그 경로가 아예
+   *  시작되지 않는다.
+   *
+   *  "텍스트가 비었으면 보낸다" 가 아니라 이미지 유무를 확인하고 보내는 이유: 셸에서
+   *  \x16 은 quoted-insert(다음 키를 리터럴로 먹는다)라, 빈 클립보드로 Ctrl+V 를 누른
+   *  사람에게 그 상태를 물려주면 그냥 무반응이던 종전보다 나빠진다. 읽기가 실패한
+   *  경우도 같은 이유로 아무것도 보내지 않는다. */
   private async pasteFromClipboard(): Promise<void> {
+    let text: string;
     try {
-      const text = await navigator.clipboard.readText();
-      if (text.length > 0) this.term.paste(text);
+      text = await navigator.clipboard.readText();
     } catch (err) {
       console.error("clipboard read failed", err);
+      return;
     }
+    if (text.length > 0) {
+      this.term.paste(text);
+      return;
+    }
+    if (await clipboardHasImage()) this.enqueueWrite("\x16");
   }
 
   private fit(): void {

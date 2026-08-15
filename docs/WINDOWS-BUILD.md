@@ -1579,6 +1579,26 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
    the top status line must look exactly as they did at the default. This is a content zoom, not
    a UI scale; if the sidebar grew, the scope leaked.
 
+### v0.3.9 — verification
+
+1. **Image paste reaches the agent** — `Ctrl+V` is no longer swallowed when the clipboard holds
+   an image. The terminal never carries the image itself: the app inside it reads the OS
+   clipboard on its own (Claude Code falls back xclip → wl-paste → `powershell.exe`'s
+   `Clipboard::GetImage`, so it reaches the Windows clipboard from WSL), and all winmux has to
+   do is let the keypress through.
+
+   - Take a screenshot (`Win+Shift+S`), focus a Claude Code prompt in a winmux tab, press
+     `Ctrl+V`: the image must attach (`[Image #1]` or that version's equivalent). Repeat with
+     `Shift+Insert` — same path.
+   - **Text paste is unchanged**: copy a line of text, press `Ctrl+V` at a plain shell prompt.
+     The text arrives exactly once — twice would mean the native paste path fired as well — and
+     a multi-line copy still arrives bracketed where the app supports it.
+   - **An empty clipboard still does nothing**: with nothing copied, `Ctrl+V` at a bash prompt
+     must leave the line untouched. If bash swallows your *next* keystroke instead, `\x16` leaked
+     through as quoted-insert and the image check regressed.
+   - With an image on the clipboard at a plain bash prompt that quoted-insert *is* what happens —
+     bash has no use for the key. That is the accepted cost of forwarding it.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
