@@ -201,6 +201,16 @@ Accepted deferrals, one line each. None of these block the MVP.
   the snake-cased spellings accepted as a fallback; no version probe — a payload we cannot
   read notifies without a hint. Contract: `scripts/wsl/claude-hook-example.md`. Verification:
   WINDOWS-BUILD §10 v0.3.5.
+- **A tab's cwd never advances, so a restart reopens every shell at the workspace root** (user
+  report 2026-08-15). The restore path itself is fine: `respawn_tab` (`command.rs:803`) reads the
+  tab's stored `cwd` and spawns there, which is exactly the point of the feature. What is missing
+  is anything that ever *updates* that value. The contract already says `OSC 7 file://host/path`
+  carries "Tab cwd (respawn location on restart)", the scanner parses it and `notify.rs:71`
+  applies it — but **provisioning never wires a shell to emit it**: `provision.rs` installs the
+  OSC 777 channels only, and the OSC 0/7 prompt snippet in `scripts/wsl/claude-hook-example.md`
+  is manual-install advice. Field state confirms the consequence — every terminal tab in
+  `state.json` carries the same `cwd` as its workspace `rootPath` regardless of where the shell
+  actually went. The fix is a provisioning line (and a `SETUP_VERSION` bump), not a code change.
 - **Agent coverage beyond Claude Code and Codex — Antigravity CLI and opencode** (user
   request 2026-08-15, not started). Both would reuse the `winmux:running` /
   `winmux:needsInput` / `winmux:idle` tokens and `winmux-notify.sh` **unchanged**: nothing in
@@ -238,6 +248,44 @@ Accepted deferrals, one line each. None of these block the MVP.
     Answer that before writing any provisioning. Writing a plugin file is also a different
     discipline from the "never rewrite an existing key" rule the Claude/Codex halves follow:
     a plugin file we create is ours to upgrade, one that already exists is not.
+- **A shell that never starts leaves a tab that looks healthy** — hit in the field 2026-08-15,
+  not fixed. Symptom: an agent pane stopped responding after its workspace sat unfocused for
+  10–30 minutes; **new tabs opened but stayed empty** — no shell, and no error anywhere; then an
+  agent in a *different* workspace went the same way.
+
+  **The trigger is outside winmux.** WSL could not allocate the Hyper-V vsock ring buffer new
+  interop channels need: `dmesg` holds eleven `warn_alloc` failures with the stack
+  `vmbus_alloc_ring` → `hvs_probe`, and swap was down to 16kB at the time. Process forensics pin
+  it exactly. A healthy WSL terminal is `SessionLeader → Relay(<bash pid>) → bash`, but two
+  `/init` relays — started 16:36:34 and 17:21:51, each matching a `warn_alloc` burst — carry no
+  bash pid in their name, have **no children at all**, and were still retrying
+  `UtilAcceptVsock` every 60s hours later. Those two are the two tabs that came up empty:
+  `wsl.exe` did start, so the spawn returned `Ok` and nothing failed, but no shell was ever
+  created inside.
+
+  **What is ours is that nothing notices.** A session that spawns cleanly and then emits nothing,
+  ever, is indistinguishable from an idle one here — the child has not exited so the waiter
+  thread never wakes, and the reader gets no EOF and no `EIO`, just silence. The panes that were
+  already open died the same way: a severed relay does not close the pty, it goes quiet. Fix
+  candidates are a first-output deadline on a freshly spawned session (mark the tab loudly if a
+  shell produces nothing within N seconds) and a liveness check for sessions that fall silent
+  after having worked.
+
+  Two earlier hypotheses were **wrong**, recorded so they are not re-derived: (1) `write_stdin`
+  exhausting tokio's blocking pool — the front end already serialises writes per session through
+  `writeQueue` (`terminal-view.ts:217`), so a handful of panes cannot fill 512 slots; (2)
+  `dispatch` holding the dispatcher lock across a hung spawn (`commands.rs:76-83`) — ruled out
+  because the tabs *did* appear, so `dispatch` returned normally. The unbounded blocking task in
+  `write_stdin`/`resize` is a real structural weakness, but it is not this bug.
+- **No runtime log file** — everything the app says at runtime goes to `eprintln!`, and the
+  release build is `windows_subsystem = "windows"` (`main.rs:15`), so there is no console for it
+  to land in. `~/.winmux/setup.log` is provisioning-only and `toast.log` records toast sends;
+  neither sees the backend. Reconstructing the bug above took `dmesg` plus forensics on relay
+  processes that happened to still be alive — winmux itself had recorded nothing, and two
+  hypotheses were chased and discarded before the process tree settled it. A rolling file log
+  next to `state.json` (spawn start/finish with duration, exit, write errors) is what turns that
+  into a five-minute diagnosis. Keep it **off by default** with an opt-in switch, and never put
+  terminal output in it.
 - **`isCommandError`'s variant table is hand-maintained** — the `formatCommandError`
   switch is compile-time exhaustive via `assertNever`, but the type guard above it is a
   literal list, so a new `CommandError` variant falls silently through to the raw-JSON
