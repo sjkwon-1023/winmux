@@ -103,7 +103,10 @@ export type TabKind =
 
 export type TerminalStatus =
   | { type: "running" }
-  | { type: "exited"; code: number | null };
+  | { type: "exited"; code: number | null }
+  /** 프로세스는 살아 있는데 시작 표식이 마감 안에 오지 않았다. 종착 상태가 아니다 —
+   *  표식이 늦게 도착하면 running 으로 돌아온다 (근거는 model.rs 의 TerminalStatus). */
+  | { type: "notStarted" };
 
 /** 탭 생성 명세 (command.rs NewTab) — createTab·splitPane·createWorkspace 공유.
  *  21단계 뷰어 3종이 모두 착지해 TabKind 와 종류가 일대일이다. */

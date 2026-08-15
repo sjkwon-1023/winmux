@@ -100,6 +100,9 @@ pub async fn create_terminal(
         replay_cap: REPLAY_CAP,
         high_water: HIGH_WATER,
         low_water: LOW_WATER,
+        // frozen 하네스에는 표식을 낼 셸 래퍼가 없다 — 감시를 켜면 모든 세션이
+        // 마감을 넘긴다.
+        startup_deadline: None,
     };
     let spec = default_spawn_spec(cols, rows);
     tauri::async_runtime::spawn_blocking(move || {

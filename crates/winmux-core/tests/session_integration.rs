@@ -22,6 +22,7 @@ enum Event {
     Output { offset: u64, bytes: Vec<u8> },
     Osc(OscEvent),
     Exit(Option<u32>),
+    StartupTimeout,
 }
 
 struct ChannelSink {
@@ -42,6 +43,9 @@ impl SessionSink for ChannelSink {
     }
     fn on_exit(&self, code: Option<u32>) {
         let _ = self.tx.send(Event::Exit(code));
+    }
+    fn on_startup_timeout(&self) {
+        let _ = self.tx.send(Event::StartupTimeout);
     }
 }
 
@@ -64,6 +68,25 @@ fn sh_spec() -> SpawnSpec {
         cols: 80,
         rows: 24,
     }
+}
+
+/// 출력을 통제할 수 있는 spec — 시작 표식 감시 테스트가 "조용한 프로세스"와 "표식을
+/// 내는 프로세스"를 만들어야 해서 필요하다.
+fn sh_c_spec(script: &str) -> SpawnSpec {
+    SpawnSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: None,
+        cols: 80,
+        rows: 24,
+    }
+}
+
+fn spawn_script(script: &str, opts: SessionOptions) -> (PtySession, Receiver<Event>) {
+    let (tx, rx) = mpsc::channel();
+    let session = PtySession::spawn(sh_c_spec(script), Box::new(ChannelSink { tx }), opts)
+        .expect("failed to spawn sh in pty");
+    (session, rx)
 }
 
 fn spawn_sh(opts: SessionOptions) -> (PtySession, Receiver<Event>) {
@@ -156,6 +179,7 @@ fn flood_without_ack_pauses_then_full_ack_resumes() {
         replay_cap: 64 * 1024,
         high_water: HIGH,
         low_water: LOW,
+        startup_deadline: None,
     };
     let (session, rx) = spawn_sh(opts);
     session.write(b"seq 200000\n").expect("write seq command");
@@ -303,6 +327,7 @@ fn reattach_resumes_paused_session_with_continuous_offsets() {
         replay_cap: 64 * 1024,
         high_water: HIGH,
         low_water: LOW,
+        startup_deadline: None,
     };
     let (session, rx) = spawn_sh(opts);
     session.write(b"seq 200000\n").expect("write seq command");
@@ -405,6 +430,7 @@ fn dropped_sink_keeps_session_free_running() {
         replay_cap: 64 * 1024,
         high_water: HIGH,
         low_water: 16 * 1024,
+        startup_deadline: None,
     };
     let session =
         PtySession::spawn(sh_spec(), Box::new(DropSink), opts).expect("failed to spawn sh in pty");
@@ -481,4 +507,67 @@ fn kill_invokes_on_exit_exactly_once() {
             "on_exit must fire exactly once per session"
         );
     }
+}
+
+// 시작 표식 감시 — 마감을 넘긴 세션을 **보고하되 죽이지 않는다**는 계약. 죽이지 않기
+// 때문에 오탐의 대가가 경고 한 번뿐이고, 그래서 짧은 마감도 안전하다.
+#[test]
+fn startup_deadline_reports_a_silent_session_without_killing_it() {
+    let opts = SessionOptions {
+        startup_deadline: Some(Duration::from_millis(300)),
+        ..SessionOptions::default()
+    };
+    // 표식도 프롬프트도 내지 않는 프로세스 — 실기 사고의 "셸이 안 뜬 탭"에 해당한다.
+    let (session, rx) = spawn_script("sleep 30", opts);
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match rx
+            .recv_timeout(remaining(deadline, "startup timeout report"))
+            .expect("sink channel closed before the startup timeout")
+        {
+            Event::StartupTimeout => break,
+            _ => continue,
+        }
+    }
+
+    assert!(
+        session.stats().alive,
+        "startup timeout must leave the session running"
+    );
+    session.kill();
+}
+
+// 표식이 오면 마감이 지나도 보고하지 않는다 — 정상 세션에 경고가 붙지 않는다는 쪽.
+#[test]
+fn startup_marker_disarms_the_watchdog() {
+    const DEADLINE: Duration = Duration::from_secs(1);
+    let opts = SessionOptions {
+        startup_deadline: Some(DEADLINE),
+        ..SessionOptions::default()
+    };
+    let (session, rx) = spawn_script(r"printf '\033]777;winmux-started\007'; sleep 30", opts);
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match rx
+            .recv_timeout(remaining(deadline, "startup marker"))
+            .expect("sink channel closed before the marker")
+        {
+            Event::Osc(OscEvent::Osc777Started) => break,
+            Event::StartupTimeout => panic!("watchdog fired before the marker arrived"),
+            _ => continue,
+        }
+    }
+
+    // 마감을 넉넉히 지나 보내고도 보고가 없어야 한다.
+    let watch_until = Instant::now() + DEADLINE * 2;
+    while let Some(left) = watch_until.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(Event::StartupTimeout) => panic!("watchdog fired after the marker arrived"),
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    session.kill();
 }

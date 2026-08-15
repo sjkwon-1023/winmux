@@ -157,6 +157,24 @@ impl SessionSink for SinkHandle {
         });
         publish_state(&self.0.app, &dispatcher);
     }
+
+    fn on_startup_timeout(&self) {
+        // 워치독 스레드에서 Dispatcher lock 을 잡는다 — on_exit 과 같은 규율이고 같은
+        // 이유로 안전하다. 다만 이쪽은 세션을 죽이지 않으므로, 표식이 늦게 도착하면
+        // 라우터 경로(OscBatch)가 이 상태를 되돌린다.
+        let Some(state) = self.0.app.try_state::<AppState>() else {
+            eprintln!(
+                "[winmux] on_startup_timeout: managed state unavailable (session={})",
+                self.0.session
+            );
+            return;
+        };
+        let mut dispatcher = state.dispatcher.lock().unwrap();
+        dispatcher.apply_event(SessionEvent::SessionStartupTimeout {
+            session: self.0.session,
+        });
+        publish_state(&self.0.app, &dispatcher);
+    }
 }
 
 /// 진행 중 blocking 태스크 상한 (보안 리뷰 finding) — 전송([`deliver_send`])과

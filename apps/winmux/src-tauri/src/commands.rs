@@ -22,6 +22,7 @@ use std::time::UNIX_EPOCH;
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::{AppHandle, Manager, State};
 use winmux_core::command::{Command, CommandError, CommandOutput};
+use winmux_core::model::TabId;
 use winmux_core::session::{PtySession, SessionId};
 use winmux_core::wslpath;
 
@@ -99,6 +100,29 @@ pub async fn dispatch(
         }
     }
     result
+}
+
+/// `NotStarted` 탭에 셸을 다시 띄운다 (사용자 재시도 — pane 배너의 Retry).
+///
+/// **성공·실패 어느 쪽이든 publish 한다.** `dispatch` 의 "실패 = 상태 불변" 계약과 달리
+/// `Dispatcher::respawn_tab` 은 스폰이 실패하면 그 탭을 강등하고 revision 을 올리므로,
+/// 성공 시에만 publish 하면 실패한 재시도가 화면에 닿지 않는다 (부팅 복원 경로인
+/// `main.rs` 가 무조건 publish 하는 것과 같은 규율).
+#[tauri::command]
+pub async fn respawn_tab(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tab: u64,
+) -> Result<SessionId, CommandError> {
+    let dispatcher = Arc::clone(&state.dispatcher);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut d = dispatcher.lock().unwrap();
+        let result = d.respawn_tab(TabId(tab));
+        publish_state(&app, &d);
+        result
+    })
+    .await
+    .expect("respawn_tab task panicked")
 }
 
 /// 현재 상태 스냅샷 (`{ revision, state }`) — 부팅·재동기화용.

@@ -47,6 +47,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, ensure};
 use portable_pty::{
@@ -96,6 +97,14 @@ pub trait SessionSink: Send + Sync + 'static {
     /// 프로세스 종료. 자연 종료·kill 어느 쪽이든 세션당 정확히 1회 호출된다.
     /// `code` 는 exit code (signal 종료 등으로 알 수 없으면 None).
     fn on_exit(&self, code: Option<u32>);
+    /// `SessionOptions::startup_deadline` 안에 시작 표식이 오지 않았다. 최대 1회다
+    /// (마감은 한 번만 지나간다).
+    ///
+    /// **세션은 살아 있다.** 죽이지 않는 것이 계약이라, 늦게 도착한 표식은
+    /// `Osc777Started` 로 정상 전달되고 상위가 경고를 거둘 수 있다. 기본 구현이
+    /// no-op 인 이유도 그것이다 — 이 신호를 안 보는 구현에게 이 기능은 존재하지 않는
+    /// 것과 같고, 세션 동작은 어느 쪽이든 동일하다.
+    fn on_startup_timeout(&self) {}
 }
 
 /// 스폰할 프로세스 사양.
@@ -114,6 +123,14 @@ pub struct SessionOptions {
     pub replay_cap: usize,
     pub high_water: usize,
     pub low_water: usize,
+    /// 이 시간 안에 시작 표식([`OscEvent::Osc777Started`])이 오지 않으면
+    /// `on_startup_timeout` 을 부른다. `None` 이면 감시하지 않는다 — 표식을 낼 래퍼가
+    /// 없는 경로(unix 개발 실행은 `$SHELL -l` 을 직접 띄운다)가 그렇다.
+    ///
+    /// 마감을 넘겨도 **세션을 죽이지 않기 때문에** 오탐의 대가가 경고 한 번뿐이고,
+    /// 그래서 값을 넉넉히 증명하지 않아도 안전하다. WSL 콜드 스타트가 수 초에서 수
+    /// 분까지 걸린 보고가 있어, 죽이는 설계였다면 이 값은 정당화가 불가능했다.
+    pub startup_deadline: Option<Duration>,
 }
 
 impl Default for SessionOptions {
@@ -122,6 +139,7 @@ impl Default for SessionOptions {
             replay_cap: 1024 * 1024,
             high_water: 2 * 1024 * 1024,
             low_water: 512 * 1024,
+            startup_deadline: None,
         }
     }
 }
@@ -157,6 +175,9 @@ struct Inner {
     /// `kill()` 또는 waiter(자식 종료 관측)가 올린다 — 리더 스레드는 이를 보면
     /// 즉시 루프를 빠져나간다.
     killed: bool,
+    /// 시작 표식을 본 적이 있는지. 리더가 **sink 콜백보다 먼저** 올린다 — 콜백이
+    /// 지연되는 사이 워치독이 마감을 지나면 살아 있는 셸을 못 떴다고 보고하게 된다.
+    startup_seen: bool,
 }
 
 /// waiter 스레드와 공유하는 PTY 입력 writer. 종료 후에는 None (fd 회수됨).
@@ -222,6 +243,7 @@ impl PtySession {
                 last_osc: None,
                 alive: true,
                 killed: false,
+                startup_seen: false,
             }),
             cond: Condvar::new(),
         });
@@ -252,6 +274,28 @@ impl PtySession {
                 let master = Arc::clone(&master);
                 move || waiter_loop(child, sink, shared, writer, master)
             })?;
+        // 워치독은 마감을 요구한 경우에만, 그리고 마감까지만 산다 — 표식이 오거나
+        // 세션이 죽으면 리더·waiter 의 notify 로 즉시 회수된다. 상시 스레드 수는
+        // 세션당 둘 그대로다.
+        if let Some(deadline) = opts.startup_deadline {
+            let started = std::thread::Builder::new()
+                .name("winmux-pty-startup".into())
+                .spawn({
+                    let sink = Arc::clone(&sink);
+                    let shared = Arc::clone(&shared);
+                    move || startup_watchdog(deadline, sink, shared)
+                });
+            // 실패를 `?` 로 올리지 않는다. 이 시점에는 자식과 reader·waiter 가 이미 떠
+            // 있는데 `PtySession` 값은 아직 없어서, 여기서 반환하면 Drop 도 레지스트리
+            // 등록도 없이 아무도 죽일 수 없는 프로세스가 남는다 — 이 기능이 없애려는
+            // 좀비와 같은 종류다. 워치독은 감시일 뿐 세션의 전제가 아니므로, 없으면
+            // 감시만 빠진 종전 동작이 된다.
+            if let Err(err) = started {
+                eprintln!(
+                    "[winmux] startup watchdog not started ({err}); this session runs unwatched"
+                );
+            }
+        }
 
         Ok(Self {
             shared,
@@ -433,6 +477,15 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, sink: Arc<dyn SessionSink>, sha
         // 계약 순서: feed → on_osc(lock 밖) → [lock 안: osc 계정 → offset 캡처 →
         // replay.push → flow.on_sent → bytes_out += n] → on_output(lock 밖).
         let events = scanner.feed(chunk);
+        // 표식 반영이 sink 콜백보다 앞서는 이유는 `Inner::startup_seen` 주석에 있다.
+        if events.contains(&OscEvent::Osc777Started) {
+            let mut inner = shared.inner.lock().unwrap();
+            if !inner.startup_seen {
+                inner.startup_seen = true;
+                drop(inner);
+                shared.cond.notify_all();
+            }
+        }
         for event in &events {
             sink.on_osc(event);
         }
@@ -509,6 +562,39 @@ fn waiter_loop(
     sink.on_exit(code);
 }
 
+/// 시작 표식 감시 — 마감까지 표식이 없으면 sink 에 한 번 알리고 끝난다.
+/// **세션을 죽이지 않는다** (계약은 [`SessionOptions::startup_deadline`] rustdoc).
+///
+/// 마감을 절대 시각으로 잡는 이유: `wait_timeout` 에 매번 전체 마감을 넘기면 spurious
+/// wakeup 마다 타이머가 처음부터 다시 시작해 마감이 무한정 밀린다.
+///
+/// 깨어날 조건이 세 경로(표식 도착·kill·자연 종료) 모두에서 통지된다는 전제 위에
+/// 선다 — 리더는 표식을 보면, `kill()` 과 waiter 는 `killed` 를 올리면서 각각
+/// `notify_all` 한다. predicate 를 매번 재검사하므로 통지가 wait 보다 먼저 와도
+/// 놓치지 않는다.
+fn startup_watchdog(deadline: Duration, sink: Arc<dyn SessionSink>, shared: Arc<Shared>) {
+    // env 로 임의의 밀리초를 받을 수 있어(`host.rs`) 덧셈이 시계 표현 범위를 넘길 수
+    // 있다. panic 하면 그 세션만 조용히 감시에서 빠지므로 loud 하게 알리고 물러난다.
+    let Some(mark) = Instant::now().checked_add(deadline) else {
+        eprintln!("[winmux] startup deadline {deadline:?} overflows the clock; not watching");
+        return;
+    };
+    let mut inner = shared.inner.lock().unwrap();
+    loop {
+        if inner.startup_seen || inner.killed {
+            return;
+        }
+        let remaining = mark.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let (guard, _) = shared.cond.wait_timeout(inner, remaining).unwrap();
+        inner = guard;
+    }
+    drop(inner);
+    sink.on_startup_timeout();
+}
+
 /// stats 표시용 OSC 요약 문자열 (예: "777:title").
 fn summarize_osc(event: &OscEvent) -> String {
     match event {
@@ -522,6 +608,7 @@ fn summarize_osc(event: &OscEvent) -> String {
         // 질의도 같은 규율 — 종류만 싣고 회신 **경로는 싣지 않는다** (로그·stats
         // 에 파일시스템 경로를 흘릴 이유가 없다).
         OscEvent::Osc777Query { kind, .. } => format!("777-query:{kind}"),
+        OscEvent::Osc777Started => "777-started".to_string(),
         // 색상 질의는 코드(10 = 전경, 11 = 배경)만으로 관측이 끝난다.
         OscEvent::OscColorQuery { code } => format!("color-query:{code}"),
     }

@@ -1599,6 +1599,55 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
    - With an image on the clipboard at a plain bash prompt that quoted-insert *is* what happens —
      bash has no use for the key. That is the accepted cost of forwarding it.
 
+2. **A shell that never starts is called out, and is not killed** — the app now emits a
+   startup marker (`OSC 777;winmux-started`) as the very first thing the WSL wrapper does, and
+   flags the tab if no marker arrives within 20s. The session is left running, so a slow start
+   costs a warning and nothing else.
+
+   Both knobs are read once per process, so set them in the shell that launches the exe:
+
+   ```powershell
+   $env:WINMUX_STARTUP_DEADLINE_MS = "1000"; .\target\release\winmux-app.exe
+   ```
+
+   - **It fires on a genuinely slow start.** With the knob at `1000`, run `wsl --shutdown`,
+     then open a new tab. The cold VM boot outlasts 1s, so the tab must show the `not started`
+     badge and the pane banner naming WSL as the likely cause.
+   - **It clears itself.** Keep watching that same tab: when the shell finally comes up the
+     badge and banner must disappear on their own, and the prompt must work. This is the whole
+     point of not killing the session — if the tab stays flagged after a working prompt
+     appears, the recovery path regressed.
+   - **No false positive at the default.** Unset the knob, `wsl --shutdown`, open a tab: the
+     prompt must arrive with no badge at any point. Then restart the app with several running
+     tabs *after* a `wsl --shutdown` — a cold VM plus N shells racing to initialise is the
+     worst case for a false flag, and none may appear.
+   - **Retry works and cleans up.** Force the flag again (knob at `1000`), press **Retry** in
+     the banner: the same tab gets a working shell, and `↑` still recalls that tab's history
+     (the tab id survived). Then check Task Manager and `ps` inside WSL — the session the tab
+     had been holding must be gone. *If a `/init` relay with no children survives, note it: the
+     field incident left two of those alive for hours, and whether killing `wsl.exe` reaches
+     into WSL is exactly what this item measures.*
+
+3. **A spawn cannot hold the whole app hostage** — spawning runs under the dispatcher lock, so
+   it now carries a 5s deadline.
+
+   ```powershell
+   $env:WINMUX_SPAWN_DEADLINE_MS = "1"; .\target\release\winmux-app.exe
+   ```
+
+   - Opening a tab must fail visibly (a `SpawnFailed` error surface) rather than hang, and
+     **the rest of the app must stay responsive** — switch workspaces, close a tab, type in
+     another terminal while the failures repeat.
+   - Repeat a handful of times, then check Task Manager: no `wsl.exe` may be left over. Late
+     spawns are cleaned up by the worker thread, and this is the only place that path is
+     exercised on real hardware.
+   - Unset the knob and confirm tabs open normally again.
+
+   A genuinely blocked `CreateProcess` cannot be produced on demand, so this item covers the
+   error surface and the cleanup path only; the timeout mechanism itself is covered by the
+   `deadline.rs` unit tests, including a 40-step sweep across the completion/deadline boundary
+   that asserts the value is never lost.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

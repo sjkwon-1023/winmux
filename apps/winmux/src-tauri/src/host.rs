@@ -3,10 +3,13 @@
 //! 0-3 수용) 여기서 Dispatcher lock 을 다시 잡는 코드는 금지다.
 
 use std::cell::Cell;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use anyhow::anyhow;
 use tauri::AppHandle;
 use winmux_core::command::{SessionHost, ShellSpawnReq};
+use winmux_core::deadline::call_with_deadline;
 use winmux_core::session::{SessionId, SessionManager, SessionOptions, SpawnSpec};
 
 use crate::router::OscRouter;
@@ -173,9 +176,15 @@ fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
     const PATH_PREFIX: &str = "PATH=\"$HOME/.winmux/bin:$PATH\"";
     // TERMINAL_THEME 동기화 계약 (rustdoc 참조): fg #cccccc, bg #1e1e1e.
     const THEME_SYNC: &str = r"printf '\033]10;#cccccc\033\\\033]11;#1e1e1e\033\\'";
+    // 시작 표식 — 이 래퍼가 WSL 안에서 실제로 실행됐다는 유일한 증거다. 반드시 맨
+    // 앞이어야 하고(뒤따르는 파일 I/O 가 막혀도 도달 자체는 증명해야 한다), 바로 뒤의
+    // THEME_SYNC 로는 대신할 수 없다 — OSC 10/11 set 은 conhost 가 소비해 우리
+    // 리더까지 오지 않는다(이 함수 rustdoc). 왜 OSC 777 인지는
+    // `winmux_core::osc::OscEvent::Osc777Started` rustdoc.
+    const STARTED: &str = r"printf '\033]777;winmux-started\007'";
     let script = match history_tab {
         Some(tab) => format!(
-            "{THEME_SYNC}; mkdir -p \"$HOME/.winmux/history\" \
+            "{STARTED}; {THEME_SYNC}; mkdir -p \"$HOME/.winmux/history\" \
              && RESUME=\"$HOME/.winmux/resume/tab-{tab}\" && cmd= \
              && if [ -s \"$RESUME\" ]; then IFS= read -r cmd < \"$RESUME\" || true; fi \
              && case \"$cmd\" in 'claude --resume '*) \
@@ -190,34 +199,130 @@ fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
              HISTFILE=\"$HOME/.winmux/history/tab-{tab}\" exec bash -l"
         ),
         // 탭 id 를 모르는 경로(히스토리 미할당)에서는 WINMUX 만 — 없는 id 를 지어내지 않는다.
-        None => format!("{THEME_SYNC}; {PATH_PREFIX} COLORTERM=truecolor WINMUX=1 exec bash -l"),
+        None => format!("{STARTED}; {THEME_SYNC}; {PATH_PREFIX} COLORTERM=truecolor WINMUX=1 exec bash -l"),
     };
     vec!["bash".to_string(), "-c".to_string(), script]
+}
+
+/// 시작 표식을 기다리는 기본 마감. 웜 스타트 실측이 163~194ms 라 크게 여유롭지만,
+/// 값을 고르는 부담 자체가 작다 — 마감을 넘겨도 세션을 죽이지 않고 탭에 표시만 하므로
+/// 틀렸을 때의 대가가 경고 한 번뿐이다. 죽이는 설계였다면 WSL 콜드 스타트가 수 초에서
+/// 수 분까지 걸린 보고들 때문에 어떤 값도 정당화할 수 없었다.
+const STARTUP_DEADLINE: Duration = Duration::from_secs(20);
+
+/// 표식을 낼 래퍼가 있는 경로에서만 기본 활성이다. unix 개발 실행은 `$SHELL -l` 을
+/// 직접 띄워(`spawn_spec`) 표식을 낼 자리가 없으므로, 마감을 걸면 느린 rc 가 곧바로
+/// 오탐이 된다.
+#[cfg(windows)]
+fn platform_startup_deadline() -> Option<Duration> {
+    Some(STARTUP_DEADLINE)
+}
+
+#[cfg(not(windows))]
+fn platform_startup_deadline() -> Option<Duration> {
+    None
+}
+
+/// 스폰 자체의 마감 — 이 값이 곧 **탭 하나 때문에 앱 전체가 멈춰 있을 수 있는 최대
+/// 시간**이다. `dispatch` 가 Dispatcher lock 을 쥔 채 스폰하므로(그 함수 주석) 상한이
+/// 없으면 무한이 된다. 프로세스 생성은 웜에서 수십 ms 라 5초는 100배 여유다.
+const SPAWN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// `0` 은 "끄기". 파싱 실패는 부팅을 막지 않고 loud 하게만 알린다 — 오타 하나로
+/// 터미널을 못 쓰게 만드는 것이 잘못된 마감보다 나쁘다.
+fn env_deadline(var: &str, fallback: Option<Duration>) -> Option<Duration> {
+    let Ok(raw) = std::env::var(var) else {
+        return fallback;
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(ms) => Some(Duration::from_millis(ms)),
+        Err(err) => {
+            eprintln!("[winmux] {var}={raw:?} is not a number ({err}); using the default");
+            fallback
+        }
+    }
+}
+
+/// `WINMUX_STARTUP_DEADLINE_MS` override. 실기 검증이 마감을 줄여 감지 경로를 재현하는
+/// 데 쓰고, 오탐이 잦은 환경에는 탈출구가 된다.
+fn startup_deadline() -> Option<Duration> {
+    static CACHED: OnceLock<Option<Duration>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        env_deadline("WINMUX_STARTUP_DEADLINE_MS", platform_startup_deadline())
+    })
+}
+
+/// `WINMUX_SPAWN_DEADLINE_MS` override.
+fn spawn_deadline() -> Option<Duration> {
+    static CACHED: OnceLock<Option<Duration>> = OnceLock::new();
+    *CACHED.get_or_init(|| env_deadline("WINMUX_SPAWN_DEADLINE_MS", Some(SPAWN_DEADLINE)))
+}
+
+/// 세션 생성 + sink 등록의 원자 단위. `spawn_shell` 이 직접 부르거나 마감을 씌워
+/// 부르므로, 두 경로가 같은 롤백 규율을 쓰도록 함수로 뺐다.
+fn create_session(
+    sessions: &SessionManager,
+    sinks: &SinkRegistry,
+    app: &AppHandle,
+    router: &Arc<OscRouter>,
+    spec: SpawnSpec,
+    opts: SessionOptions,
+) -> anyhow::Result<SessionId> {
+    // sink factory 가 TerminalSink 를 만들어 레지스트리에 등록한다 (id 선발급 계약).
+    // 등록 후 스폰이 실패하면 레지스트리 엔트리를 되감아 고아 sink 를 남기지 않는다 —
+    // factory 밖으로 id 를 꺼내는 Cell.
+    let registered: Cell<Option<SessionId>> = Cell::new(None);
+    let result = sessions.create(spec, opts, |id| {
+        let sink = Arc::new(TerminalSink::new(id, app.clone(), Arc::clone(router)));
+        sinks.insert(id, Arc::clone(&sink));
+        registered.set(Some(id));
+        Box::new(SinkHandle(sink))
+    });
+    if result.is_err() {
+        if let Some(id) = registered.take() {
+            sinks.remove(id);
+        }
+    }
+    result
 }
 
 impl SessionHost for TauriHost {
     fn spawn_shell(&self, req: ShellSpawnReq) -> anyhow::Result<SessionId> {
         let spec = spawn_spec(&req);
-        // sink factory 가 TerminalSink 를 만들어 레지스트리에 등록한다 (id
-        // 선발급 계약). 등록 후 스폰이 실패하면 레지스트리 엔트리를 되감아
-        // 고아 sink 를 남기지 않는다 — factory 밖으로 id 를 꺼내는 Cell.
-        let registered: Cell<Option<SessionId>> = Cell::new(None);
-        let result = self.sessions.create(spec, SessionOptions::default(), |id| {
-            let sink = Arc::new(TerminalSink::new(
-                id,
-                self.app.clone(),
-                Arc::clone(&self.router),
-            ));
-            self.sinks.insert(id, Arc::clone(&sink));
-            registered.set(Some(id));
-            Box::new(SinkHandle(sink))
-        });
-        if result.is_err() {
-            if let Some(id) = registered.take() {
-                self.sinks.remove(id);
-            }
-        }
-        result
+        let opts = SessionOptions {
+            startup_deadline: startup_deadline(),
+            ..SessionOptions::default()
+        };
+        let Some(deadline) = spawn_deadline() else {
+            return create_session(&self.sessions, &self.sinks, &self.app, &self.router, spec, opts);
+        };
+
+        let sessions = Arc::clone(&self.sessions);
+        let sinks = Arc::clone(&self.sinks);
+        let app = self.app.clone();
+        let router = Arc::clone(&self.router);
+        let late_sessions = Arc::clone(&self.sessions);
+        let late_sinks = Arc::clone(&self.sinks);
+        call_with_deadline(
+            "winmux-pty-spawn",
+            deadline,
+            move || create_session(&sessions, &sinks, &app, &router, spec, opts),
+            move |late| {
+                // 마감 뒤에 끝난 스폰은 어떤 탭도 물고 있지 않다 — 그대로 두면 실기
+                // 사고에서 몇 시간을 살아남은 그 좀비가 된다.
+                if let Ok(id) = late {
+                    late_sinks.remove(id);
+                    late_sessions.remove(id);
+                }
+            },
+        )
+        .unwrap_or_else(|| {
+            Err(anyhow!(
+                "shell spawn did not finish within {deadline:?}; it will be cleaned up if it \
+                 ever completes"
+            ))
+        })
     }
 
     fn kill(&self, id: SessionId) {

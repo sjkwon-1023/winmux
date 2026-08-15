@@ -225,7 +225,10 @@ export class TerminalView {
 
   constructor(
     parent: HTMLElement,
-    private readonly session: SessionId,
+    /** 이 뷰가 붙은 PTY 세션. 읽기 전용으로 열어 둔 이유는 재스폰 판정 때문이다 —
+     *  같은 탭이 새 세션을 받으면(Retry) 뷰를 갈아 끼워야 하고, 그 비교를 레지스트리가
+     *  해야 한다 (`workspace-view.ts` 의 ensureView). */
+    readonly session: SessionId,
     /** 전환 계측 훅 (14단계) — replay write 완료 + rAF 1회 뒤 replay 바이트 수로
      *  1회 호출한다 (페인트 근사 완료점). 계측 중이 아닌 attach 에는 undefined —
      *  그 경우 콜백·rAF 를 아예 걸지 않아 오버헤드가 없다. */

@@ -18,6 +18,10 @@ export interface TabButtonModel {
   active: boolean;
   /** terminal 탭이고 프로세스가 종료됐는지 (Exited 배지 — 계획 1-C). */
   exited: boolean;
+  /** 프로세스는 살아 있는데 시작 표식이 마감 안에 오지 않았는지. exited 와 나누는
+   *  이유는 사용자에게 다른 상황이기 때문이다 — 끝난 게 아니라 시작을 못 한 것이고,
+   *  늦게라도 표식이 오면 저절로 걷힌다. */
+  notStarted: boolean;
   /** 미확인 알림 dot 표시 여부 (NotificationState "unread"). */
   notification: boolean;
 }
@@ -29,6 +33,7 @@ export function tabStripModel(pane: Pane): TabButtonModel[] {
     title: tab.title,
     active: tab.id === pane.activeTab,
     exited: tab.kind.type === "terminal" && tab.kind.status.type === "exited",
+    notStarted: tab.kind.type === "terminal" && tab.kind.status.type === "notStarted",
     notification: tab.notification === "unread",
   }));
 }
@@ -47,6 +52,7 @@ export function sameTabButton(a: TabButtonModel, b: TabButtonModel): boolean {
     a.title === b.title &&
     a.active === b.active &&
     a.exited === b.exited &&
+    a.notStarted === b.notStarted &&
     a.notification === b.notification
   );
 }

@@ -45,6 +45,17 @@ pub enum OscEvent {
     /// (`777;winmux-query;list-tabs` 는 형식 불일치로 떨어진다 — 회신 주소 없는
     /// 질의를 조용히 성공시키지 않는다).
     Osc777Query { kind: String, reply_b64: String },
+    /// OSC 777 — `winmux-started`. 셸 래퍼가 실행되자마자 내는 시작 표식이며 필드가
+    /// 없다 (존재 자체가 신호다).
+    ///
+    /// 이 표식이 따로 필요한 이유는 **"출력이 있다 = 셸이 떴다"가 성립하지 않기**
+    /// 때문이다. ConPTY 는 커서 질의(`ESC[6n`)를 출력 스트림에 스스로 주입하고
+    /// (ADR-0004), 실기 장애에서 셸이 한 바이트도 내지 못한 채 그 4바이트만 흐른
+    /// 기록이 있다(`terminal-view.ts` attach 주석). 래퍼 첫 줄의 테마 시퀀스도 근거가
+    /// 못 된다 — OSC 10/11 set 은 conhost 가 handled 로 소비해 여기까지 오지 않는다
+    /// (`host.rs::bash_argv` rustdoc). 반면 OSC 777 은 conhost 가 모르는 시퀀스라
+    /// 그대로 통과하며, 그 통과는 알림 파이프라인으로 이미 실기 검증됐다(ADR-0006).
+    Osc777Started,
     /// OSC 10/11 — 전경/배경색 **질의**(`ESC ] 10 ; ? ST`). `code` 는 10 = 전경,
     /// 11 = 배경이다. 앱(글루)이 우리 테마 값으로 **직접 응답**한다
     /// (`apps/winmux/src-tauri/src/sink.rs`).
@@ -263,6 +274,9 @@ fn parse_payload(payload: &[u8]) -> Option<OscEvent> {
                     let reply_b64 = parts.next()?.to_string();
                     Some(OscEvent::Osc777Query { kind, reply_b64 })
                 }
+                // 전송·질의와 달리 필드를 요구하지 않는다 — 표식은 도착 사실만으로
+                // 의미가 끝나고, 뒤에 무엇이 붙어도 그 사실은 변하지 않는다.
+                "winmux-started" => Some(OscEvent::Osc777Started),
                 _ => None,
             }
         }
@@ -451,6 +465,28 @@ mod tests {
                 kind: "list-tabs".into(),
                 reply_b64: "aGk=".into()
             }]
+        );
+    }
+
+    #[test]
+    fn osc777_started_parsed() {
+        assert_eq!(
+            scan(b"\x1b]777;winmux-started\x07"),
+            vec![OscEvent::Osc777Started]
+        );
+        // ST 종결·청크 분할도 같은 계약 (전송·질의와 같은 스캐너 경로).
+        let mut s = OscScanner::new();
+        assert_eq!(s.feed(b"\x1b]777;winmux-st"), vec![]);
+        assert_eq!(s.feed(b"arted\x1b\\"), vec![OscEvent::Osc777Started]);
+    }
+
+    #[test]
+    fn osc777_started_ignores_trailing_fields() {
+        // 표식은 도착 사실만으로 끝나므로 뒤에 붙은 것이 해석을 바꾸지 않는다 —
+        // 나중에 필드를 덧붙여도 구버전이 표식을 놓치지 않게 하는 여지다.
+        assert_eq!(
+            scan(b"\x1b]777;winmux-started;7\x07"),
+            vec![OscEvent::Osc777Started]
         );
     }
 

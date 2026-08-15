@@ -447,8 +447,16 @@ export class WorkspaceView {
     parent: HTMLElement,
     onAttachError: (message: string) => void,
   ): TerminalView {
-    let view = this.views.get(tab);
-    if (view !== undefined) return view;
+    const existing = this.views.get(tab);
+    if (existing !== undefined) {
+      // 같은 탭이라도 세션이 바뀌었으면(Retry 로 재스폰) 옛 뷰는 이미 죽은 세션에
+      // 붙어 있다. 그대로 재사용하면 상태는 running 으로 돌아가 배너만 걷히고 화면과
+      // 입력은 계속 죽은 채로 남는다 — 빈 탭에서 Retry 를 누르는 핵심 경로가 성공한
+      // 것처럼 보이면서 아무것도 고쳐지지 않는다.
+      if (existing.session === session) return existing;
+      existing.dispose();
+      this.views.delete(tab);
+    }
     // 전환 계측 (14단계): 진행 중 trace 가 이 탭의 새 attach 를 수락한 경우에만
     // replay 완료 훅을 단다 — keep-alive 재사용(위 early return)은 replay 왕복이
     // 없어 계측 대상이 아니다. attach 가 실패하면 trace 는 완주하지 못하고 다음

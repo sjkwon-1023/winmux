@@ -87,7 +87,31 @@ describe("tabStripModel", () => {
       10,
     );
     expect(tabStripModel(p)).toEqual([
-      { tab: 10, title: "tab 10", active: true, exited: true, notification: true },
+      {
+        tab: 10,
+        title: "tab 10",
+        active: true,
+        exited: true,
+        notStarted: false,
+        notification: true,
+      },
+    ]);
+  });
+  it("notStarted 는 exited 와 별개 배지다 — 끝난 것과 시작을 못 한 것은 다르다", () => {
+    const p = pane(
+      1,
+      [terminalTab(10, { status: { type: "notStarted" } })],
+      10,
+    );
+    expect(tabStripModel(p)).toEqual([
+      {
+        tab: 10,
+        title: "tab 10",
+        active: true,
+        exited: false,
+        notStarted: true,
+        notification: false,
+      },
     ]);
   });
 });
@@ -99,6 +123,7 @@ function button(tab: number, over: Partial<TabButtonModel> = {}): TabButtonModel
     title: `tab ${tab}`,
     active: false,
     exited: false,
+    notStarted: false,
     notification: false,
     ...over,
   };

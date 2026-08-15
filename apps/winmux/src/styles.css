@@ -10,6 +10,7 @@
   --border: #3c3c3c;
   --accent: #007acc;
   --error: #f48771;
+  --warn: #d7a55b;
   --send: #c586c0; /* send-mode 대상 하이라이트 (17단계) — accent·error 와 구분 */
 }
 
@@ -403,6 +404,58 @@ body {
   line-height: 1.4;
 }
 
+/* "끝났다"(빨강)와 구분되는 경고색 — 시작을 못 한 것은 실패가 아니라 대기 상태이고,
+   늦게 표식이 오면 저절로 걷힌다. */
+.tab-not-started {
+  flex: 0 0 auto;
+  padding: 0 3px;
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  color: var(--warn);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+/* pane 콘텐츠 위에 겹치는 배너. 터미널 뷰를 밀어내지 않으려고 absolute 로 띄운다 —
+   세션은 살아 있어서 늦게 출력이 시작될 수 있고, 그때 화면이 흔들리면 안 된다. */
+.pane-not-started {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, 88%);
+  padding: 10px 14px;
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.pane-not-started[hidden] {
+  display: none;
+}
+
+.pane-not-started-retry {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.pane-not-started-retry:disabled {
+  color: var(--fg-muted);
+  cursor: default;
+}
+
 .pane-header .tab-close {
   width: 16px;
   height: 16px;
@@ -419,6 +472,8 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  /* .pane-not-started 배너의 위치 기준 — 없으면 배너가 뷰포트 중앙으로 달아난다. */
+  position: relative;
   overflow: hidden;
   padding: 2px;
   font-size: 13px;

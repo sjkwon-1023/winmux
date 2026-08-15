@@ -5,6 +5,7 @@
 //! `docs/plans/spike-plan.md` 4장을 참조.
 
 pub mod command;
+pub mod deadline;
 pub mod flow;
 pub mod model;
 pub mod notify;

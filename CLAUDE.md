@@ -172,6 +172,19 @@ Accepted deferrals, one line each. None of these block the MVP.
   showing `?` for a tab whose shell is in another distro or a Windows shell** (it is read
   from this distro's `/proc`). Keyboard targeting for the old manual send mode stays absorbed
   by the stage-17 retirement — it is not coming back.
+- **`winmux send` submits to shells but not to TUI agents** — found in the field 2026-08-15,
+  not fixed. `cmd_send` appends **LF** (`printf '%s\n' "$text"`, the CLI heredoc in
+  `provision.rs`). A shell runs the line because its line discipline takes LF as end-of-line,
+  but a raw-mode TUI does not — the terminal sends **CR** for Enter, so Codex and Claude Code
+  take the text into their prompt and then sit there, never submitting. Confirmed both ways: a
+  send to a Codex tab pre-filled but never ran, and a bare CR to that same tab started it
+  immediately. The contract already carries the assumption in its wording — "Include the
+  newline if the target **shell** should run the line"
+  (`scripts/wsl/claude-hook-example.md`) — while the channel exists precisely to hand work to
+  *agents*, which is what the skill advertises. Fix is to append `\r` instead: a shell's
+  `ICRNL` turns CR into NL, so the shell case is unaffected. That is a `provision.rs` heredoc
+  edit plus a `SETUP_VERSION` bump, with the same correction in the contract doc and in
+  `scripts/wsl/skills/winmux-send/SKILL.md`.
 - **Cross-workspace send/`ls` would need an explicit opt-in** — both halves of the agent
   channel stop at the requester's own workspace (2026-08-11 decision, ADR-0005 addendum); if
   reaching another project's pane ever becomes a real need it arrives as a named opt-in, never
@@ -248,35 +261,36 @@ Accepted deferrals, one line each. None of these block the MVP.
     Answer that before writing any provisioning. Writing a plugin file is also a different
     discipline from the "never rewrite an existing key" rule the Claude/Codex halves follow:
     a plugin file we create is ours to upgrade, one that already exists is not.
-- **A shell that never starts leaves a tab that looks healthy** — hit in the field 2026-08-15,
-  not fixed. Symptom: an agent pane stopped responding after its workspace sat unfocused for
-  10–30 minutes; **new tabs opened but stayed empty** — no shell, and no error anywhere; then an
-  agent in a *different* workspace went the same way.
+- **A shell that never starts is flagged now, but input that stops reaching one is not** —
+  the 2026-08-15 field incident, partly landed in v0.3.9. WSL could not allocate the vsock ring
+  buffer new interop channels need, so `wsl.exe` started while no shell was ever created inside
+  it; separately, the same memory pressure left already-running agents unresponsive. Full
+  analysis and the decisions are in [ADR-0009](docs/adr/0009-startup-marker-and-spawn-deadline.md).
 
-  **The trigger is outside winmux.** WSL could not allocate the Hyper-V vsock ring buffer new
-  interop channels need: `dmesg` holds eleven `warn_alloc` failures with the stack
-  `vmbus_alloc_ring` → `hvs_probe`, and swap was down to 16kB at the time. Process forensics pin
-  it exactly. A healthy WSL terminal is `SessionLeader → Relay(<bash pid>) → bash`, but two
-  `/init` relays — started 16:36:34 and 17:21:51, each matching a `warn_alloc` burst — carry no
-  bash pid in their name, have **no children at all**, and were still retrying
-  `UtilAcceptVsock` every 60s hours later. Those two are the two tabs that came up empty:
-  `wsl.exe` did start, so the spawn returned `Ok` and nothing failed, but no shell was ever
-  created inside.
+  **Landed**: a startup marker (`OSC 777;winmux-started`) emitted first thing by the wrapper, a
+  20s watchdog that marks the tab `NotStarted` **without killing the session** (a late marker
+  clears it), a pane banner naming WSL as the likely cause with a Retry that cleans up the
+  session the tab still held, and a 5s spawn deadline so one tab cannot hold the dispatcher
+  lock indefinitely.
 
-  **What is ours is that nothing notices.** A session that spawns cleanly and then emits nothing,
-  ever, is indistinguishable from an idle one here — the child has not exited so the waiter
-  thread never wakes, and the reader gets no EOF and no `EIO`, just silence. The panes that were
-  already open died the same way: a severed relay does not close the pty, it goes quiet. Fix
-  candidates are a first-output deadline on a freshly spawned session (mark the tab loudly if a
-  shell produces nothing within N seconds) and a liveness check for sessions that fall silent
-  after having worked.
-
-  Two earlier hypotheses were **wrong**, recorded so they are not re-derived: (1) `write_stdin`
-  exhausting tokio's blocking pool — the front end already serialises writes per session through
-  `writeQueue` (`terminal-view.ts:217`), so a handful of panes cannot fill 512 slots; (2)
-  `dispatch` holding the dispatcher lock across a hung spawn (`commands.rs:76-83`) — ruled out
-  because the tabs *did* appear, so `dispatch` returned normally. The unbounded blocking task in
-  `write_stdin`/`resize` is a real structural weakness, but it is not this bug.
+  **Still open**: the symptom that actually hurt most — **an agent that was working and stops
+  accepting input**. Silence alone cannot decide it (an idle shell is silent), but a
+  `write_stdin` that does not return within seconds is a sound signal, and the front end
+  serialises writes per session so one stuck write kills that tab's input entirely. Left out of
+  v0.3.9 as too heavy for its value at the time: it needs another status, another surface and
+  its own false-positive rules. Note it shares a fix with the unbounded blocking task below.
+  Also open: failures *after* the marker (the wrapper's file I/O, the final `exec bash -l`), and
+  whether killing `wsl.exe` actually reaps the Linux-side relay — the incident's zombies were
+  `/init` relays that survived with `PPID=1`, and WINDOWS-BUILD §10 v0.3.9 item 2 measures it.
+- **Sessions do not survive a severed relay, and that is a deliberate limit** (considered
+  2026-08-15, not planned). Putting a detach layer (`dtach`, ~50KB installed and <1MB per
+  server) between the terminal and the shell would let a session live through a broken vsock
+  channel, an app restart, even a winmux crash — the agent process keeps running and reattaches
+  where it left off, making the resume-hint feature unnecessary. It would not survive
+  `wsl --shutdown` or a reboot, and output produced while detached is lost. Rejected for now on
+  complexity, not cost: socket lifetime, attach-vs-new arbitration, resize forwarding and
+  provisioning all grow. Sessions dying with the app is intended, memory pressure belongs to
+  `.wslconfig`, and users who need more can run tmux themselves.
 - **No runtime log file** — everything the app says at runtime goes to `eprintln!`, and the
   release build is `windows_subsystem = "windows"` (`main.rs:15`), so there is no console for it
   to land in. `~/.winmux/setup.log` is provisioning-only and `toast.log` records toast sends;

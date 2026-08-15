@@ -22,6 +22,7 @@
 //!   revision 을 **배치당 최대 1회** 올린다 (18단계 계획 core 계약 — OSC 플러드가
 //!   스냅샷 발행을 이벤트 수만큼 유발하지 않게 하는 coalescing 의 착지점).
 
+use std::collections::HashSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -292,6 +293,9 @@ pub enum SessionEvent {
         session: SessionId,
         code: Option<u32>,
     },
+    /// 시작 표식이 마감 안에 오지 않았다. 세션은 **살아 있고** `pty_session` 도 그대로
+    /// 유지된다 — 늦게 온 표식이 상태를 되돌릴 수 있어야 하기 때문이다.
+    SessionStartupTimeout { session: SessionId },
 }
 
 /// 셸 스폰 요청. cols/rows 는 기본 80×24 — 실측 resize 는 attach 후 프론트가
@@ -370,6 +374,15 @@ pub struct TabInfo {
 pub struct Dispatcher {
     state: AppState,
     host: Box<dyn SessionHost>,
+    /// 시작 표식을 이미 본 세션.
+    ///
+    /// 표식과 마감 보고는 **서로 다른 경로로** 들어온다 — 표식은 OSC 라우터의 코얼레싱
+    /// 배치를 거치고, 마감은 워치독에서 곧장 온다. 둘이 여기서 만날 때 순서는 보장되지
+    /// 않고, 표식이 먼저 도착하면 그때 탭은 아직 `Running` 이라 되돌릴 것이 없어 신호가
+    /// 그대로 소모된다. 뒤늦게 도착한 마감이 그 탭을 `NotStarted` 로 떨어뜨리면 표식은
+    /// 세션당 한 번뿐이라 회복 수단이 남지 않는다. 그래서 "봤다"는 사실을 상태와 별개로
+    /// 기억한다. persist 대상이 아니다 — 세션 id 는 휘발성이다.
+    started_sessions: HashSet<SessionId>,
 }
 
 impl Dispatcher {
@@ -377,6 +390,7 @@ impl Dispatcher {
         Self {
             state: AppState::new(),
             host,
+            started_sessions: HashSet::new(),
         }
     }
 
@@ -391,7 +405,11 @@ impl Dispatcher {
         for ws in &state.workspaces {
             ws.debug_assert_invariants();
         }
-        Self { state, host }
+        Self {
+            state,
+            host,
+            started_sessions: HashSet::new(),
+        }
     }
 
     /// 테스트·글루용 상태 접근자.
@@ -420,6 +438,7 @@ impl Dispatcher {
     pub fn apply_event(&mut self, ev: SessionEvent) {
         match ev {
             SessionEvent::SessionExited { session, code } => {
+                self.started_sessions.remove(&session);
                 let mut changed = false;
                 for ws in &mut self.state.workspaces {
                     let mut exited = Vec::new();
@@ -454,6 +473,39 @@ impl Dispatcher {
                     self.state.revision += 1;
                 }
             }
+            SessionEvent::SessionStartupTimeout { session } => {
+                // 표식이 이미 왔으면 이 보고는 낡은 것이다 (필드 주석 참조).
+                if self.started_sessions.contains(&session) {
+                    return;
+                }
+                let mut changed = false;
+                for ws in &mut self.state.workspaces {
+                    for pane in ws.panes.values_mut() {
+                        for tab in &mut pane.tabs {
+                            if let TabKind::Terminal {
+                                pty_session: Some(s),
+                                status,
+                                ..
+                            } = &mut tab.kind
+                            {
+                                // Running 만 강등한다. 마감 직전에 종료한 세션의
+                                // Exited 를 덮으면 이미 끝난 탭이 "시작 안 됨"으로
+                                // 되살아나고, 그 오분류는 워치독과 waiter 의 경합
+                                // 순서에 따라 재현조차 안 된다.
+                                if *s == session && *status == TerminalStatus::Running {
+                                    *status = TerminalStatus::NotStarted;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                // agent_status 출처는 건드리지 않는다 — 세션이 살아 있고 표식이 늦게
+                // 오면 되돌아가므로, 죽은 탭 정리(SessionExited)와 규칙이 다르다.
+                if changed {
+                    self.state.revision += 1;
+                }
+            }
         }
     }
 
@@ -470,6 +522,9 @@ impl Dispatcher {
     pub fn apply_osc(&mut self, batch: OscBatch, now_ms: u64) -> bool {
         let mut changed = false;
         for (session, delta) in &batch.entries {
+            if delta.started {
+                self.started_sessions.insert(*session);
+            }
             let Some((wi, pane, ti)) = self.locate_session(*session) else {
                 continue;
             };
@@ -515,6 +570,17 @@ impl Dispatcher {
         }
 
         let mut changed = false;
+        // 늦게 도착한 표식이 경고를 거두는 경로다. 감지가 세션을 죽이지 않기 때문에
+        // 존재할 수 있는 전이이며, 느린 콜드 스타트를 오탐해도 대가가 없는 근거이기도
+        // 하다.
+        if delta.started {
+            if let TabKind::Terminal { status, .. } = &mut tab.kind {
+                if *status == TerminalStatus::NotStarted {
+                    *status = TerminalStatus::Running;
+                    changed = true;
+                }
+            }
+        }
         if let Some(title) = &delta.title {
             if tab.title != *title {
                 tab.title.clone_from(title);
@@ -762,6 +828,7 @@ impl Dispatcher {
                         match status {
                             TerminalStatus::Running => "running",
                             TerminalStatus::Exited { .. } => "exited",
+                            TerminalStatus::NotStarted => "not-started",
                         },
                     ),
                     // 뷰어 탭에는 프로세스가 없다 — 세 번째 상태로 구분한다.
@@ -787,11 +854,13 @@ impl Dispatcher {
     /// adopt 된 상태의 터미널 탭 하나에 새 셸을 재스폰한다 — manage-first 부팅의
     /// 탭별 단계 (글루가 회당 lock 으로 호출, 계획 0장).
     ///
-    /// - 대상은 **Running 터미널 탭이면서 `pty_session` 이 None** 인 탭뿐이다.
-    ///   그 외(미지 id·Exited·이미 세션 있음)는 [`CommandError::UnknownTarget`] —
-    ///   글루가 [`Self::running_terminal_tabs`] 스냅샷에서 대상을 뽑으므로 부적합
-    ///   호출은 프로그램 결함이고, 조용한 no-op 으로 가리지 않는다 (이 경우
-    ///   상태·revision 불변).
+    /// - 대상은 두 가지다. **(a) Running 터미널 탭이면서 `pty_session` 이 None** 인
+    ///   탭(부팅 복원 경로 — 글루가 [`Self::running_terminal_tabs`] 스냅샷에서 뽑는다),
+    ///   그리고 **(b) `NotStarted` 탭**(사용자 재시도 경로). (b)는 감지가 세션을 죽이지
+    ///   않으므로 아직 살아 있는 세션을 물고 있을 수 있고, 그때는 새로 띄우기 전에
+    ///   `host.kill` 로 정리한다 — 재시작 복원 뒤라면 persist 가 `pty_session` 을 비워
+    ///   두므로 None 인 채로 온다. 그 외(미지 id·Exited·Running 인데 세션 있음)는
+    ///   [`CommandError::UnknownTarget`] 이고 상태·revision 은 불변이다.
     /// - 스폰은 cwd = 탭 cwd(없으면 워크스페이스 root_path), distro = 워크스페이스
     ///   기본값, 80×24, history_tab = 이 탭의 id — [`Command::CreateTab`] 과 같은
     ///   스폰 경로를 공유한다. 탭에 기록된 cwd 는 바꾸지 않는다 (생성 시점 값
@@ -803,14 +872,24 @@ impl Dispatcher {
     pub fn respawn_tab(&mut self, tab: TabId) -> Result<SessionId, CommandError> {
         let (wi, pane, ti) = self.locate_tab(tab)?;
         // 적격성 검사 — 통과 못 하면 상태·revision 불변으로 에러.
-        let tab_cwd = match &self.state.workspaces[wi].panes[&pane].tabs[ti].kind {
+        let (tab_cwd, stale) = match &self.state.workspaces[wi].panes[&pane].tabs[ti].kind {
             TabKind::Terminal {
                 pty_session: None,
                 status: TerminalStatus::Running,
                 cwd,
-            } => cwd.clone(),
+            } => (cwd.clone(), None),
+            TabKind::Terminal {
+                pty_session,
+                status: TerminalStatus::NotStarted,
+                cwd,
+            } => (cwd.clone(), *pty_session),
             _ => return Err(unknown("respawnable tab", tab.0)),
         };
+        // 새 셸을 띄우기 전에 정리한다 — 남겨 두면 이 탭이 놓아 버린 세션이 되고,
+        // 실기 사고에서 몇 시간을 살아남은 좀비가 정확히 그런 것이었다.
+        if let Some(old) = stale {
+            self.host.kill(old);
+        }
         // 재스폰은 탭 id 가 이미 있으므로 peek 없이 그대로 넘긴다 — 같은 탭이면
         // 재시작 전후로 같은 HISTFILE 을 다시 물게 되는 것이 이 기능의 요점이다.
         let spawned = self.spawn_terminal(wi, tab_cwd, tab.0);
@@ -829,10 +908,17 @@ impl Dispatcher {
         let result = match spawned {
             Ok((session, _effective_cwd)) => {
                 *pty_session = Some(session);
+                // NotStarted 에서 온 재시도는 여기서 정상으로 돌아온다. 부팅 복원
+                // 경로는 이미 Running 이라 이 대입이 아무것도 바꾸지 않는다.
+                *status = TerminalStatus::Running;
                 Ok(session)
             }
             Err(err) => {
-                // 스폰 실패 강등 — pty_session 은 None 그대로 (배지만 Exited).
+                // 스폰 실패 강등. NotStarted 에서 온 재시도는 위에서 옛 세션을 kill 했고
+                // host 가 레지스트리에서도 지웠으므로, 그 id 를 남기면 이후 attach 가
+                // 미지 세션으로 실패한다 — Exited 탭이 세션 id 를 유지하는 이유(replay
+                // attach)를 만족하지 못하는 id 다.
+                *pty_session = None;
                 *status = TerminalStatus::Exited { code: None };
                 Err(err)
             }
@@ -4045,5 +4131,139 @@ mod tests {
                 "status": "running",
             })
         );
+    }
+
+    /// 시작 표식 계열 테스트가 보는 것 — 상태와 세션 보유 여부.
+    fn terminal_of(d: &Dispatcher, tab: TabId) -> (TerminalStatus, Option<SessionId>) {
+        for ws in &d.state().workspaces {
+            for pane in ws.panes.values() {
+                for t in &pane.tabs {
+                    if t.id == tab {
+                        if let TabKind::Terminal {
+                            status, pty_session, ..
+                        } = &t.kind
+                        {
+                            return (*status, *pty_session);
+                        }
+                    }
+                }
+            }
+        }
+        panic!("terminal tab {tab:?} not found");
+    }
+
+    #[test]
+    fn startup_timeout_marks_the_tab_not_started_without_dropping_the_session() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (tab, session) = create_terminal_tab(&mut d, pane);
+        let rev = d.state().revision;
+
+        d.apply_event(SessionEvent::SessionStartupTimeout { session });
+
+        // 세션을 유지하는 것이 계약이다 — 늦게 온 표식이 되돌릴 수 있어야 한다.
+        assert_eq!(
+            terminal_of(&d, tab),
+            (TerminalStatus::NotStarted, Some(session))
+        );
+        assert!(d.state().revision > rev, "the transition must reach snapshots");
+    }
+
+    #[test]
+    fn startup_timeout_does_not_touch_an_exited_tab() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (tab, session) = create_terminal_tab(&mut d, pane);
+        d.apply_event(SessionEvent::SessionExited {
+            session,
+            code: Some(0),
+        });
+        let rev = d.state().revision;
+
+        // 마감이 종료 직후에 지나가는 경합 — 끝난 탭이 "시작 안 됨"으로 되살아나면
+        // 그 오분류는 워치독과 waiter 의 순서에 달려 재현조차 되지 않는다.
+        d.apply_event(SessionEvent::SessionStartupTimeout { session });
+
+        assert_eq!(
+            terminal_of(&d, tab).0,
+            TerminalStatus::Exited { code: Some(0) }
+        );
+        assert_eq!(d.state().revision, rev, "a no-op must not bump the revision");
+    }
+
+    #[test]
+    fn a_late_startup_marker_clears_not_started() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (tab, session) = create_terminal_tab(&mut d, pane);
+        d.apply_event(SessionEvent::SessionStartupTimeout { session });
+
+        let mut batch = OscBatch::default();
+        batch.merge(session, &OscEvent::Osc777Started);
+        assert!(d.apply_osc(batch, 1), "the marker must change state");
+
+        assert_eq!(terminal_of(&d, tab).0, TerminalStatus::Running);
+    }
+
+    #[test]
+    fn retrying_a_not_started_tab_kills_the_session_it_still_holds() {
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (tab, session) = create_terminal_tab(&mut d, pane);
+        d.apply_event(SessionEvent::SessionStartupTimeout { session });
+
+        let new_session = d
+            .respawn_tab(tab)
+            .expect("a not-started tab must be respawnable");
+
+        assert_ne!(new_session, session);
+        assert_eq!(
+            host.kills(),
+            vec![session],
+            "the session the tab still held must be cleaned up"
+        );
+        assert_eq!(
+            terminal_of(&d, tab),
+            (TerminalStatus::Running, Some(new_session))
+        );
+    }
+
+    #[test]
+    fn a_marker_that_arrives_before_the_timeout_report_still_wins() {
+        let (mut d, _host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (tab, session) = create_terminal_tab(&mut d, pane);
+
+        // 표식이 먼저 도착한다 — 이때 탭은 아직 Running 이라 되돌릴 것이 없고, 상태만
+        // 보는 구현에서는 이 신호가 그대로 소모된다.
+        let mut batch = OscBatch::default();
+        batch.merge(session, &OscEvent::Osc777Started);
+        d.apply_osc(batch, 1);
+
+        // 뒤늦게 마감 보고가 들어온다. 두 신호는 서로 다른 경로(라우터 배치 / 워치독
+        // 직행)로 오므로 이 순서가 실제로 발생하며, 여기서 NotStarted 가 되면 표식은
+        // 세션당 한 번뿐이라 회복 수단이 남지 않는다.
+        d.apply_event(SessionEvent::SessionStartupTimeout { session });
+
+        assert_eq!(terminal_of(&d, tab).0, TerminalStatus::Running);
+    }
+
+    #[test]
+    fn a_failed_retry_does_not_keep_the_removed_session_id() {
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws(&mut d, "ws");
+        let (tab, session) = create_terminal_tab(&mut d, pane);
+        d.apply_event(SessionEvent::SessionStartupTimeout { session });
+        host.set_fail_spawn(true);
+
+        assert!(d.respawn_tab(tab).is_err());
+
+        // 옛 세션은 kill 되어 레지스트리에서 사라졌다 — 그 id 를 탭에 남기면 이후
+        // attach 가 미지 세션으로 실패한다.
+        assert_eq!(
+            terminal_of(&d, tab),
+            (TerminalStatus::Exited { code: None }, None)
+        );
+        assert_eq!(host.kills(), vec![session]);
     }
 }

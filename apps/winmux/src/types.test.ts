@@ -52,6 +52,8 @@ function tabKindLabel(kind: TabKind): string {
           return `terminal:running:${String(kind.ptySession)}`;
         case "exited":
           return `terminal:exited:${String(status.code)}`;
+        case "notStarted":
+          return "terminal:notStarted";
         default:
           return assertNever(status);
       }

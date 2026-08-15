@@ -191,6 +191,14 @@ describe("hasRunningTerminals", () => {
     if (exited.kind.type === "terminal") exited.kind.status = { type: "exited", code: 0 };
     expect(hasRunningTerminals(ws(3, { panes: { "1": pane(1, [exited]) } }))).toBe(false);
   });
+
+  it("counts notStarted — its process is alive and closing kills it", () => {
+    // 닫기 경로는 status 와 무관하게 pty_session 이 있는 터미널을 전부 죽인다.
+    // 여기서 빠지면 살아 있는 셸이 확인 없이 사라진다.
+    const notStarted = terminalTab(13);
+    if (notStarted.kind.type === "terminal") notStarted.kind.status = { type: "notStarted" };
+    expect(hasRunningTerminals(ws(4, { panes: { "1": pane(1, [notStarted]) } }))).toBe(true);
+  });
 });
 
 describe("reconcilePlan", () => {

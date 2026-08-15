@@ -132,6 +132,25 @@ Anything not listed goes straight to the PTY.
 The full list, including viewer-local keys, is in
 [`apps/winmux/src/keys.ts`](./apps/winmux/src/keys.ts).
 
+## Troubleshooting
+
+**A tab opens but stays empty, or running sessions stop responding.** This is usually WSL under
+memory pressure rather than winmux. When the VM cannot find contiguous memory it fails to open
+the channel a new terminal needs, and processes already running start thrashing. A tab whose
+shell never came up says so and offers Retry; sessions that were already running have to be
+started again.
+
+WSL2 defaults to half the host RAM with a swap file a quarter that size, which a container build
+or a large compile can exhaust. Raising swap in `%UserProfile%\.wslconfig` usually settles it:
+
+```ini
+[wsl2]
+swap=8GB
+autoMemoryReclaim=gradual
+```
+
+`wsl --shutdown` applies it — that ends every WSL session, so do it between tasks.
+
 ## Status
 
 Early, one maintainer, but I use it daily.

@@ -44,6 +44,7 @@
 // 둘 중 하나를 shown 으로 삼는다 — **shownTab = 표시 중인 탭**(터미널이든 뷰어든)
 // 이고, placeholder 는 둘 다 없을 때만 뜬다 (동시 표시 금지).
 
+import { respawnTab } from "./backend";
 import { shortcutLabel } from "./keys";
 import type { ShortcutId } from "./keys";
 import { paneUnread, sameTabButton, tabStripModel, tabStripPlan } from "./tab-strip-model";
@@ -114,6 +115,7 @@ interface TabNodes {
   title: HTMLSpanElement;
   dot: HTMLSpanElement;
   exited: HTMLSpanElement;
+  notStarted: HTMLSpanElement;
   model: TabButtonModel;
 }
 
@@ -174,6 +176,11 @@ export class PaneView {
   private readonly tabStripEl: HTMLDivElement;
   private readonly unreadEl: HTMLSpanElement;
   private readonly placeholderEl: HTMLDivElement;
+  private readonly notStartedEl: HTMLDivElement;
+  /** 배너 Retry 의 대상 — update 마다 갱신한다. 클로저에 굳히면 탭이 바뀐 뒤에도
+   *  옛 탭을 재시도한다. */
+  private notStartedTab: TabId | null = null;
+  private retryInFlight = false;
   private readonly resizeObserver: ResizeObserver;
   private isActive = false;
   private shown: TabId | null = null;
@@ -197,7 +204,8 @@ export class PaneView {
     this.contentEl.className = "pane-content";
     this.placeholderEl = document.createElement("div");
     this.placeholderEl.className = "pane-placeholder";
-    this.contentEl.append(this.placeholderEl);
+    this.notStartedEl = this.buildNotStartedBanner();
+    this.contentEl.append(this.placeholderEl, this.notStartedEl);
 
     this.tabStripEl = document.createElement("div");
     this.tabStripEl.className = "pane-tabs";
@@ -248,6 +256,55 @@ export class PaneView {
    *  "대상에 터미널이 없다" 에러로 떨어진다 (resolveSend). */
   get shownTab(): TabId | null {
     return this.shown;
+  }
+
+  /** 시작 표식이 오지 않은 탭에 붙는 배너.
+   *
+   *  탭 배지만으로는 부족해서 둔다 — 실기 사고에서 가장 곤란했던 것은 빈 화면 앞에서
+   *  "앱 문제인지 WSL 문제인지 모르겠다"였고, 화면 한가운데의 이 문장이 그 답이다.
+   *  세션을 죽이지 않으므로 늦게 표식이 오면 상태가 running 으로 돌아오고 배너도
+   *  저절로 걷힌다. */
+  private buildNotStartedBanner(): HTMLDivElement {
+    const el = document.createElement("div");
+    el.className = "pane-not-started";
+    el.hidden = true;
+
+    const text = document.createElement("span");
+    // "세션은 아직 살아 있다"는 문구를 넣지 않는다 — 재시작 복원 뒤에는 persist 가
+    // pty_session 을 비운 NotStarted 탭이 남아 그 말이 거짓이 된다.
+    text.textContent = "The shell has not started. WSL may be slow or unresponsive.";
+
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "pane-not-started-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => {
+      const tab = this.notStartedTab;
+      if (tab === null || this.retryInFlight) return;
+      this.retryInFlight = true;
+      retry.disabled = true;
+      void respawnTab(tab)
+        .catch((err: unknown) => {
+          // 실패해도 백엔드가 탭을 강등해 publish 하므로 화면은 갱신된다.
+          console.error("respawn_tab failed", err);
+        })
+        .finally(() => {
+          this.retryInFlight = false;
+          retry.disabled = false;
+        });
+    });
+
+    el.append(text, retry);
+    return el;
+  }
+
+  /** 활성 탭 상태에 따라 배너를 켜고 Retry 대상을 갱신한다. */
+  private syncNotStartedBanner(pane: Pane): void {
+    const tab = pane.tabs.find((t) => t.id === pane.activeTab) ?? null;
+    const notStarted =
+      tab !== null && tab.kind.type === "terminal" && tab.kind.status.type === "notStarted";
+    this.notStartedTab = notStarted && tab !== null ? tab.id : null;
+    this.notStartedEl.hidden = !notStarted;
   }
 
   private buildHeader(): HTMLElement {
@@ -390,6 +447,8 @@ export class PaneView {
       this.views.get(tab.id)?.setVisible(tab.id === this.shown);
     }
 
+    this.syncNotStartedBanner(pane);
+
     if (this.shown === null) {
       const tab = pane.tabs.find((t) => t.id === pane.activeTab) ?? null;
       this.placeholderEl.textContent = placeholderText(tab);
@@ -455,6 +514,13 @@ export class PaneView {
     exited.className = "tab-exited";
     exited.textContent = "exited";
 
+    // 별개 배지인 이유: "끝났다"와 "시작을 못 했다"는 사용자에게 다른 상황이고,
+    // 후자는 WSL 쪽 문제를 가리키는 신호라 안내가 달라야 한다.
+    const notStarted = document.createElement("span");
+    notStarted.className = "tab-not-started";
+    notStarted.textContent = "not started";
+    notStarted.title = "The shell has not started yet — WSL may be slow or unresponsive.";
+
     const close = document.createElement("button");
     close.type = "button";
     close.className = "tab-close";
@@ -470,9 +536,9 @@ export class PaneView {
       void this.dispatch({ type: "closeTab", tab: model.tab });
     });
 
-    el.append(title, dot, exited, close);
+    el.append(title, dot, exited, notStarted, close);
 
-    const nodes: TabNodes = { root: el, title, dot, exited, model };
+    const nodes: TabNodes = { root: el, title, dot, exited, notStarted, model };
     this.applyTab(nodes, model);
 
     el.addEventListener("click", () => this.onTabClick(nodes.model));
@@ -484,11 +550,13 @@ export class PaneView {
     nodes.model = model;
     nodes.root.classList.toggle("active", model.active);
     nodes.root.classList.toggle("exited", model.exited);
+    nodes.root.classList.toggle("not-started", model.notStarted);
     nodes.root.title = model.title; // 잘린 제목의 툴팁
 
     setText(nodes.title, model.title);
     nodes.dot.hidden = !model.notification;
     nodes.exited.hidden = !model.exited;
+    nodes.notStarted.hidden = !model.notStarted;
   }
 
   /** 탭 클릭 처리. 비활성 pane 의 FocusPane 은 root 의 mousedown capture 가

@@ -74,6 +74,13 @@ impl OscEventPayload {
                 title: code.to_string(),
                 body: String::new(),
             },
+            // 시작 표식도 MVP 앱의 기능이다 — frozen 하네스는 관측만 한다.
+            OscEvent::Osc777Started => Self {
+                id,
+                kind: "777-started",
+                title: String::new(),
+                body: String::new(),
+            },
         }
     }
 }

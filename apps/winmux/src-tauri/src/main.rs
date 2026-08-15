@@ -255,6 +255,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::dispatch,
             commands::get_state,
+            commands::respawn_tab,
             commands::attach_terminal,
             commands::detach_terminal,
             commands::write_stdin,

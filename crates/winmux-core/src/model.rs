@@ -455,6 +455,20 @@ pub enum TabKind {
 pub enum TerminalStatus {
     Running,
     Exited { code: Option<u32> },
+    /// 시작 표식이 마감 안에 오지 않았다 (`SessionOptions::startup_deadline`).
+    ///
+    /// 감지 시점에는 프로세스가 **살아 있다** — 감지는 세션을 죽이지 않는다. 다만 재시작
+    /// 복원 뒤에는 persist sanitize 가 `pty_session` 을 비우므로 이 상태로 남은 탭에
+    /// 프로세스가 없을 수 있다 (그때도 재시도 경로는 열려 있다).
+    ///
+    /// `Exited` 와 나누는 이유는 사용자에게 전혀 다른 상황이기 때문이다 — "끝났다"가
+    /// 아니라 "아직 시작도 못 했다"이고, 후자는 대개 WSL 이 느리거나 응답하지 않는다는
+    /// 신호라 안내가 달라야 한다. 이 구분이 없어서 실기 사고 때 빈 탭의 원인이 앱인지
+    /// WSL 인지 알 수 없었다.
+    ///
+    /// **종착 상태가 아니다.** 감지는 세션을 죽이지 않으므로, 표식이 늦게라도 도착하면
+    /// `Running` 으로 되돌아간다 (`Dispatcher::apply_delta`).
+    NotStarted,
 }
 
 #[cfg(test)]

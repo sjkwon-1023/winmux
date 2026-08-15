@@ -46,6 +46,9 @@ pub struct OscDelta {
     pub(crate) message: Option<String>,
     /// 한 번이라도 알림이 오면 세워지고 창이 끝날 때까지 내려가지 않는다 (sticky).
     pub(crate) unread: bool,
+    /// 시작 표식이 도착했다 — sticky. 마감을 넘겨 "시작되지 않음"이 붙은 탭을 정상으로
+    /// 되돌리는 신호이며, 늦게 온 표식도 같은 경로로 흘러 경고를 거둔다.
+    pub(crate) started: bool,
 }
 
 /// flush 창 동안의 세션별 변경분 모음. 세션 id 순회 순서를 고정하려고 `BTreeMap` 을 쓴다
@@ -97,6 +100,9 @@ impl OscBatch {
             // 여기까지 온다면 배치에 슬롯조차 만들지 않는다: 코얼레싱은 상태
             // 델타 전용이고, 빈 델타를 만들면 flush 가 헛돌기 때문이다.
             OscEvent::Osc777Send { .. } | OscEvent::Osc777Query { .. } => {}
+            // 표식은 액션이 아니라 상태 델타다 — 늦게 와도 경고를 거둬야 하므로
+            // 코얼레싱 창에 담긴다. 세션당 한 번뿐이라 sticky 로 충분하다.
+            OscEvent::Osc777Started => self.slot(session).started = true,
             // 색상 질의도 상태가 아니라 **액션**이다 — 글루가 그 세션의 stdin 에
             // 즉시 응답을 쓴다 (sink.rs). 여기 슬롯은 만들지 않는다: 질의는 TUI
             // 앱이 그릴 때마다 반복해서 오므로 배치에 담으면 flush 가 헛돈다.

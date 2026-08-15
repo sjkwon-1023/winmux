@@ -8,7 +8,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-import type { Command, CommandOutput, SessionId, StateSnapshot } from "./types";
+import type { Command, CommandOutput, SessionId, StateSnapshot, TabId } from "./types";
 
 /** 터미널 출력 채널 메시지 — raw channel 은 ArrayBuffer 를 주지만, 구현 차이에
  *  대비해 Uint8Array 도 수용한다. 소비 측(frame.ts)에서 정규화한다. */
@@ -53,6 +53,12 @@ export function attachTerminal(
  *  이 쌓여 백그라운드 세션이 paused 에 고착된다. */
 export function detachTerminal(session: SessionId): Promise<void> {
   return invoke<void>("detach_terminal", { session });
+}
+
+/** 시작 표식이 오지 않은 탭에 셸을 다시 띄운다 (pane 배너의 Retry). 실패는
+ *  CommandError 로 reject 되며, 그 경우에도 백엔드가 상태를 강등해 publish 한다. */
+export function respawnTab(tab: TabId): Promise<SessionId> {
+  return invoke<SessionId>("respawn_tab", { tab });
 }
 
 /** 사용자 입력(문자열)을 PTY stdin 으로 보낸다. */

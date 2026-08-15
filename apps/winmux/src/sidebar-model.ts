@@ -71,14 +71,20 @@ function firstLine(message: string | null): string | null {
   return line.length === 0 ? null : line;
 }
 
-/** 닫기 confirm 판정 (계획 D4) — **실행 중인** 터미널 세션이 1개라도 있는가.
+/** 닫기 confirm 판정 (계획 D4) — **죽을 세션이** 1개라도 있는가.
  *  CloseWorkspace 는 그 세션들을 죽이는 파괴적 동작이라 confirm 을 거친다.
  *  exited 만 남은 워크스페이스는 죽일 세션이 없으므로 confirm 없이 닫는다
- *  (리뷰 finding — "sessions will be killed" 경고가 거짓이 되는 것 방지). */
+ *  (리뷰 finding — "sessions will be killed" 경고가 거짓이 되는 것 방지).
+ *
+ *  `notStarted` 도 센다: 그 상태의 정의가 "프로세스는 살아 있는데 시작 표식이 아직
+ *  없다"이고 닫기 경로는 status 와 무관하게 세션을 죽이므로, 빼면 살아 있는 셸이
+ *  확인 없이 사라진다. */
 export function hasRunningTerminals(ws: Workspace): boolean {
   return Object.values(ws.panes).some((pane) =>
     pane.tabs.some(
-      (tab) => tab.kind.type === "terminal" && tab.kind.status.type === "running",
+      (tab) =>
+        tab.kind.type === "terminal" &&
+        (tab.kind.status.type === "running" || tab.kind.status.type === "notStarted"),
     ),
   );
 }

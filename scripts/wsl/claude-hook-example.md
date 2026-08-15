@@ -266,7 +266,7 @@ The reply for `list-tabs`:
 | `tabs` | Every open tab **of the requester's workspace**, in pane → tab order. Viewer tabs are included: this answers "what is open", not "what can I send to". |
 | `workspaceId` / `workspaceName` | The requester's own workspace — the same value on every row, kept because it names the context the list is scoped to (the reply schema did not change with the confinement). |
 | `kind` | `terminal` \| `folderBrowser` \| `textViewer` \| `markdownViewer` |
-| `status` | `running` \| `exited` (terminals) \| `viewer` (a tab with no process). Only `running` terminals are send targets. |
+| `status` | `running` \| `exited` \| `not-started` (terminals) \| `viewer` (a tab with no process). Only `running` terminals are send targets — `not-started` means the shell has not come up yet, so the pane exists but nothing is listening. |
 | `self_tab` | The requester's own tab id, or `null` when the app cannot map the session back to a tab. That case also empties `tabs`: with no workspace to scope to, there is nothing to enumerate. |
 
 - **The file appears only when it is complete.** The app writes `<path>.partial` and renames
