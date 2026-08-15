@@ -201,10 +201,64 @@ Accepted deferrals, one line each. None of these block the MVP.
   the snake-cased spellings accepted as a fallback; no version probe — a payload we cannot
   read notifies without a hint. Contract: `scripts/wsl/claude-hook-example.md`. Verification:
   WINDOWS-BUILD §10 v0.3.5.
+- **Agent coverage beyond Claude Code and Codex — Antigravity CLI and opencode** (user
+  request 2026-08-15, not started). Both would reuse the `winmux:running` /
+  `winmux:needsInput` / `winmux:idle` tokens and `winmux-notify.sh` **unchanged**: nothing in
+  `winmux-core` (`osc.rs`, `notify.rs`) or the front-end (`chime.ts`, `main.ts`) is
+  agent-specific. The work is `provision.rs` — the single source of truth for every notify
+  script and every auto-wiring block — plus a `SETUP_VERSION` bump, a resume-command entry in
+  `host.rs::bash_argv`'s whitelist (today `claude --resume` and `codex resume` only), and a
+  matching section in `scripts/wsl/claude-hook-example.md`. What is *not* settled, per agent:
+  - **Antigravity**: only the **CLI** is in scope. The IDE's agents do not run in a winmux
+    tab, so there is no pts to emit into and no tab to attribute a toast to. The CLI's hooks
+    are near-isomorphic to Claude Code's — `hooks.json` under `.agents/` per workspace or
+    `~/.gemini/config/` globally, the same `{"matcher": …, "hooks": [{"type": "command",
+    "command": …, "timeout": …}]}` shape, payload on stdin — so the Claude half's Python
+    merge is the template rather than new machinery. The gap is the **event mapping**: the
+    documented events are `PreToolUse` / `PostToolUse` / `PreInvocation` / `PostInvocation` /
+    `Stop`, so `Stop → winmux:idle` is obvious, but there is **no `Notification` equivalent
+    to carry `winmux:needsInput`** — the one state the toast exists for. Until that is
+    answered the integration is idle-only, which is half the feature. Payload keys are
+    camelCase (`conversationId`, `transcriptPath`, `terminationReason`, `fullyIdle`); unlike
+    Codex no snake-case fallback is in evidence. Version risk: hook delivery has been in flux
+    (a field report of `Stop`/`PostToolUse` never firing on IDE 1.107.0, later addressed by
+    running hooks.json hooks ahead of the built-in termination checks), so a field check must
+    name the CLI version it passed on.
+  - **opencode**: it has **no shell-command hook at all** — extension is TypeScript/JS
+    plugins under `.opencode/plugins/` (project) or `~/.config/opencode/plugins/` (global), a
+    default-exported async function returning an event-hook object. The mapping is the better
+    of the two (`session.idle → winmux:idle`, `permission.asked → winmux:needsInput`,
+    `permission.replied → winmux:running` covers all three states where Antigravity covers
+    one), and the plugin context hands over Bun's `$` shell, so it can call
+    `~/.winmux/bin/winmux-notify.sh` verbatim — no third notify script. The blocker is **tty
+    attribution**: opencode plugins run in the server process with no controlling terminal,
+    so `winmux_emit` would always fall through to its ancestor-pts walk, and it is unverified
+    whether that server sits in the tab's ancestor chain at all — or whether one server is
+    shared across tabs, in which case a needsInput toast lands on the wrong tab or nowhere.
+    Answer that before writing any provisioning. Writing a plugin file is also a different
+    discipline from the "never rewrite an existing key" rule the Claude/Codex halves follow:
+    a plugin file we create is ours to upgrade, one that already exists is not.
 - **`isCommandError`'s variant table is hand-maintained** — the `formatCommandError`
   switch is compile-time exhaustive via `assertNever`, but the type guard above it is a
   literal list, so a new `CommandError` variant falls silently through to the raw-JSON
   path. Force the table from the type.
+- **No way to split *around* an existing split** (user request 2026-08-15, not started) —
+  with a pane already split top/bottom, nothing adds a pane spanning the full left or right
+  side; only one of the two halves can be split again. The tree already **represents** the
+  wanted shape (`Split{horizontal, first: Split{vertical, A, B}, second: Leaf{C}}`) and
+  renders, resizes and persists it — what is missing is a command that reaches it.
+  `SplitTree::split` matches a `Leaf` by `PaneId` and replaces it in place
+  (`model.rs:250-274`), and `SplitPane` is the only split command, so every surface (the two
+  header buttons, `Ctrl+Shift+D` / `Ctrl+Shift+E`) can only ever target one leaf; `ResizeSplit`
+  is the sole command addressing a `SplitId` and it only moves a ratio. ADR-0003 neither
+  decided nor deferred this — it was never raised. The smallest useful shape is a **root
+  wrap** (`SplitRoot { direction, tab }`: the whole workspace tree becomes one side of a new
+  `Split`, the new pane the other), because "the entire left/right side" is a root-level
+  request in practice and the target is then unambiguous in the UI — which a general
+  `SplitNode { node: SplitId, … }` is not, since nothing lets a user point at a subtree three
+  levels down. One contract question rides along: `split` always puts the new pane in
+  `second` (right/bottom), so a root wrap either takes the insertion side as a parameter or
+  is right/bottom-only.
 - **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
 - **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
   smaller replay cap, progressive replay, hide-until-parsed.
