@@ -541,8 +541,14 @@ fn validated_http_url(url: String) -> Result<String, String> {
     if url.len() > MAX_LEN {
         return Err(format!("URL is longer than {MAX_LEN} bytes"));
     }
-    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err("URL contains control or whitespace characters".to_owned());
+    // 제어문자·공백에 더해 `"` 와 `\` 도 거부한다. RFC 3986 상 URL 에 그대로 올 수 없는
+    // 문자이고, 브라우저 등록 템플릿 중에는 `%1` 을 순진하게 인용하는 것이 있어 인자 주입
+    // 표면이 된다 — 잃는 것 없이 닫을 수 있는 문이라 닫는다 (심층방어).
+    if url
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '"' || c == '\\')
+    {
+        return Err("URL contains control, whitespace, quote or backslash characters".to_owned());
     }
     Ok(url)
 }

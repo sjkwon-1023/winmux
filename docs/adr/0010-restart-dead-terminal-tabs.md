@@ -98,14 +98,13 @@ the app is up**: sleep/shutdown with winmux open, `wsl --shutdown`, WSL OOM, or 
   amendment below.** The asymmetry (a tab whose shell *ended* gets revived at boot, a tab whose
   shell *never started* does not) was accepted here on the argument that recovery costs one
   click either way. The field disagreed within hours.
-- Boot now pays for the revival. The setup loop respawns tab by tab, taking the dispatcher
-  lock each time, with each spawn bounded by the 5s deadline (ADR-0009) — so ten dead tabs
-  against a WSL that is itself wedged (the exact incident class here) means up to ~50s of
-  serial attempts during startup, with front-end snapshot calls contending for the lock in
-  between. Accepted: every failure demotes to `Exited { code: None }` with the banner, so the
-  app stays usable and each tab stays one click from another try. The path is not new — a
-  clean quit already left N `Running` tabs to respawn at the next boot; what changed is that
-  dead tabs now join them.
+- ~~Boot now pays for the revival, on the setup thread~~ — **the second half is superseded by
+  the amendment below; the cost is real but no longer blocks startup.** Reviving N tabs is N
+  serial spawns under the dispatcher lock, each bounded by the 5s deadline (ADR-0009), so ten
+  dead tabs against a wedged WSL is up to ~50s of attempts. Every failure demotes to
+  `Exited { code: None }` with the banner, so each tab stays one click from another try. The
+  path is not new — a clean quit already left N `Running` tabs to respawn at the next boot;
+  what changed is that dead tabs now join them.
 - The `no runtime log file` backlog item stayed decisive during diagnosis: the app recorded
   nothing about ten sessions dying, and the timeline had to be rebuilt from `state.json`,
   `HISTFILE` mtimes and the Windows event log.

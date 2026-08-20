@@ -14,8 +14,10 @@
 //!
 //! - **예열**: 재스폰 전에 distro 당 `wsl.exe --exec true` 를 한 번 돌려 VM 을 세워 둔다.
 //!   콜드 부팅 비용을 경합 없이 **한 번만** 치르게 하는 것이 요점이다.
-//! - **간격**: 탭 사이를 쉬어 relay 생성이 몰리지 않게 한다 ([`STAGGER_ENV`] 로 조절,
-//!   0 이면 종전 동작 그대로라 사고를 재현할 수 있다).
+//! - **간격**: 탭 사이를 쉬어 relay 생성이 몰리지 않게 한다 ([`STAGGER_ENV`] 로 조절).
+//!
+//! knob 을 `0` 으로 두면 **둘 다 꺼져** v0.3.9 의 버스트가 그대로 재현된다 — 검증 절차가
+//! 사고를 먼저 재현한 뒤 수정을 확인하는 순서이기 때문이다.
 //!
 //! # 왜 별도 스레드인가
 //!
@@ -26,10 +28,10 @@
 //! attach 한다.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tauri::AppHandle;
-use winmux_core::command::Dispatcher;
+use winmux_core::command::{CommandError, Dispatcher};
 
 use crate::state;
 
@@ -66,16 +68,31 @@ pub fn respawn_restored_tabs(handle: AppHandle, dispatcher: Arc<Mutex<Dispatcher
     if let Err(err) = std::thread::Builder::new()
         .name("winmux-boot-respawn".to_string())
         .spawn(move || {
-            warm_wsl(&distros);
+            // knob 0 은 **페이싱 전체를 끈다**는 뜻이다 — 예열까지 건너뛰어야 v0.3.9 의
+            // 버스트가 그대로 재현되고, 그 재현이 이 수정의 검증 절차다
+            // (WINDOWS-BUILD §10 v0.3.10 item 1). 예열만 남기면 웜 VM 을 때리게 되어
+            // 재현이 실패하고, 그러면 수정이 듣는지도 확인할 수 없다.
+            if !stagger.is_zero() {
+                warm_wsl(&distros);
+            }
             for (i, tab) in targets.iter().enumerate() {
                 if i > 0 && !stagger.is_zero() {
                     std::thread::sleep(stagger);
                 }
                 let d_guard = &mut *dispatcher.lock().unwrap();
-                if let Err(err) = d_guard.respawn_tab(*tab) {
-                    // 실패는 respawn_tab 이 이미 그 탭을 Exited{None} 으로 강등해
+                match d_guard.respawn_tab(*tab) {
+                    Ok(_) => {}
+                    // 사용자가 wave 도중 그 탭·워크스페이스를 닫았다. wave 가 별도
+                    // 스레드로 옮겨 가면서 **정상 동작이 된** 경합이라 실패로 적지
+                    // 않는다 (상태·revision 은 불변이다).
+                    Err(CommandError::UnknownTarget { .. }) => {
+                        eprintln!("[winmux] boot: tab {} closed before respawn; skipped", tab.0);
+                    }
+                    // 스폰 실패는 respawn_tab 이 이미 그 탭을 Exited{None} 으로 강등해
                     // 상태에 반영했다 — 여기서는 loud 기록만 남긴다.
-                    eprintln!("[winmux] boot: respawn failed (tab={}): {err}", tab.0);
+                    Err(err) => {
+                        eprintln!("[winmux] boot: respawn failed (tab={}): {err}", tab.0);
+                    }
                 }
                 state::publish_state(&handle, d_guard);
             }
@@ -119,6 +136,7 @@ fn stagger_from_env() -> Duration {
 #[cfg(windows)]
 fn warm_wsl(distros: &[Option<String>]) {
     use std::os::windows::process::CommandExt;
+    use std::time::Instant;
 
     // 콘솔 창 억제 — commands.rs 의 wsl.exe 호출과 같은 플래그다.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;

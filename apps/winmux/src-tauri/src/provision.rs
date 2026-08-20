@@ -855,21 +855,45 @@ case "$target" in
 esac
 
 # Interop is what makes the handoff possible at all. Failing loudly beats a silent no-op that
-# looks exactly like "the browser did not open". Only the FIRST line is the state — the file
-# goes on to list the interpreter, flags, offset and magic.
-interop=$(head -n 1 /proc/sys/fs/binfmt_misc/WSLInterop 2>/dev/null)
+# looks exactly like "the browser did not open". Two details decide this check:
+#   - only the FIRST line is the state; the file goes on to list interpreter, flags, offset, magic
+#   - the entry is `WSLInterop` on a non-systemd distro and `WSLInterop-late` once systemd is
+#     enabled (the default in current store images), so both names must be tried — probing only
+#     the first name would refuse on exactly the stock distros this helper exists for
+interop=""
+for entry in /proc/sys/fs/binfmt_misc/WSLInterop /proc/sys/fs/binfmt_misc/WSLInterop-late; do
+  if [ "$(head -n 1 "$entry" 2>/dev/null)" = "enabled" ]; then
+    interop="enabled"
+    break
+  fi
+done
 if [ "$interop" != "enabled" ]; then
   echo "winmux-open: WSL interop is disabled; cannot reach Windows" >&2
+  exit 1
+fi
+
+# `appendWindowsPath=false` in /etc/wsl.conf is a common tuning and would leave powershell.exe
+# off PATH. The interpreter is still reachable by absolute path, and a missing one is reported
+# rather than swallowed — a silent exec failure is the same no-op this script refuses to be.
+ps="$(command -v powershell.exe 2>/dev/null)"
+if [ -z "$ps" ]; then
+  ps="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+fi
+if [ ! -x "$ps" ]; then
+  echo "winmux-open: cannot find powershell.exe (Windows PATH disabled in /etc/wsl.conf?)" >&2
   exit 1
 fi
 
 # The value never goes on a Windows command line. `&` and `?` are ordinary in OAuth callback
 # URLs, and quoting them through two shells is exactly where injection bugs live. WSLENV
 # carries the variable across the boundary instead, and PowerShell reads it back.
-WINMUX_OPEN_TARGET="$target" \
-WSLENV="${WSLENV:+$WSLENV:}WINMUX_OPEN_TARGET" \
-  powershell.exe -NoLogo -NoProfile -NonInteractive \
-    -Command 'Start-Process -FilePath $env:WINMUX_OPEN_TARGET' >/dev/null 2>&1
+if ! out=$(WINMUX_OPEN_TARGET="$target" \
+  WSLENV="${WSLENV:+$WSLENV:}WINMUX_OPEN_TARGET" \
+  "$ps" -NoLogo -NoProfile -NonInteractive \
+    -Command 'Start-Process -FilePath $env:WINMUX_OPEN_TARGET' 2>&1); then
+  echo "winmux-open: handoff to Windows failed: $out" >&2
+  exit 1
+fi
 WINMUX_OPEN_EOF
 status=$?
 

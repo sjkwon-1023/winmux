@@ -210,7 +210,9 @@ export function pickWorkspaceFolder(): Promise<PickedFolder | null> {
 /** URL 을 Windows 기본 브라우저로 넘긴다 (터미널 링크 클릭 — ADR-0012).
  *  http/https 만 허용하며, 판정은 프런트와 백엔드 양쪽에서 한다 — 이 커맨드는
  *  webview 안의 어떤 코드에서도 부를 수 있으므로 프런트의 검사만으로는 계약이
- *  아니다. 거부·실패는 reject 되고 호출자가 상태 라인에 표시한다. */
+ *  아니다. 거부·실패는 reject 되며, 지금 유일한 호출자(terminal-view)는 콘솔에만
+ *  남긴다 — 클릭 한 번의 실패를 화면 앞에 세울 만큼의 사건으로 보지 않는다
+ *  (ADR-0012 consequence). */
 export function openUrl(url: string): Promise<void> {
   return invoke<void>("open_url", { url });
 }

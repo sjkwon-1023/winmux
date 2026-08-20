@@ -67,6 +67,12 @@ README's "Shells respawn in the directory they were last in" was therefore false
   runs a ten-minute build reports the new directory immediately (the prompt that follows the
   `cd`), but a directory change made *by* a running program is invisible until it returns. This
   matches what the value is for — where to reopen the shell.
+- The assignment sits in front of `exec bash -l`, so `PROMPT_COMMAND` is **exported**: nested
+  shells inside the tab inherit it and report over the same session. For a plain nested `bash`
+  that is what you want. Under `tmux` it means the tab's `cwd` follows whichever pane drew a
+  prompt last, which is noise rather than a defect — the value is still a directory that tab was
+  really in, and the alternative (unexporting it) would lose tracking for the nested case that
+  actually matters.
 - A live `cwd` reaches the `/mnt` guard on workspace creation, which rejects a Windows-mounted
   root. A shell sitting in `/mnt/c` and a "new workspace here" action will now be refused where
   it previously silently used the workspace root. The guard is deliberate and loud, so this is

@@ -1688,6 +1688,9 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
    $env:WINMUX_RESPAWN_STAGGER_MS = "0"; .\target\release\winmux-app.exe   # reproduce
    ```
 
+   `0` turns off **both** halves — the warm-up and the spacing — which is what makes it an
+   actual reproduction rather than a burst against an already-warm VM.
+
    - **Reproduce first, on a cold VM.** With eight or more tabs open, `wsl --shutdown`, quit, then
      launch with the knob at `0`. Some tabs should land on the `not started` badge — that is the
      v0.3.9 failure. Note how many.
