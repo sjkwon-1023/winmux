@@ -223,7 +223,17 @@ Accepted deferrals, one line each. None of these block the MVP.
   OSC 777 channels only, and the OSC 0/7 prompt snippet in `scripts/wsl/claude-hook-example.md`
   is manual-install advice. Field state confirms the consequence — every terminal tab in
   `state.json` carries the same `cwd` as its workspace `rootPath` regardless of where the shell
-  actually went. The fix is a provisioning line (and a `SETUP_VERSION` bump), not a code change.
+  actually went. **Fixed 2026-08-20** (v0.3.10) — but *not* the way this entry predicted. A
+  provisioning line into `~/.bashrc` needs a re-provisioning round trip to take effect, edits a
+  file we have never written to, and lands wrong against `starship` at the placement it needs
+  (measured). The emitter is injected from the spawn wrapper's env assignment list instead
+  (`host.rs`), so it applies on the next launch and touches nothing the user owns; starship
+  preserves an inherited `PROMPT_COMMAND` and runs it after its own precmd (verified in a pty).
+  OSC 7 only — never the title half of that snippet, which would overwrite agent tab titles.
+  The destination `cd` also moved out of `wsl.exe --cd` into the wrapper: `--cd <deleted path>`
+  makes the relay skip the command entirely while still exiting 0, which after this change would
+  turn a deleted directory into a tab that cannot start. See
+  [ADR-0011](docs/adr/0011-tab-cwd-tracking.md).
 - **Agent coverage beyond Claude Code and Codex — Antigravity CLI and opencode** (user
   request 2026-08-15, not started). Both would reuse the `winmux:running` /
   `winmux:needsInput` / `winmux:idle` tokens and `winmux-notify.sh` **unchanged**: nothing in

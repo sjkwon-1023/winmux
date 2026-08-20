@@ -117,6 +117,14 @@ jobs:
           npm ci
           npm run tauri build -- --target ${{ matrix.target }} --no-bundle
 
+      # 이 레포의 Rust 테스트 중 `winmux-app`(글루)의 것은 Windows 타깃에서만 컴파일된다
+      # — ubuntu 의 gates job 은 `winmux-core` 만 돌린다. 그래서 래퍼 argv 계약 테스트가
+      # 시작 표식 도입(d21d9a8) 이후 조용히 낡아 있었다. x64 레그에서만 실행한다
+      # (ARM64 는 크로스 빌드라 이 러너에서 실행 자체가 불가능하다).
+      - name: Glue tests (x64 only — ARM64 binaries cannot run here)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --workspace --target ${{ matrix.target }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: winmux-${{ matrix.target }}

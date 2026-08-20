@@ -62,10 +62,14 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
     #[cfg(windows)]
     {
         let mut args: Vec<String> = Vec::new();
-        if let Some(cwd) = &req.cwd {
-            args.push("--cd".to_string());
-            args.push(cwd.clone());
-        }
+        // **`--cd` 는 언제나 `~`** 이고 목적지 cwd 는 래퍼가 `cd` 한다. `--cd <경로>` 로
+        // 넘기면 그 경로가 사라졌을 때 relay 가 `chdir(...) failed` 만 남기고 **명령을
+        // 아예 실행하지 않는다** (실기 확인: 그때 wsl.exe 종료코드는 0이라 스폰은
+        // 성공으로 보이고 탭은 시작 표식 없이 NotStarted 로 남는다). 탭 cwd 가 살아 있는
+        // 셸을 따라가기 시작하면(ADR-0011) 지워진 디렉터리는 흔한 일이 되므로, 되돌릴 수
+        // 있는 자리인 래퍼로 cd 를 옮긴다.
+        args.push("--cd".to_string());
+        args.push("~".to_string());
         if let Some(distro) = resolve_distro(req.distro.clone()) {
             args.push("-d".to_string());
             args.push(distro);
@@ -78,7 +82,7 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
         // 그대로 실행한다 (평가 1회) — 기본 셸이 zsh/fish 인 배포판에서 스크립트가
         // 다른 문법으로 파싱되는 잠재 버그 계열도 함께 제거된다.
         args.push("--exec".to_string());
-        args.extend(bash_argv(req.history_tab));
+        args.extend(bash_argv(req.history_tab, req.cwd.as_deref()));
         SpawnSpec {
             program: "wsl.exe".to_string(),
             args,
@@ -174,7 +178,7 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
 /// 뒤집힌(아무도 응답하지 않았다) 뒤 2026-08-11 에 추가됐다. 셋 중 하나를 바꾸면
 /// 나머지 둘도 같이 바꾼다.
 #[cfg(windows)]
-fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
+fn bash_argv(history_tab: Option<u64>, cwd: Option<&str>) -> Vec<String> {
     // 이 파일이 없으면 `winmux` 를 못 찾을 뿐이고, 프로비저닝이 다음 부팅에서 다시
     // 시도한다 — 스폰 핫패스에서 존재를 확인하지 않는다 (wsl.exe 왕복 금지).
     const PATH_PREFIX: &str = "PATH=\"$HOME/.winmux/bin:$PATH\"";
@@ -186,9 +190,38 @@ fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
     // 리더까지 오지 않는다(이 함수 rustdoc). 왜 OSC 777 인지는
     // `winmux_core::osc::OscEvent::Osc777Started` rustdoc.
     const STARTED: &str = r"printf '\033]777;winmux-started\007'";
+    // OSC 7 emitter (ADR-0011). 이것이 없으면 탭 cwd 는 생성 시점 값에 얼어붙고 재시작이
+    // 그 값으로 셸을 띄운다 — 파서·라우터·저장은 이미 다 있고 내는 쪽만 없었다.
+    //
+    // 왜 사용자 `~/.bashrc` 가 아니라 여기인가: 남의 파일을 고치지 않고, 재프로비저닝
+    // 왕복 없이 다음 실행부터 먹으며, 로그인 셸이 우리 값을 덮지 않기 때문이다. starship
+    // 은 상속받은 PROMPT_COMMAND 를 `STARSHIP_PROMPT_COMMAND` 로 보존해 자기 precmd 뒤에
+    // 실행하므로 공존한다 (실기 측정).
+    //
+    // `%` 만 미리 인코딩하는 이유: 수신측(`notify::parse_file_uri`)이 `%XX` 만 디코드하고
+    // 나머지는 그대로 두므로, 경로에 든 리터럴 `%` 만 되살려 주면 왕복이 무손실이다.
+    // 공백·비ASCII 는 인코딩하지 않아도 같은 문자열로 돌아온다. 매 프롬프트마다 도는
+    // 코드라 서브셸 없는 파라미터 확장으로 끝낸다.
+    //
+    // **OSC 0(제목)은 절대 같이 내지 않는다** — 에이전트가 세운 탭 제목을 매 프롬프트마다
+    // 디렉터리 이름으로 덮어써 사이드바의 실제 용도를 지운다.
+    const OSC7: &str = r#"PROMPT_COMMAND='printf "\033]7;file://%s\007" "${PWD//%/%25}"'"#;
+    // 목적지 cwd 로의 이동. `--cd ~` 로 이미 홈에 있으므로 실패해도 셸은 홈에서 뜨고,
+    // 그 사실만 흐리게 알린다 (조용한 fallback 금지 — 사용자가 왜 딴 데 있는지 알아야
+    // 한다). 경로는 셸 문법을 깨지 못하게 작은따옴표로 인용한다.
+    let cd_clause = match cwd {
+        None => String::new(),
+        Some(path) => {
+            let quoted = single_quote(path);
+            format!(
+                "{{ cd -- {quoted} 2>/dev/null \
+                 || printf '\\033[2m[winmux] %s is gone; starting in $HOME\\033[0m\\n' {quoted}; }}; "
+            )
+        }
+    };
     let script = match history_tab {
         Some(tab) => format!(
-            "{STARTED}; {THEME_SYNC}; mkdir -p \"$HOME/.winmux/history\" \
+            "{STARTED}; {THEME_SYNC}; {cd_clause}mkdir -p \"$HOME/.winmux/history\" \
              && RESUME=\"$HOME/.winmux/resume/tab-{tab}\" && cmd= \
              && if [ -s \"$RESUME\" ]; then IFS= read -r cmd < \"$RESUME\" || true; fi \
              && case \"$cmd\" in 'claude --resume '*) \
@@ -199,13 +232,23 @@ fn bash_argv(history_tab: Option<u64>) -> Vec<String> {
              && if [ -n \"$cmd\" ]; then \
              printf '%s\\n' \"$cmd\" >> \"$HOME/.winmux/history/tab-{tab}\"; \
              printf '\\033[2m[winmux] resume previous agent: %s\\033[0m\\n' \"$cmd\"; fi \
-             && {PATH_PREFIX} COLORTERM=truecolor WINMUX=1 WINMUX_TAB={tab} \
+             && {PATH_PREFIX} COLORTERM=truecolor WINMUX=1 WINMUX_TAB={tab} {OSC7} \
              HISTFILE=\"$HOME/.winmux/history/tab-{tab}\" exec bash -l"
         ),
         // 탭 id 를 모르는 경로(히스토리 미할당)에서는 WINMUX 만 — 없는 id 를 지어내지 않는다.
-        None => format!("{STARTED}; {THEME_SYNC}; {PATH_PREFIX} COLORTERM=truecolor WINMUX=1 exec bash -l"),
+        None => format!(
+            "{STARTED}; {THEME_SYNC}; {cd_clause}{PATH_PREFIX} COLORTERM=truecolor WINMUX=1 {OSC7} exec bash -l"
+        ),
     };
     vec!["bash".to_string(), "-c".to_string(), script]
+}
+
+/// 셸 작은따옴표 인용 — 값 안의 `'` 를 `'\''` 로 끊어 붙인다. 경로가 우리 래퍼
+/// 스크립트의 문법을 깨거나 명령을 주입하지 못하게 하는 유일한 방어선이다 (탭 cwd 는
+/// 셸이 OSC 7 로 보고한 값이라 이론상 무엇이든 들어올 수 있다).
+#[cfg(windows)]
+fn single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// 시작 표식을 기다리는 기본 마감. 웜 스타트 실측이 163~194ms 라 크게 여유롭지만,
@@ -340,6 +383,11 @@ impl SessionHost for TauriHost {
 
 /// 스폰 명령 구성 테스트 — Windows 대상에서만 성립하는 argv 계약이라 그 타깃에서만
 /// 컴파일·실행된다 (unix 개발 경로는 `$SHELL -l` 무변경).
+///
+/// 단언이 통짜 문자열 비교가 아니라 조각별 계약인 이유: 종전의 통짜 비교는 **CI 가 이
+/// 크레이트의 테스트를 돌리지 않아** 시작 표식(d21d9a8)이 들어온 뒤로 조용히 낡아 있었다.
+/// 못 도는 정밀한 단언보다 무엇이 왜 필요한지 말하는 단언이 낫고, 실제로 돌리는 일은
+/// `ci.yml` 의 Windows 테스트 스텝이 맡는다.
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -354,34 +402,70 @@ mod tests {
         };
         let spec = spawn_spec(&req);
         assert_eq!(spec.program, "wsl.exe");
-        // cwd·distro 전달 방식은 그대로 (--cd / -d), 그 뒤에 셸 argv 가 붙는다.
+        // distro 는 `-d`, cwd 는 **`--cd ~` + 래퍼의 cd** 로 간다 (spawn_spec 주석).
         assert_eq!(
-            spec.args,
-            vec![
+            &spec.args[..6],
+            &[
                 "--cd".to_string(),
-                "/home/me/proj".to_string(),
+                "~".to_string(),
                 "-d".to_string(),
                 "Ubuntu".to_string(),
                 "--exec".to_string(),
                 "bash".to_string(),
-                "-c".to_string(),
-                "printf '\\033]10;#cccccc\\033\\\\\\033]11;#1e1e1e\\033\\\\'; \
-                 mkdir -p \"$HOME/.winmux/history\" \
-                 && RESUME=\"$HOME/.winmux/resume/tab-7\" && cmd= \
-                 && if [ -s \"$RESUME\" ]; then IFS= read -r cmd < \"$RESUME\" || true; fi \
-                 && case \"$cmd\" in 'claude --resume '*) \
-                 expr \"x$cmd\" : 'xclaude --resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
-                 'codex resume '*) \
-                 expr \"x$cmd\" : 'xcodex resume [A-Za-z0-9_-][A-Za-z0-9_-]*$' >/dev/null || cmd= ;; \
-                 *) cmd= ;; esac \
-                 && if [ -n \"$cmd\" ]; then \
-                 printf '%s\\n' \"$cmd\" >> \"$HOME/.winmux/history/tab-7\"; \
-                 printf '\\033[2m[winmux] resume previous agent: %s\\033[0m\\n' \"$cmd\"; fi \
-                 && PATH=\"$HOME/.winmux/bin:$PATH\" COLORTERM=truecolor WINMUX=1 WINMUX_TAB=7 \
-                 HISTFILE=\"$HOME/.winmux/history/tab-7\" exec bash -l"
-                    .to_string(),
             ]
         );
+        let script = spec.args.last().expect("script argv");
+
+        // 시작 표식은 반드시 맨 앞 — 뒤따르는 어떤 실패보다 먼저 도달을 증명해야 한다.
+        assert!(
+            script.starts_with(r"printf '\033]777;winmux-started\007'; "),
+            "{script}"
+        );
+        // 목적지 cwd 는 인용된 채로 래퍼 안에서 cd 되고, 실패해도 셸은 뜬다.
+        assert!(script.contains(r"{ cd -- '/home/me/proj' 2>/dev/null"), "{script}");
+        assert!(script.contains("is gone; starting in $HOME"), "{script}");
+        // OSC 7 emitter (ADR-0011) — 이게 빠지면 탭 cwd 가 다시 얼어붙는다.
+        assert!(
+            script.contains(r#"PROMPT_COMMAND='printf "\033]7;file://%s\007" "${PWD//%/%25}"'"#),
+            "{script}"
+        );
+        // 제목(OSC 0)은 절대 같이 내지 않는다 — 에이전트가 세운 탭 제목을 덮는다.
+        assert!(!script.contains(r"\033]0;"), "{script}");
+        // 탭별 HISTFILE·resume 힌트·PATH 는 종전 계약 그대로.
+        assert!(
+            script.contains(r#"HISTFILE="$HOME/.winmux/history/tab-7" exec bash -l"#),
+            "{script}"
+        );
+        assert!(
+            script.contains(r#"RESUME="$HOME/.winmux/resume/tab-7""#),
+            "{script}"
+        );
+        assert!(script.contains(r#"PATH="$HOME/.winmux/bin:$PATH""#), "{script}");
+        assert!(script.contains("WINMUX_TAB=7"), "{script}");
+    }
+
+    /// 셸 인용 — 경로가 래퍼 문법을 깨거나 명령을 주입하지 못한다. 탭 cwd 는 셸이
+    /// OSC 7 로 보고한 값이라 이론상 무엇이든 들어올 수 있다.
+    #[test]
+    fn tab_cwd_is_single_quoted_into_the_wrapper() {
+        let req = ShellSpawnReq {
+            cwd: Some("/home/me/it's here; rm -rf /".to_string()),
+            ..ShellSpawnReq::default()
+        };
+        let spec = spawn_spec(&req);
+        let script = spec.args.last().expect("script argv");
+        assert!(
+            script.contains(r"cd -- '/home/me/it'\''s here; rm -rf /' 2>/dev/null"),
+            "{script}"
+        );
+    }
+
+    /// cwd 가 없으면 cd 절 자체가 없다 — `--cd ~` 가 이미 홈에 세워 둔다.
+    #[test]
+    fn without_cwd_there_is_no_cd_clause() {
+        let spec = spawn_spec(&ShellSpawnReq::default());
+        let script = spec.args.last().expect("script argv");
+        assert!(!script.contains("cd --"), "{script}");
     }
 
     #[test]
@@ -391,23 +475,15 @@ mod tests {
         // PATH 프리펜드는 두 경로에 다 걸린다 — winmux CLI 는 탭 id 와 무관하다.
         // resume 힌트도 없다 — 힌트 파일은 탭 id 로 주소가 정해지므로 id 가 없으면
         // 읽을 파일 자체가 없다 (없는 id 를 지어내지 않는 규율의 연장).
-        // 앞부분은 검사하지 않는다 — env WINMUX_DISTRO 가 `-d` 를 덧붙일 수 있다.
+        let script = spec.args.last().expect("script argv");
+        assert!(script.contains("COLORTERM=truecolor WINMUX=1 "), "{script}");
+        assert!(!script.contains("WINMUX_TAB"), "{script}");
+        assert!(!script.contains("HISTFILE"), "{script}");
+        assert!(!script.contains("RESUME"), "{script}");
+        // OSC 7 은 탭 id 와 무관하게 두 경로 다 낸다 — cwd 추적은 history 와 별개다.
         assert!(
-            spec.args.ends_with(&[
-                "--exec".to_string(),
-                "bash".to_string(),
-                "-c".to_string(),
-                "printf '\\033]10;#cccccc\\033\\\\\\033]11;#1e1e1e\\033\\\\'; \
-                 PATH=\"$HOME/.winmux/bin:$PATH\" COLORTERM=truecolor WINMUX=1 exec bash -l"
-                    .to_string(),
-            ]),
-            "{:?}",
-            spec.args
-        );
-        assert!(
-            !spec.args.iter().any(|a| a.contains("resume")),
-            "{:?}",
-            spec.args
+            script.contains(r#"PROMPT_COMMAND='printf "\033]7;file://%s\007" "${PWD//%/%25}"'"#),
+            "{script}"
         );
     }
 }

@@ -32,8 +32,9 @@ ConPTY → `wsl.exe` → a login shell. There is no PowerShell or CMD profile.
 - **Pane-to-pane text passing** — send text to another pane, optionally running it on arrival.
 - **Viewer tabs** — folder browser, text viewer, and markdown viewer reading over
   `\\wsl.localhost`. Large files page in 512KiB windows.
-- **Layout persistence** — workspaces, splits, and tabs come back; processes don't. Shells
-  respawn in the directory they were last in.
+- **Layout persistence** — workspaces, splits, and tabs come back, each shell respawned in the
+  directory it was last in, and a tab that was running an agent comes back with its resume
+  command one `Up` away. The agent process is gone; the conversation is not.
 - **Automatic UI reset** — durable state lives in Rust, so the WebView can reload to reclaim
   memory without losing a session.
 - **x64 and ARM64** — both gated in CI.

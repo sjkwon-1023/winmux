@@ -1701,6 +1701,28 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
      inside WSL: each live tab should own one `SessionLeader → Relay → bash` triple, with no
      childless relays and no `wsl.exe` beyond the live tabs.
 
+2. **A tab reopens where its shell was** ([ADR-0011](adr/0011-tab-cwd-tracking.md)) — the
+   wrapper now emits `OSC 7` from `PROMPT_COMMAND`, so the tab's stored `cwd` follows the shell.
+
+   - **The basic round trip.** In a tab, `cd` somewhere a few levels deep, quit the app, relaunch:
+     that tab must come back in that directory, not the workspace root. Do it for two tabs in
+     different directories in the same workspace — both must land correctly, which is what proves
+     the value is per tab rather than per workspace.
+   - **The prompt is the trigger, and that is fine.** `cd /tmp && sleep 30` then quit *during* the
+     sleep: the tab comes back in `/tmp` (the prompt after the `cd` already reported it). A
+     directory change made by a still-running program is not tracked — that is the documented
+     limit, not a bug.
+   - **Odd paths survive.** `mkdir -p "/tmp/wm test/100%dir" && cd "/tmp/wm test/100%dir"`, restart:
+     the tab must reopen in exactly that directory, spaces, `%` and all.
+   - **A deleted directory degrades loudly, not fatally.** `mkdir /tmp/gone && cd /tmp/gone`,
+     quit, `rmdir /tmp/gone` from another tab, relaunch: the tab must come up **in `$HOME`** with
+     one dim `[winmux] ... is gone` line — not a blank pane, not a `not started` badge.
+   - **Titles are untouched.** With an agent running in a tab, `cd` around: the tab title must stay
+     the agent's, never the directory name. If the title starts tracking directories, the OSC 0
+     half of the snippet leaked in and the sidebar's purpose is gone.
+   - **starship still owns the prompt.** The prompt must render exactly as before — same segments,
+     same git status, and `$?`-dependent segments still correct after a failing command.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

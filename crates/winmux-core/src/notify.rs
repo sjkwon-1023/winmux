@@ -315,6 +315,15 @@ mod tests {
         assert_eq!(delta.cwd.as_deref(), Some("/home/u/my dir/한"));
     }
 
+    /// 래퍼 emitter(`host.rs` 의 `OSC7`)와의 형태 계약 — 그쪽은 `%` 만 `%25` 로 바꾸고
+    /// 공백·비ASCII 는 그대로 보낸다. 그 조합이 무손실로 돌아오는 것이 매 프롬프트마다
+    /// 서브셸 없이 파라미터 확장만 쓰는 근거다 (인코딩을 늘리면 여기도 같이 늘어난다).
+    #[test]
+    fn wrapper_emitter_shape_round_trips() {
+        let delta = merged(&[OscEvent::Osc7Cwd("file:///tmp/wm test/100%25dir/한".into())]);
+        assert_eq!(delta.cwd.as_deref(), Some("/tmp/wm test/100%dir/한"));
+    }
+
     #[test]
     fn file_uri_empty_host_and_bad_escape() {
         assert_eq!(
