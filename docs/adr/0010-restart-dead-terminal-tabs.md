@@ -94,12 +94,10 @@ the app is up**: sleep/shutdown with winmux open, `wsl --shutdown`, WSL OOM, or 
   shell. Accepted: tabs are workspace furniture, and the alternative — a dead tab with no
   content and no way back — is what this ADR exists to remove.
 - An exit code no longer survives a restart. Nothing displayed it after a restart anyway.
-- `NotStarted` is deliberately **not** normalized, which leaves a real asymmetry: a tab whose
-  shell *ended* gets revived at boot, a tab whose shell *never started* does not. Accepted
-  because the recovery is one click either way — the banner path covers it. Note the argument
-  that makes `NotStarted` non-absorbing (a late marker clears it, ADR-0009) only holds **within
-  a run**; after a restore the session is gone, no marker can arrive, and the banner's "WSL may
-  be slow or unresponsive" then describes a spawn that is not running.
+- ~~`NotStarted` is deliberately **not** normalized~~ — **superseded the same day; see the
+  amendment below.** The asymmetry (a tab whose shell *ended* gets revived at boot, a tab whose
+  shell *never started* does not) was accepted here on the argument that recovery costs one
+  click either way. The field disagreed within hours.
 - Boot now pays for the revival. The setup loop respawns tab by tab, taking the dispatcher
   lock each time, with each spawn bounded by the 5s deadline (ADR-0009) — so ten dead tabs
   against a WSL that is itself wedged (the exact incident class here) means up to ~50s of
@@ -111,3 +109,30 @@ the app is up**: sleep/shutdown with winmux open, `wsl --shutdown`, WSL OOM, or 
 - The `no runtime log file` backlog item stayed decisive during diagnosis: the app recorded
   nothing about ten sessions dying, and the timeline had to be rebuilt from `state.json`,
   `HISTFILE` mtimes and the Windows event log.
+
+## Amendment — 2026-08-20, same day (field evidence)
+
+v0.3.9 shipped the decisions above, and the first boot that used them got two things wrong.
+
+**Eleven tabs revived at once and six of their shells never started.** Process forensics on the
+reporter's machine: live `bash -l` processes matched the five tabs marked `Running` exactly, the
+six `NotStarted` tabs had no shell at all, and — unlike the 2026-08-15 incident — there were no
+childless `/init` relays, just five healthy `SessionLeader → Relay → bash` triples. On the
+Windows side thirteen `wsl.exe` processes carried start times inside the same one-second window.
+WSL lost a race with its own cold VM boot; nothing killed anything, and `NotStarted` reported it
+correctly.
+
+So the boot cost the consequences above accepted is not only latency — at that density it is a
+failure mode. `boot::respawn_restored_tabs` now warms each distro once (`wsl.exe --exec true`,
+bounded by a 30s deadline) and paces the respawns (`WINMUX_RESPAWN_STAGGER_MS`, default 250ms).
+Both run off the setup thread, so the window still opens immediately and tabs fill in behind it;
+setting the knob to `0` restores the old burst, which is how the failure is reproduced.
+
+**`NotStarted` is normalized on restore as well**, reversing the third consequence above. The
+asymmetry was argued as costing one click; the field turned it into six, in exactly the scenario
+this ADR creates. The reasoning that justified keeping it was also its weaker half — after a
+restore a `NotStarted` tab has no session, so no late marker can ever arrive to clear it. Restore
+now maps every shell-less terminal status to `Running`, which makes a restart the automatic retry
+for a spawn wave that partly failed, while the banner stays the manual one within a run.
+
+Verification: WINDOWS-BUILD §10 v0.3.10 item 1.

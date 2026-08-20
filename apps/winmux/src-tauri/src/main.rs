@@ -4,8 +4,9 @@
 //! # 부팅 순서 (계획 15단계 B-2 · 0장 manage-first)
 //!
 //! load(state.json) → Restored 면 `Dispatcher::adopt`(스폰 없음) / Fresh 면 빈
-//! dispatcher → **manage** → Fresh dogfood dispatch → 탭별 respawn 루프(회당
-//! lock·publish) → 초기 `saver.schedule`. **모든 스폰이 manage 뒤다** — 스폰이
+//! dispatcher → **manage** → Fresh dogfood dispatch → 초기 `saver.schedule` → 탭별
+//! respawn(회당 lock·publish, `boot` 모듈이 **별도 스레드**에서 예열 뒤 간격을 두고
+//! 돈다). **모든 스폰이 manage 뒤다** — 스폰이
 //! 먼저면 그 창에서 즉사한 셸의 on_exit 이 관리 상태를 못 찾아 소실된다
 //! (restore·Fresh 공통의 manage-first 불변식, 14~15 리뷰 finding). respawn 전 스냅샷의 pty_session
 //! null 인 Running 탭은 무해하다 — view-reconcile 은 세션 없는 탭을 attach 하지
@@ -17,6 +18,7 @@
 // Windows 셸 앱 신원(AUMID) 등록 — 토스트 발신자 등록용이라 Windows 전용이다.
 #[cfg(windows)]
 mod app_identity;
+mod boot;
 mod commands;
 mod host;
 mod provision;
@@ -162,23 +164,17 @@ fn main() {
                 state::publish_state(&handle, d_guard);
             }
 
+            // sanitize·수리 결과를 즉시 디스크에 반영한다 (계획 0장 초기 저장) — 이
+            // 시점 상태가 다음 크래시 복원의 기준선이 된다. Fresh 부팅의 초기
+            // 워크스페이스도 이 한 번으로 저장된다. **재스폰보다 먼저** 한다: 재스폰은
+            // 이제 별도 스레드에서 천천히 돌고(`boot`), 그 결과는 회당 publish 가
+            // 알아서 저장한다.
+            saver.schedule(dispatcher.lock().unwrap().state().clone());
+
             // 탭별 재스폰 — 회당 lock 취득·해제 + publish (계획 0장: lock 사이에
             // 도착하는 on_exit/dispatch 가 끼어들 수 있어 이벤트 소실 창이 없다).
-            let respawn_targets = dispatcher.lock().unwrap().running_terminal_tabs();
-            for tab in respawn_targets {
-                let d_guard = &mut *dispatcher.lock().unwrap();
-                if let Err(err) = d_guard.respawn_tab(tab) {
-                    // 실패는 respawn_tab 이 이미 그 탭을 Exited{None} 으로 강등해
-                    // 상태에 반영했다 — 여기서는 loud 기록만 남긴다.
-                    eprintln!("[winmux] boot: respawn failed (tab={}): {err}", tab.0);
-                }
-                state::publish_state(&handle, d_guard);
-            }
-
-            // sanitize·수리·강등 결과를 즉시 디스크에 반영한다 (계획 0장 초기
-            // 저장) — 이 시점 상태가 다음 크래시 복원의 기준선이 된다. Fresh
-            // 부팅의 초기 워크스페이스도 이 한 번으로 저장된다.
-            saver.schedule(dispatcher.lock().unwrap().state().clone());
+            // WSL 예열과 탭 간 간격은 `boot` 모듈 doc 참조 (실기 사고 2026-08-20).
+            boot::respawn_restored_tabs(handle.clone(), Arc::clone(&dispatcher));
 
             // 에이전트 알림 훅 프로비저닝 (fire-and-forget) — 부팅 경로를 붙잡지
             // 않도록 setup 의 맨 끝에서, 상태에 있는 distro 들 + 기본 distro 를

@@ -297,7 +297,12 @@ Accepted deferrals, one line each. None of these block the MVP.
   covers `exited` with a **Restart** button. Revival keeps the tab id, so `HISTFILE` and the
   per-tab resume hint come back with it — `↑` gives `claude --resume <id>`. Decisions and the
   rejected alternatives: [ADR-0010](docs/adr/0010-restart-dead-terminal-tabs.md). Verification:
-  WINDOWS-BUILD §10 v0.3.9 item 4. **Still open alongside it**: the tab `cwd` gap above means a
+  WINDOWS-BUILD §10 v0.3.9 item 4. **Follow-up the same day** (v0.3.10): the first boot that used
+  it revived 11 tabs at once and 6 shells never started — 13 `wsl.exe` inside one second lost the
+  race with a cold VM (no zombie relays; live `bash -l` matched the 5 `running` tabs exactly). Boot
+  now warms each distro once and paces respawns (`boot.rs`, `WINMUX_RESPAWN_STAGGER_MS`), off the
+  setup thread, and `NotStarted` is normalized on restore too so a restart retries a partly failed
+  wave. See the ADR-0010 amendment. **Still open alongside it**: the tab `cwd` gap above means a
   revived tab reopens at the workspace root rather than where the shell had moved to.
 - **Sessions do not survive a severed relay, and that is a deliberate limit** (considered
   2026-08-15, not planned). Putting a detach layer (`dtach`, ~50KB installed and <1MB per

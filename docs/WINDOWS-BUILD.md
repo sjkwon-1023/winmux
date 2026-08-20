@@ -1678,6 +1678,29 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
      failed retry. Then quit, relaunch **without** the knob: the tab must come back with a
      live shell on its own. Before v0.3.9 that tab was dead for good on both counts.
 
+### v0.3.10 — verification
+
+1. **A revived spawn wave no longer outruns WSL** ([ADR-0010](adr/0010-restart-dead-terminal-tabs.md)
+   amendment) — boot warms each distro once and paces the respawns, and a tab that still fails to
+   start is retried automatically by the next restart rather than waiting for a click.
+
+   ```powershell
+   $env:WINMUX_RESPAWN_STAGGER_MS = "0"; .\target\release\winmux-app.exe   # reproduce
+   ```
+
+   - **Reproduce first, on a cold VM.** With eight or more tabs open, `wsl --shutdown`, quit, then
+     launch with the knob at `0`. Some tabs should land on the `not started` badge — that is the
+     v0.3.9 failure. Note how many.
+   - **Then the default.** `wsl --shutdown` again, quit, relaunch with the knob unset: the tabs
+     must come up, and the window itself must appear immediately (the warm-up runs behind it, so a
+     cold VM shows tabs filling in one by one rather than a frozen window).
+   - **A failed tab heals on restart.** If any tab still lands on `not started`, quit and relaunch:
+     it must be retried automatically with no click. Confirm with `ps -ef | grep 'bash -l'` inside
+     WSL that the live shell count matches the tab count — the badge alone is not proof.
+   - **No leftovers.** After the round, `Get-Process wsl` on Windows and `ps -ef | grep /init`
+     inside WSL: each live tab should own one `SessionLeader → Relay → bash` triple, with no
+     childless relays and no `wsl.exe` beyond the live tabs.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

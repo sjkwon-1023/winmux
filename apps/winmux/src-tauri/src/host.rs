@@ -42,6 +42,17 @@ impl TauriHost {
     }
 }
 
+/// distro 선택 우선순위: 요청값 → env `WINMUX_DISTRO` → `None`(WSL 기본 배포판).
+/// 빈 문자열은 미설정으로 취급한다.
+///
+/// 스폰([`spawn_spec`])과 부팅 예열([`crate::boot`])이 **같은 값을 골라야** 한다 —
+/// 예열이 다른 distro 를 세우면 정작 스폰이 콜드 VM 을 만난다.
+pub(crate) fn resolve_distro(requested: Option<String>) -> Option<String> {
+    requested
+        .filter(|d| !d.is_empty())
+        .or_else(|| std::env::var("WINMUX_DISTRO").ok().filter(|d| !d.is_empty()))
+}
+
 /// `ShellSpawnReq` → 플랫폼별 `SpawnSpec` 매핑.
 ///
 /// **주의: `req.cwd` 는 Linux(WSL) 경로다.** Windows 에서 `SpawnSpec.cwd`(Windows
@@ -55,14 +66,7 @@ fn spawn_spec(req: &ShellSpawnReq) -> SpawnSpec {
             args.push("--cd".to_string());
             args.push(cwd.clone());
         }
-        // distro 우선순위: req.distro → env WINMUX_DISTRO → 없음(WSL 기본 배포판).
-        // 빈 문자열은 미설정으로 취급한다.
-        let distro = req
-            .distro
-            .clone()
-            .filter(|d| !d.is_empty())
-            .or_else(|| std::env::var("WINMUX_DISTRO").ok().filter(|d| !d.is_empty()));
-        if let Some(distro) = distro {
+        if let Some(distro) = resolve_distro(req.distro.clone()) {
             args.push("-d".to_string());
             args.push(distro);
         }
