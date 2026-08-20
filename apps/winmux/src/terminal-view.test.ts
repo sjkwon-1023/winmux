@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { clampFontSize } from "./terminal-view";
+import { clampFontSize, shouldOpenLink } from "./terminal-view";
 
 describe("clampFontSize", () => {
   it("범위 안의 값은 그대로 통과한다", () => {
@@ -37,5 +37,32 @@ describe("clampFontSize", () => {
   it("정수 px 로 접는다 (셀 폭 반올림이 fit 계산과 어긋나지 않게)", () => {
     expect(clampFontSize(13.4)).toBe(13);
     expect(clampFontSize(13.5)).toBe(14);
+  });
+});
+
+// 링크 클릭 정책 (ADR-0012) — 클릭 한 번이 Windows ShellExecute 로 가는 경로라
+// 판정 자체가 보안 표면이다. 백엔드도 같은 스킴 검사를 하지만(이중), 여기서 막는 것이
+// 사용자에게 보이는 계약이다.
+describe("shouldOpenLink", () => {
+  it("마우스 추적이 꺼져 있는 http/https 만 연다", () => {
+    expect(shouldOpenLink("https://example.com/a?b=1&c=2", "none")).toBe(true);
+    expect(shouldOpenLink("http://localhost:5173/", "none")).toBe(true);
+  });
+
+  it("TUI 가 마우스를 쓰는 중이면 클릭은 그 앱의 것이다", () => {
+    // vim·tmux·에이전트 TUI 안에서 클릭이 브라우저를 여는 것은 명백한 오작동이다.
+    for (const mode of ["x10", "vt200", "drag", "any"]) {
+      expect(shouldOpenLink("https://example.com", mode)).toBe(false);
+    }
+  });
+
+  it("http/https 가 아닌 것은 전부 거부한다", () => {
+    // 터미널에 텍스트를 찍을 수 있는 쪽이면 누구나 겨눌 수 있는 표면이라,
+    // 등록된 프로토콜 핸들러로 가는 길을 열어 두지 않는다.
+    expect(shouldOpenLink("file:///etc/passwd", "none")).toBe(false);
+    expect(shouldOpenLink("ms-settings:privacy", "none")).toBe(false);
+    expect(shouldOpenLink("javascript:alert(1)", "none")).toBe(false);
+    expect(shouldOpenLink("not a url", "none")).toBe(false);
+    expect(shouldOpenLink("", "none")).toBe(false);
   });
 });

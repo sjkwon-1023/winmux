@@ -1723,6 +1723,28 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
    - **starship still owns the prompt.** The prompt must render exactly as before — same segments,
      same git status, and `$?`-dependent segments still correct after a failing command.
 
+3. **Links reach the browser** ([ADR-0012](adr/0012-opening-links.md)) — clicking a URL in a tab
+   opens it in the Windows default browser, and a program inside WSL that opens a browser itself
+   (an OAuth login) now finds an opener.
+
+   - **Click.** `echo https://example.com` in a tab, then click the URL (Ctrl is not required —
+     xterm underlines it on hover). It must open in the **already-running** Chrome as a new tab,
+     not a second browser instance. Repeat with a URL carrying query parameters
+     (`https://example.com/?a=1&b=2`) and confirm the address bar shows both parameters — that is
+     the case a command-line-based opener would mangle.
+   - **Not inside a TUI.** Open an agent TUI (or `vim`) in a tab, put a URL on screen, click it:
+     nothing must happen, and the click must reach the app as a click.
+   - **Nothing but http(s).** `printf 'file:///etc/passwd\n'` and `printf 'ms-settings:privacy\n'`
+     in a tab, then click: nothing may open. If Windows Settings appears, the scheme allowlist
+     regressed.
+   - **OAuth.** In a fresh tab run a login that opens a browser (`claude` logging in, or
+     `gh auth login --web`). The browser must open on its own. If it prints "copy this URL
+     manually", check `command -v xdg-open` inside that tab — it must resolve to
+     `~/.winmux/bin/xdg-open`. (This needs provisioning v8, which runs once on first launch of
+     this build; `~/.winmux/setup.log` records it.)
+   - **The opener refuses what it should.** In a tab: `winmux-open ms-settings:privacy` must exit
+     non-zero with a refusal, and `winmux-open ~/code` must open Explorer at that folder.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

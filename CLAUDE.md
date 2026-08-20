@@ -234,6 +234,19 @@ Accepted deferrals, one line each. None of these block the MVP.
   makes the relay skip the command entirely while still exiting 0, which after this change would
   turn a deleted directory into a tab that cannot start. See
   [ADR-0011](docs/adr/0011-tab-cwd-tracking.md).
+- **Links in a terminal tab went nowhere — fixed 2026-08-20** (user report, v0.3.10). Two
+  different causes wearing one symptom. Clicking: xterm had no link machinery at all (no addon,
+  no `linkHandler`), and there was nowhere to send a URL anyway — no opener command, no plugin;
+  `window.open()` is swallowed by wry and a plain `<a href>` would navigate the app UI away.
+  OAuth auto-open: a stock WSL distro has no `xdg-open`/`wslview` and no `$BROWSER`, so Claude
+  Code's `$BROWSER ?? xdg-open` hits ENOENT and degrades to "copy this URL manually" (its
+  headless escape hatch never fires under WSL). Interop and the default-browser registration were
+  healthy the whole time. Landed: web-links addon + an `open_url` command on `ShellExecuteW`
+  (http/https only, checked on both sides, suppressed while a TUI holds mouse tracking), and a
+  provisioned `~/.winmux/bin/winmux-open` installed under the name `xdg-open` — not a `$BROWSER`
+  export, which would take Codex off the WSL path its own crate already handles. The URL never
+  touches a Windows command line on either side. See
+  [ADR-0012](docs/adr/0012-opening-links.md). Verification: WINDOWS-BUILD §10 v0.3.10 item 3.
 - **Agent coverage beyond Claude Code and Codex — Antigravity CLI and opencode** (user
   request 2026-08-15, not started). Both would reuse the `winmux:running` /
   `winmux:needsInput` / `winmux:idle` tokens and `winmux-notify.sh` **unchanged**: nothing in

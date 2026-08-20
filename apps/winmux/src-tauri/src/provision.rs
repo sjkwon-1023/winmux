@@ -32,7 +32,7 @@ use tauri::AppHandle;
 /// 설치 스크립트 버전. 마커 파일명(`~/.winmux/.setup-v<N>`)에 들어가므로, 스크립트
 /// 내용을 바꿔 기존 사용자에게도 다시 깔아야 할 때 이 값을 올리면 된다 (마커가
 /// 달라져 전원 재실행). 스크립트 본문의 `@SETUP_VERSION@` 자리에 치환된다.
-const SETUP_VERSION: u32 = 7;
+const SETUP_VERSION: u32 = 8;
 
 /// 프로세스 수명 캐시 — **해석된** distro 이름 기준으로 앱 실행당 1회만 스폰한다.
 /// 기본 distro(None)는 claim 전에 실제 이름으로 해석된다 (보안 리뷰 finding):
@@ -222,6 +222,8 @@ NOTIFY="$WINMUX_HOME/bin/winmux-notify.sh"
 CODEX_NOTIFY="$WINMUX_HOME/bin/winmux-codex-notify.sh"
 CLI="$WINMUX_HOME/bin/winmux"
 SEND="$WINMUX_HOME/bin/winmux-send.sh"
+OPEN="$WINMUX_HOME/bin/winmux-open"
+XDG_OPEN="$WINMUX_HOME/bin/xdg-open"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 CLAUDE_SKILL_DIR="$HOME/.claude/skills/winmux-send"
 CODEX_CONFIG="$HOME/.codex/config.toml"
@@ -814,6 +816,83 @@ if [ "$status" -ne 0 ] || ! chmod +x "$SEND.tmp" || ! mv -f "$SEND.tmp" "$SEND";
   exit 1
 fi
 log "send wrapper installed: $SEND"
+
+# --- 3b. winmux-open, installed under the name callers actually try ----------------------
+# Nothing in a stock WSL distro can open a Windows browser: wslu/wslview is not installed,
+# there is no xdg-open, and $BROWSER is unset. An agent that needs an OAuth login therefore
+# fails closed — Claude Code execFiles `$BROWSER ?? xdg-open`, gets ENOENT, and degrades to
+# "copy this URL manually". Interop itself is healthy and Windows already knows the default
+# browser, so the only missing piece is the Linux-side entry point.
+#
+# It is installed as `xdg-open` rather than exported through $BROWSER on purpose: BROWSER
+# would also steer Codex off the WSL path its own `webbrowser` crate already handles well.
+# ~/.winmux/bin is first on PATH for winmux shells only (host.rs), so nothing outside a
+# winmux tab is affected.
+cat > "$OPEN.tmp" <<'WINMUX_OPEN_EOF'
+#!/bin/sh
+# winmux-open — hand an http(s) URL (or an existing path) to Windows. Installed by winmux.
+set -u
+
+target="${1:-}"
+if [ -z "$target" ]; then
+  echo "winmux-open: usage: winmux-open <http(s)-url|path>" >&2
+  exit 2
+fi
+
+case "$target" in
+  http://*|https://*) ;;
+  *)
+    # Callers also use xdg-open for files and folders. Anything else is refused rather than
+    # forwarded: on the Windows side this ends at ShellExecute, which happily launches
+    # registered protocol handlers, and the caller here can be any program in the tab.
+    if [ -e "$target" ]; then
+      target=$(wslpath -w "$target") || exit 1
+    else
+      echo "winmux-open: refusing (not an http(s) URL and not an existing path): $target" >&2
+      exit 2
+    fi
+    ;;
+esac
+
+# Interop is what makes the handoff possible at all. Failing loudly beats a silent no-op that
+# looks exactly like "the browser did not open". Only the FIRST line is the state — the file
+# goes on to list the interpreter, flags, offset and magic.
+interop=$(head -n 1 /proc/sys/fs/binfmt_misc/WSLInterop 2>/dev/null)
+if [ "$interop" != "enabled" ]; then
+  echo "winmux-open: WSL interop is disabled; cannot reach Windows" >&2
+  exit 1
+fi
+
+# The value never goes on a Windows command line. `&` and `?` are ordinary in OAuth callback
+# URLs, and quoting them through two shells is exactly where injection bugs live. WSLENV
+# carries the variable across the boundary instead, and PowerShell reads it back.
+WINMUX_OPEN_TARGET="$target" \
+WSLENV="${WSLENV:+$WSLENV:}WINMUX_OPEN_TARGET" \
+  powershell.exe -NoLogo -NoProfile -NonInteractive \
+    -Command 'Start-Process -FilePath $env:WINMUX_OPEN_TARGET' >/dev/null 2>&1
+WINMUX_OPEN_EOF
+status=$?
+
+if [ "$status" -ne 0 ] || ! chmod +x "$OPEN.tmp" || ! mv -f "$OPEN.tmp" "$OPEN"; then
+  rm -f "$OPEN.tmp"
+  echo "[winmux] setup: cannot install $OPEN" >&2
+  exit 1
+fi
+log "opener installed: $OPEN"
+
+cat > "$XDG_OPEN.tmp" <<'WINMUX_XDG_EOF'
+#!/bin/sh
+# winmux installs the opener under this name because it is the one callers try first.
+exec "$HOME/.winmux/bin/winmux-open" "$@"
+WINMUX_XDG_EOF
+status=$?
+
+if [ "$status" -ne 0 ] || ! chmod +x "$XDG_OPEN.tmp" || ! mv -f "$XDG_OPEN.tmp" "$XDG_OPEN"; then
+  rm -f "$XDG_OPEN.tmp"
+  echo "[winmux] setup: cannot install $XDG_OPEN" >&2
+  exit 1
+fi
+log "xdg-open shim installed: $XDG_OPEN"
 
 # --- 4. winmux-send skill ---------------------------------------------------------------
 # The agent-facing pane-to-pane send channel. Installed as a Claude Code skill so an agent

@@ -62,4 +62,9 @@ windows = { version = "0.61", features = [
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
+    # ShellExecuteW(터미널 링크 열기 — ADR-0012)가 이 feature 아래에 산다: 함수 자체가
+    # `Win32_UI_WindowsAndMessaging` 으로 게이트돼 있다(SHOW_WINDOW_CMD 때문). 지금은
+    # wry/tao 가 같은 feature 를 켜서 우연히 컴파일되지만, 우리 코드가 쓰는 것은 우리가
+    # 명시한다 (이 파일 상단의 "직접 의존 + features 명시" 규율).
+    "Win32_UI_WindowsAndMessaging",
 ] }

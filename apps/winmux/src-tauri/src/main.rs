@@ -265,6 +265,8 @@ fn main() {
             commands::get_ui_settings,
             // 워크스페이스 폴더 선택 (Windows 네이티브 대화상자).
             commands::pick_workspace_folder,
+            // 터미널 링크 클릭 → Windows 기본 브라우저 (ADR-0012).
+            commands::open_url,
             // needsInput OS 토스트 — 지금 화면에 보이지 않는 워크스페이스의 상승
             // 전이에서만 프론트가 부른다 (판정 계약은 커맨드 rustdoc).
             commands::notify_toast,

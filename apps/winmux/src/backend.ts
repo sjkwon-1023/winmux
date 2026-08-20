@@ -207,6 +207,14 @@ export function pickWorkspaceFolder(): Promise<PickedFolder | null> {
   return invoke<PickedFolder | null>("pick_workspace_folder");
 }
 
+/** URL 을 Windows 기본 브라우저로 넘긴다 (터미널 링크 클릭 — ADR-0012).
+ *  http/https 만 허용하며, 판정은 프런트와 백엔드 양쪽에서 한다 — 이 커맨드는
+ *  webview 안의 어떤 코드에서도 부를 수 있으므로 프런트의 검사만으로는 계약이
+ *  아니다. 거부·실패는 reject 되고 호출자가 상태 라인에 표시한다. */
+export function openUrl(url: string): Promise<void> {
+  return invoke<void>("open_url", { url });
+}
+
 /** state-changed 구독 헬퍼 — 변이마다 전체 스냅샷(revision 포함)이 온다.
  *  stale 판정(revision 가드)은 store 몫이다. */
 export function onStateChanged(

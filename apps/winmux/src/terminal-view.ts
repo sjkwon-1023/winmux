@@ -50,13 +50,21 @@
 import { Terminal } from "@xterm/xterm";
 import type { IDisposable, ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Channel } from "@tauri-apps/api/core";
 import "@xterm/xterm/css/xterm.css";
 
 import { AckBatcher } from "./ack-batcher";
 import { AttachGate } from "./attach-gate";
 import type { GateResult } from "./attach-gate";
-import { ackOutput, attachTerminal, detachTerminal, resizeTerminal, writeStdin } from "./backend";
+import {
+  ackOutput,
+  attachTerminal,
+  detachTerminal,
+  openUrl,
+  resizeTerminal,
+  writeStdin,
+} from "./backend";
 import type { OutputChunk, UiSettings } from "./backend";
 import { clampFontSize } from "./font-size";
 import { parseAttachBody, parseFrame } from "./frame";
@@ -191,6 +199,28 @@ async function clipboardHasImage(): Promise<boolean> {
   }
 }
 
+/** 터미널에서 클릭된 링크를 우리가 열지 말지의 판정 — 순수 함수라 테스트가 계약을
+ *  잡는다 (ADR-0012).
+ *
+ *  두 가지를 본다.
+ *
+ *  1. **스킴**: `http`/`https` 만 연다. 클릭 한 번이 `ShellExecute` 로 가는 경로라
+ *     `file:`·`ms-settings:`·임의 프로토콜 핸들러까지 열어 주면, 터미널에 텍스트를 찍을
+ *     수 있는 아무나(에이전트가 출력한 로그, `cat` 한 파일)가 그 표면을 겨눌 수 있다.
+ *  2. **마우스 모드**: TUI 가 마우스 리포팅을 켜 두었으면 클릭은 **그 앱의 것**이다.
+ *     vim·tmux·에이전트 TUI 안에서 클릭이 브라우저를 여는 것은 명백한 오작동이라,
+ *     추적 모드가 꺼져 있을 때만 우리가 가로챈다. */
+export function shouldOpenLink(uri: string, mouseTrackingMode: string): boolean {
+  if (mouseTrackingMode !== "none") return false;
+  try {
+    const scheme = new URL(uri).protocol;
+    return scheme === "http:" || scheme === "https:";
+  } catch {
+    // URL 로 파싱되지 않으면 우리가 다룰 대상이 아니다.
+    return false;
+  }
+}
+
 export class TerminalView {
   readonly root: HTMLDivElement;
   private readonly term: Terminal;
@@ -248,6 +278,16 @@ export class TerminalView {
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
+    // 링크 클릭 → Windows 기본 브라우저 (ADR-0012). 애드온은 감지·밑줄·wrap 된 줄
+    // 이어붙이기만 맡고, 열지 말지와 어디로 보낼지는 우리가 정한다.
+    this.term.loadAddon(
+      new WebLinksAddon((_event, uri) => {
+        if (!shouldOpenLink(uri, this.term.modes.mouseTrackingMode)) return;
+        void openUrl(uri).catch((err: unknown) => {
+          console.error("open_url failed", err);
+        });
+      }),
+    );
 
     this.batcher = new AckBatcher((n) => {
       this.sendAck(n);

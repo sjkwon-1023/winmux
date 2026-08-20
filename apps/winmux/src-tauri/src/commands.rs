@@ -502,6 +502,81 @@ fn local_timestamp() -> String {
 
 /// `pick_workspace_folder` 응답 — 고른 폴더를 워크스페이스 생성 인자로 편 형태.
 /// 필드명은 글루 DTO 관례(serde 기본 snake_case, `DirEntryDto` 전례) 그대로다.
+/// 터미널에서 클릭한 URL 을 Windows 기본 브라우저로 넘긴다 (ADR-0012).
+///
+/// **스킴 검사를 프런트와 여기 양쪽에서 하는 이유**: 이 커맨드는 webview 안의 어떤
+/// 코드에서도 부를 수 있으므로 프런트의 판정은 UX 이지 계약이 아니다. `ShellExecute` 는
+/// 등록된 프로토콜 핸들러를 전부 열 수 있어서(`file:`·`ms-settings:`·서드파티 스킴),
+/// 터미널에 텍스트를 찍을 수 있는 쪽이 그 표면을 겨누지 못하게 마지막 문을 여기서 닫는다.
+///
+/// 호출은 `spawn_blocking` 에서 돈다 — `ShellExecuteW` 는 COM/셸을 거치므로 이벤트 루프
+/// 스레드에서 부를 일이 아니다. Dispatcher lock 은 타지 않는다.
+#[cfg(windows)]
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    let url = validated_http_url(url)?;
+    tauri::async_runtime::spawn_blocking(move || shell_execute(&url))
+        .await
+        .map_err(|err| format!("open_url task join failed: {err}"))?
+}
+
+/// unix(개발 실행)에는 넘길 Windows 셸이 없다 — 가짜로 성공하지 않고 명시적으로 실패한다
+/// (`pick_workspace_folder` 와 같은 규율).
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn open_url(_url: String) -> Result<(), String> {
+    Err("opening links is Windows-only".to_owned())
+}
+
+/// http/https 만 통과시킨다. 제어문자·공백은 거부한다 — URL 로 쓰일 수 없는 문자이고,
+/// 로그·파일 내용에서 잘못 잘려 나온 문자열이 여기까지 오는 것을 막는다. 길이 상한은
+/// 브라우저들이 실질적으로 다루는 범위(2048)를 기준으로 둔다.
+#[cfg(windows)]
+fn validated_http_url(url: String) -> Result<String, String> {
+    const MAX_LEN: usize = 2048;
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(format!("refusing to open a non-http(s) URL: {url}"));
+    }
+    if url.len() > MAX_LEN {
+        return Err(format!("URL is longer than {MAX_LEN} bytes"));
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("URL contains control or whitespace characters".to_owned());
+    }
+    Ok(url)
+}
+
+/// `ShellExecuteW` 로 기본 브라우저에 넘긴다. **커맨드라인을 만들지 않는 것이 요점이다**
+/// — `cmd /c start <url>` 은 `&` 가 든 URL(OAuth 콜백에 흔하다)에서 인용 지옥이 되고,
+/// 그 실수의 대가가 임의 명령 실행이다.
+#[cfg(windows)]
+fn shell_execute(url: &str) -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let verb = HSTRING::from("open");
+    let file = HSTRING::from(url);
+    // 반환값은 레거시 HINSTANCE 규약이다: **32 초과만 성공**이고 그 이하는 오류 코드다.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as usize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecute refused to open the URL (code {code})"))
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct PickedFolder {
     /// 워크스페이스 `rootPath` 로 그대로 쓰는 리눅스 절대 경로.
