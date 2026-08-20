@@ -466,3 +466,54 @@ describe("PaneView header buttons", () => {
     expect(topBottom.querySelector("path")?.getAttribute("d")).toContain("h10.5");
   });
 });
+
+// 셸 없는 탭의 재시작 배너 (ADR-0010) — notStarted 와 exited 가 같은 배너를 쓰되
+// 문구·라벨·색이 갈린다. 죽은 탭에 되살릴 길이 없던 것이 이 배너가 넓어진 이유다.
+describe("PaneView restart banner", () => {
+  function banner(view: PaneView): HTMLElement {
+    return child(view.root, ".pane-restart");
+  }
+
+  it("stays hidden while the shell is running", () => {
+    const { view } = mount();
+    view.update(pane([terminalTab(10)], 10), true, null, null);
+    expect(banner(view).hidden).toBe(true);
+  });
+
+  it("offers Retry on notStarted and Restart on exited, in place", () => {
+    const { view } = mount();
+    view.update(pane([terminalTab(10, { status: { type: "notStarted" } })], 10), true, null, null);
+    const el = banner(view);
+    expect(el.hidden).toBe(false);
+    expect(el.classList.contains("exited")).toBe(false);
+    expect(child(el, "span").textContent).toContain("has not started");
+    expect(child(el, ".pane-restart-retry").textContent).toBe("Retry");
+
+    view.update(
+      pane([terminalTab(10, { status: { type: "exited", code: 1 } })], 10),
+      true,
+      null,
+      null,
+    );
+    // 같은 노드에 문구만 갈린다 (배너를 새로 만들면 Restart 클릭이 유실될 수 있다).
+    expect(banner(view)).toBe(el);
+    expect(el.hidden).toBe(false);
+    expect(el.classList.contains("exited")).toBe(true);
+    expect(child(el, "span").textContent).toBe("The shell has exited.");
+    expect(child(el, ".pane-restart-retry").textContent).toBe("Restart");
+
+    view.update(pane([terminalTab(10)], 10), true, null, null);
+    expect(el.hidden).toBe(true);
+  });
+
+  it("stays hidden for a viewer tab regardless of other tabs", () => {
+    const { view } = mount();
+    view.update(
+      pane([folderTab(11), terminalTab(10, { status: { type: "exited", code: 0 } })], 11),
+      true,
+      null,
+      viewerMount(11),
+    );
+    expect(banner(view).hidden).toBe(true);
+  });
+});

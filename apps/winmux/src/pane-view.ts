@@ -170,17 +170,30 @@ function placeholderText(tab: Tab | null): string {
   }
 }
 
+/** 재시작 배너 문구 (영어 UI 텍스트) — 두 상태는 사용자에게 전혀 다른 상황이라
+ *  안내가 갈린다: "아직 시작도 못 했다"(대개 WSL 이 느리다)와 "끝났다". */
+const RESTART_NOTICE = {
+  notStarted: "The shell has not started. WSL may be slow or unresponsive.",
+  exited: "The shell has exited.",
+} as const;
+
 export class PaneView {
   readonly root: HTMLDivElement;
   private readonly contentEl: HTMLDivElement;
   private readonly tabStripEl: HTMLDivElement;
   private readonly unreadEl: HTMLSpanElement;
   private readonly placeholderEl: HTMLDivElement;
-  private readonly notStartedEl: HTMLDivElement;
+  private readonly restartEl: HTMLDivElement;
+  /** 배너 내부 노드 — buildRestartBanner 가 채운다 (선언 순서상 definite assignment). */
+  private restartTextEl!: HTMLSpanElement;
+  private restartButtonEl!: HTMLButtonElement;
   /** 배너 Retry 의 대상 — update 마다 갱신한다. 클로저에 굳히면 탭이 바뀐 뒤에도
    *  옛 탭을 재시도한다. */
-  private notStartedTab: TabId | null = null;
-  private retryInFlight = false;
+  private restartTab: TabId | null = null;
+  /** 재스폰 요청이 떠 있는 탭들 — pane 이 아니라 **탭** 단위다. 한 pane 에 죽은 탭이
+   *  여럿인 것이 WSL 이 통째로 내려간 경우의 정상 모양이라(ADR-0010), A 의 요청이
+   *  스폰 데드라인(5s) 동안 B 의 버튼까지 잠그면 안 된다. */
+  private readonly retryInFlight = new Set<TabId>();
   private readonly resizeObserver: ResizeObserver;
   private isActive = false;
   private shown: TabId | null = null;
@@ -204,8 +217,8 @@ export class PaneView {
     this.contentEl.className = "pane-content";
     this.placeholderEl = document.createElement("div");
     this.placeholderEl.className = "pane-placeholder";
-    this.notStartedEl = this.buildNotStartedBanner();
-    this.contentEl.append(this.placeholderEl, this.notStartedEl);
+    this.restartEl = this.buildRestartBanner();
+    this.contentEl.append(this.placeholderEl, this.restartEl);
 
     this.tabStripEl = document.createElement("div");
     this.tabStripEl.className = "pane-tabs";
@@ -258,53 +271,66 @@ export class PaneView {
     return this.shown;
   }
 
-  /** 시작 표식이 오지 않은 탭에 붙는 배너.
+  /** 셸이 없는 탭에 붙는 배너 — **시작하지 못한 탭(notStarted)과 죽은 탭(exited)이
+   *  공유한다.** 문구와 테두리 색만 다르고 동작은 하나다: 같은 탭 id 로 다시 스폰한다
+   *  (그래야 HISTFILE·resume 힌트가 그대로 다시 붙는다 — ADR-0010).
    *
    *  탭 배지만으로는 부족해서 둔다 — 실기 사고에서 가장 곤란했던 것은 빈 화면 앞에서
    *  "앱 문제인지 WSL 문제인지 모르겠다"였고, 화면 한가운데의 이 문장이 그 답이다.
-   *  세션을 죽이지 않으므로 늦게 표식이 오면 상태가 running 으로 돌아오고 배너도
-   *  저절로 걷힌다. */
-  private buildNotStartedBanner(): HTMLDivElement {
+   *  notStarted 는 세션을 죽이지 않으므로 늦게 표식이 오면 상태가 running 으로 돌아오고
+   *  배너도 저절로 걷힌다. */
+  private buildRestartBanner(): HTMLDivElement {
     const el = document.createElement("div");
-    el.className = "pane-not-started";
+    el.className = "pane-restart";
     el.hidden = true;
 
-    const text = document.createElement("span");
-    // "세션은 아직 살아 있다"는 문구를 넣지 않는다 — 재시작 복원 뒤에는 persist 가
-    // pty_session 을 비운 NotStarted 탭이 남아 그 말이 거짓이 된다.
-    text.textContent = "The shell has not started. WSL may be slow or unresponsive.";
+    // 문구·라벨은 syncRestartBanner 가 상태에 맞춰 채운다. notStarted 쪽에 "세션은
+    // 아직 살아 있다"는 문구를 넣지 않는 이유: 재시작 복원 뒤에는 persist 가
+    // pty_session 을 비운 notStarted 탭이 남아 그 말이 거짓이 된다.
+    this.restartTextEl = document.createElement("span");
 
     const retry = document.createElement("button");
     retry.type = "button";
-    retry.className = "pane-not-started-retry";
-    retry.textContent = "Retry";
+    retry.className = "pane-restart-retry";
     retry.addEventListener("click", () => {
-      const tab = this.notStartedTab;
-      if (tab === null || this.retryInFlight) return;
-      this.retryInFlight = true;
-      retry.disabled = true;
+      const tab = this.restartTab;
+      if (tab === null || this.retryInFlight.has(tab)) return;
+      this.retryInFlight.add(tab);
+      this.syncRetryDisabled();
       void respawnTab(tab)
         .catch((err: unknown) => {
           // 실패해도 백엔드가 탭을 강등해 publish 하므로 화면은 갱신된다.
           console.error("respawn_tab failed", err);
         })
         .finally(() => {
-          this.retryInFlight = false;
-          retry.disabled = false;
+          this.retryInFlight.delete(tab);
+          this.syncRetryDisabled();
         });
     });
+    this.restartButtonEl = retry;
 
-    el.append(text, retry);
+    el.append(this.restartTextEl, retry);
     return el;
   }
 
-  /** 활성 탭 상태에 따라 배너를 켜고 Retry 대상을 갱신한다. */
-  private syncNotStartedBanner(pane: Pane): void {
+  /** 활성 탭 상태에 따라 배너를 켜고 문구·Restart 대상을 갱신한다. */
+  private syncRestartBanner(pane: Pane): void {
     const tab = pane.tabs.find((t) => t.id === pane.activeTab) ?? null;
-    const notStarted =
-      tab !== null && tab.kind.type === "terminal" && tab.kind.status.type === "notStarted";
-    this.notStartedTab = notStarted && tab !== null ? tab.id : null;
-    this.notStartedEl.hidden = !notStarted;
+    const status = tab !== null && tab.kind.type === "terminal" ? tab.kind.status.type : null;
+    const kind = status === "notStarted" || status === "exited" ? status : null;
+    this.restartTab = kind === null || tab === null ? null : tab.id;
+    this.syncRetryDisabled();
+    this.restartEl.hidden = kind === null;
+    this.restartEl.classList.toggle("exited", kind === "exited");
+    if (kind === null) return;
+    setText(this.restartTextEl, RESTART_NOTICE[kind]);
+    setText(this.restartButtonEl, kind === "exited" ? "Restart" : "Retry");
+  }
+
+  /** 지금 배너가 가리키는 탭의 요청이 떠 있을 때만 버튼을 잠근다. */
+  private syncRetryDisabled(): void {
+    this.restartButtonEl.disabled =
+      this.restartTab !== null && this.retryInFlight.has(this.restartTab);
   }
 
   private buildHeader(): HTMLElement {
@@ -447,7 +473,7 @@ export class PaneView {
       this.views.get(tab.id)?.setVisible(tab.id === this.shown);
     }
 
-    this.syncNotStartedBanner(pane);
+    this.syncRestartBanner(pane);
 
     if (this.shown === null) {
       const tab = pane.tabs.find((t) => t.id === pane.activeTab) ?? null;

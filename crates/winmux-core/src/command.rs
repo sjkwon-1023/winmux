@@ -638,9 +638,14 @@ impl Dispatcher {
     }
 
     /// respawn 대상 열거 — **Running 터미널 탭 중 `pty_session` 이 None** 인 탭
-    /// (= adopt 직후의 재스폰 대상). Exited 로 저장된 탭은 재스폰하지 않는 상태
-    /// 충실 복원 결정(계획 B-2 — 재시작 후 빈 내용 + exited 배지)에 따라 열거에서
-    /// 도 제외된다.
+    /// (= adopt 직후의 재스폰 대상).
+    ///
+    /// 디스크에 `Exited` 로 저장된 탭은 persist sanitize 가 복원 시 `Running` 으로
+    /// 되돌리므로(ADR-0010) 여기에 그대로 잡힌다 — 재시작이 곧 되살리기다. 반면
+    /// **런타임에 죽어 `Exited` 가 된 탭은 이 열거의 대상이 아니다**: 이 함수는 부팅
+    /// 1회용이고, 실행 중 죽은 탭은 사용자가 pane 배너의 Restart 로
+    /// [`Self::respawn_tab`] 을 직접 부르는 경로를 탄다 (멋대로 되살리면 사용자가
+    /// 의도적으로 끝낸 셸까지 되살아난다).
     pub fn running_terminal_tabs(&self) -> Vec<TabId> {
         let mut tabs = Vec::new();
         for ws in &self.state.workspaces {
@@ -854,13 +859,21 @@ impl Dispatcher {
     /// adopt 된 상태의 터미널 탭 하나에 새 셸을 재스폰한다 — manage-first 부팅의
     /// 탭별 단계 (글루가 회당 lock 으로 호출, 계획 0장).
     ///
-    /// - 대상은 두 가지다. **(a) Running 터미널 탭이면서 `pty_session` 이 None** 인
+    /// - 대상은 세 가지다. **(a) Running 터미널 탭이면서 `pty_session` 이 None** 인
     ///   탭(부팅 복원 경로 — 글루가 [`Self::running_terminal_tabs`] 스냅샷에서 뽑는다),
-    ///   그리고 **(b) `NotStarted` 탭**(사용자 재시도 경로). (b)는 감지가 세션을 죽이지
-    ///   않으므로 아직 살아 있는 세션을 물고 있을 수 있고, 그때는 새로 띄우기 전에
-    ///   `host.kill` 로 정리한다 — 재시작 복원 뒤라면 persist 가 `pty_session` 을 비워
-    ///   두므로 None 인 채로 온다. 그 외(미지 id·Exited·Running 인데 세션 있음)는
-    ///   [`CommandError::UnknownTarget`] 이고 상태·revision 은 불변이다.
+    ///   **(b) `NotStarted` 탭**(사용자 재시도 경로), **(c) `Exited` 탭**(죽은 셸
+    ///   되살리기 — ADR-0010). (b)·(c)는 아직 세션 id 를 물고 있을 수 있어 — (b)는 감지가
+    ///   세션을 죽이지 않아서, (c)는 replay 표시를 위해 죽은 세션의 id 를 남겨 두어서 —
+    ///   새로 띄우기 전에 `host.kill` 로 정리한다(멱등 계약이라 이미 죽은 세션에도
+    ///   무해하고, 레지스트리에서 지워져야 이후 attach 가 옛 id 로 새지 않는다).
+    ///   재시작 복원 뒤라면 persist 가 `pty_session` 을 비워 두므로 None 인 채로 온다.
+    ///   그 외(미지 id·Running 인데 세션 있음)는 [`CommandError::UnknownTarget`] 이고
+    ///   상태·revision 은 불변이다.
+    ///
+    ///   (c)가 대상인 이유: 셸이 앱보다 먼저 죽는 경우(PC 절전·`wsl --shutdown`·WSL OOM·
+    ///   사용자의 `exit`)에 탭을 되살릴 길이 아예 없었다. 같은 탭 id 로 다시 스폰하므로
+    ///   `HISTFILE` 과 resume 힌트가 그대로 다시 붙는다 — 죽은 에이전트 세션을 ↑ 한 번으로
+    ///   resume 할 수 있다는 것이 이 경로의 요점이다.
     /// - 스폰은 cwd = 탭 cwd(없으면 워크스페이스 root_path), distro = 워크스페이스
     ///   기본값, 80×24, history_tab = 이 탭의 id — [`Command::CreateTab`] 과 같은
     ///   스폰 경로를 공유한다. 탭에 기록된 cwd 는 바꾸지 않는다 (생성 시점 값
@@ -880,7 +893,7 @@ impl Dispatcher {
             } => (cwd.clone(), None),
             TabKind::Terminal {
                 pty_session,
-                status: TerminalStatus::NotStarted,
+                status: TerminalStatus::NotStarted | TerminalStatus::Exited { .. },
                 cwd,
             } => (cwd.clone(), *pty_session),
             _ => return Err(unknown("respawnable tab", tab.0)),
@@ -908,13 +921,13 @@ impl Dispatcher {
         let result = match spawned {
             Ok((session, _effective_cwd)) => {
                 *pty_session = Some(session);
-                // NotStarted 에서 온 재시도는 여기서 정상으로 돌아온다. 부팅 복원
+                // NotStarted·Exited 에서 온 재시도는 여기서 정상으로 돌아온다. 부팅 복원
                 // 경로는 이미 Running 이라 이 대입이 아무것도 바꾸지 않는다.
                 *status = TerminalStatus::Running;
                 Ok(session)
             }
             Err(err) => {
-                // 스폰 실패 강등. NotStarted 에서 온 재시도는 위에서 옛 세션을 kill 했고
+                // 스폰 실패 강등. NotStarted·Exited 에서 온 재시도는 위에서 옛 세션을 kill 했고
                 // host 가 레지스트리에서도 지웠으므로, 그 id 를 남기면 이후 attach 가
                 // 미지 세션으로 실패한다 — Exited 탭이 세션 id 를 유지하는 이유(replay
                 // attach)를 만족하지 못하는 id 다.
@@ -3498,7 +3511,8 @@ mod tests {
 
     /// 복원 직후(sanitize 완료) 모양의 상태 — ws 1, split 4 아래 pane 2·3.
     /// pane 2: tab 5 (Running, cwd 없음 → root_path 상속 대상).
-    /// pane 3: tab 6 (Running, cwd /custom), tab 7 (Exited — 재스폰 비대상).
+    /// pane 3: tab 6 (Running, cwd /custom), tab 7 (Exited — 부팅 열거 비대상,
+    /// Restart 경로로는 되살아난다).
     /// next_id 8, revision 3.
     fn adopted_state() -> AppState {
         AppState {
@@ -3655,11 +3669,63 @@ mod tests {
             (None, TerminalStatus::Exited { code: None })
         );
         assert_eq!(d.state().revision, 4);
-        // 강등된 탭은 이후 재스폰 대상이 아니다 (부적합 = UnknownTarget).
+        // 강등된 탭도 다시 시도할 수 있다 (ADR-0010 — pane 배너의 Restart).
         host.set_fail_spawn(false);
-        let err = d.respawn_tab(TabId(5)).unwrap_err();
-        assert!(matches!(err, CommandError::UnknownTarget { .. }), "{err:?}");
+        let s5 = d.respawn_tab(TabId(5)).unwrap();
+        assert_eq!(
+            terminal_kind(&d, PaneId(2), 0),
+            (Some(s5), TerminalStatus::Running)
+        );
+        // 부팅 열거는 여전히 세션 없는 Running 탭만 — 방금 살아난 탭은 빠진다.
         assert_eq!(d.running_terminal_tabs(), vec![TabId(6)]);
+    }
+
+    /// 실행 중 죽은 탭을 되살리는 경로 (ADR-0010). replay 표시용으로 남아 있던 죽은
+    /// 세션을 먼저 정리하고, **같은 탭 id** 로 다시 스폰해 HISTFILE·resume 힌트를
+    /// 그대로 물린다 — ↑ 한 번으로 죽은 에이전트 세션을 resume 하는 것이 요점이다.
+    #[test]
+    fn respawn_revives_a_tab_that_died_at_runtime() {
+        let (mut d, host) = adopted_dispatcher();
+        let s5 = d.respawn_tab(TabId(5)).unwrap();
+        // 셸이 강제 종료됐다 (실기: PC 절전으로 WSL 이 통째로 내려간 경우의 코드).
+        d.apply_event(SessionEvent::SessionExited {
+            session: s5,
+            code: Some(1_073_807_364),
+        });
+        assert_eq!(
+            terminal_kind(&d, PaneId(2), 0),
+            (
+                Some(s5),
+                TerminalStatus::Exited {
+                    code: Some(1_073_807_364)
+                }
+            ),
+            "Exited 여도 replay 를 위해 세션 id 는 남는다"
+        );
+
+        let revived = d.respawn_tab(TabId(5)).unwrap();
+        assert_ne!(revived, s5);
+        assert_eq!(
+            terminal_kind(&d, PaneId(2), 0),
+            (Some(revived), TerminalStatus::Running)
+        );
+        assert_eq!(host.kills(), vec![s5], "죽은 세션을 레지스트리에서 정리한다");
+        assert_eq!(host.spawns().last().unwrap().history_tab, Some(TabId(5).0));
+    }
+
+    /// 디스크에서 온 `Exited` 탭(세션 id 없음)도 되살아난다 — persist sanitize 가
+    /// Running 으로 되돌리기 전에 직접 호출돼도 같은 결과여야 한다.
+    #[test]
+    fn respawn_revives_a_stored_exited_tab_without_a_session() {
+        let (mut d, host) = adopted_dispatcher();
+        let s7 = d.respawn_tab(TabId(7)).unwrap();
+        assert_eq!(
+            terminal_kind(&d, PaneId(3), 1),
+            (Some(s7), TerminalStatus::Running)
+        );
+        // 정리할 세션이 없으므로 kill 은 일어나지 않는다.
+        assert!(host.kills().is_empty());
+        assert_eq!(host.spawns().last().unwrap().history_tab, Some(TabId(7).0));
     }
 
     #[test]
@@ -3667,9 +3733,10 @@ mod tests {
         let (mut d, host) = adopted_dispatcher();
         let s5 = d.respawn_tab(TabId(5)).unwrap();
         let before = serde_json::to_value(d.state()).unwrap();
-        // 부적합 3종: Exited 저장 탭 / 이미 세션 있는 탭 / 미지 id — 전부
-        // UnknownTarget 에러이고 상태·revision 불변 (부적합 호출 = 프로그램 결함).
-        for tab in [TabId(7), TabId(5), TabId(99)] {
+        // 부적합 2종: 이미 세션 있는 Running 탭 / 미지 id — 둘 다 UnknownTarget
+        // 에러이고 상태·revision 불변 (부적합 호출 = 프로그램 결함). Exited 탭은
+        // ADR-0010 이후 부적합이 아니다 (아래 respawn_revives_* 참조).
+        for tab in [TabId(5), TabId(99)] {
             let err = d.respawn_tab(tab).unwrap_err();
             assert!(
                 matches!(err, CommandError::UnknownTarget { .. }),

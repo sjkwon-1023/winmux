@@ -102,7 +102,9 @@ pub async fn dispatch(
     result
 }
 
-/// `NotStarted` 탭에 셸을 다시 띄운다 (사용자 재시도 — pane 배너의 Retry).
+/// 셸이 없는 탭에 셸을 다시 띄운다 — `NotStarted`(시작 못 함)와 `Exited`(죽음) 양쪽이
+/// 대상이고, pane 배너의 Retry / Restart 버튼이 이 커맨드를 부른다 (적격성 계약은
+/// `Dispatcher::respawn_tab` rustdoc).
 ///
 /// **성공·실패 어느 쪽이든 publish 한다.** `dispatch` 의 "실패 = 상태 불변" 계약과 달리
 /// `Dispatcher::respawn_tab` 은 스폰이 실패하면 그 탭을 강등하고 revision 을 올리므로,

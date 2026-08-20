@@ -355,9 +355,12 @@ button, 계획 v2 section 12).
    splitter ratio → quit and restart the app → the full structure (workspaces, panes,
    tabs, ratios, active selections, ids) is restored, and every terminal tab runs a
    **fresh shell** (session content is not persisted — only structure).
-2. **Exited tabs stay exited** — exit a shell (`exit`) so the tab shows the exited badge,
-   restart the app → the tab is still Exited with empty content (no respawn), and the app
-   is otherwise fully functional.
+2. **A restart revives an exited tab** ([ADR-0010](adr/0010-restart-dead-terminal-tabs.md);
+   until v0.3.8 this item read the opposite — "exited tabs stay exited") — exit a shell
+   (`exit`) so the tab shows the exited badge and the Restart banner, restart the app → that
+   tab comes back with a **live shell** in its stored directory, no badge and no banner, and
+   the app is otherwise fully functional. Within a single run the badge stays until the user
+   presses Restart: winmux does not resurrect a shell under the user.
 3. **Corrupt state recovers loudly** — corrupt `state.json` (e.g. truncate it) in the app
    data dir, restart → the app starts fresh, keeps the original as
    `state.json.corrupt-<epoch>`, and logs the reason to stderr.
@@ -1647,6 +1650,33 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
    error surface and the cleanup path only; the timeout mechanism itself is covered by the
    `deadline.rs` unit tests, including a 40-step sweep across the completion/deadline boundary
    that asserts the value is never lost.
+
+4. **A dead terminal tab can be brought back** ([ADR-0010](adr/0010-restart-dead-terminal-tabs.md)) —
+   a shell that dies while the app is running no longer leaves a permanently dead tab. A
+   restart revives it automatically; within one run the pane banner's **Restart** does it on
+   demand. Both keep the tab id, so the tab's shell history and its agent resume hint come back
+   with it.
+
+   - **Restart-revives (the field failure).** With a few tabs open — at least one running an
+     agent that has finished a turn, so a resume hint exists — run `wsl --shutdown` from
+     PowerShell. Every tab must go to the `exited` badge with the Restart banner. Now close
+     winmux and reopen it: **every tab must come back with a live shell** in its own directory,
+     no `exited` badge, and no `(terminal tab without pty session)` anywhere.
+   - **The history and the resume hint survived.** In a revived agent tab, press `↑` once: the
+     `claude --resume <id>` (or `codex resume <id>`) line must be there, and running it must
+     reattach to that conversation. Press `↑` again for the tab's earlier commands.
+   - **Restart without closing the app.** Type `exit` in a tab. The badge and banner appear
+     with the last output still readable behind the banner; press **Restart**: the same tab
+     gets a working shell, and `↑` still recalls that tab's history. Then confirm in Task
+     Manager and `ps` inside WSL that the session the tab had been holding is gone.
+   - **A running tab is never disturbed.** With one tab exited and others working, neither the
+     restart nor a Restart press may touch the live tabs (no reset scrollback, no new prompt).
+   - **A spawn failure is still recoverable.** With `$env:WINMUX_SPAWN_DEADLINE_MS = "1"`, open
+     a tab and let it fail — it lands as `exited` with the Restart banner. Press **Restart**
+     *in that same run*: it must fail again (the knob is still 1ms) and leave the badge and
+     banner in place rather than a dead pane — i.e. the retry path stays available after a
+     failed retry. Then quit, relaunch **without** the knob: the tab must come back with a
+     live shell on its own. Before v0.3.9 that tab was dead for good on both counts.
 
 ## 11. ARM64 cross-build notes
 

@@ -282,6 +282,23 @@ Accepted deferrals, one line each. None of these block the MVP.
   Also open: failures *after* the marker (the wrapper's file I/O, the final `exec bash -l`), and
   whether killing `wsl.exe` actually reaps the Linux-side relay — the incident's zombies were
   `/init` relays that survived with `PPID=1`, and WINDOWS-BUILD §10 v0.3.9 item 2 measures it.
+- **A tab whose shell died stayed dead forever — fixed 2026-08-20** (user report, v0.3.9).
+  Field diagnosis: the machine slept at 07:28 with winmux running, WSL went down with it, and
+  the app recorded all ten `SessionExited` events (`code: 1073807364` = `0x40010004`,
+  `DBG_TERMINATE_PROCESS`) into `state.json`. `Exited` was an **absorbing, persisted** state —
+  `sanitize` kept the status while clearing `pty_session`, the boot respawn enumerates
+  `Running` tabs only, `respawn_tab` rejected `Exited`, and v0.3.8 had no front-end respawn
+  binding at all — so every relaunch produced an empty pane with an `exited` badge and no way
+  back. A normal app quit never caused it (nothing kills the PTYs before the exit flush, and
+  Tauri leaves via `std::process::exit`); the trigger is a shell dying *while the app is up*:
+  sleep/shutdown, `wsl --shutdown`, WSL OOM, or typing `exit`. Landed: restore normalizes
+  `Exited` → `Running` so a restart revives every tab in its stored `cwd`, `respawn_tab`
+  accepts `Exited` (killing the stale replay session first), and the ADR-0009 pane banner now
+  covers `exited` with a **Restart** button. Revival keeps the tab id, so `HISTFILE` and the
+  per-tab resume hint come back with it — `↑` gives `claude --resume <id>`. Decisions and the
+  rejected alternatives: [ADR-0010](docs/adr/0010-restart-dead-terminal-tabs.md). Verification:
+  WINDOWS-BUILD §10 v0.3.9 item 4. **Still open alongside it**: the tab `cwd` gap above means a
+  revived tab reopens at the workspace root rather than where the shell had moved to.
 - **Sessions do not survive a severed relay, and that is a deliberate limit** (considered
   2026-08-15, not planned). Putting a detach layer (`dtach`, ~50KB installed and <1MB per
   server) between the terminal and the shell would let a session live through a broken vsock

@@ -569,12 +569,15 @@ export class TerminalView {
    *  사람에게 그 상태를 물려주면 그냥 무반응이던 종전보다 나빠진다. 읽기가 실패한
    *  경우도 같은 이유로 아무것도 보내지 않는다. */
   private async pasteFromClipboard(): Promise<void> {
-    let text: string;
+    let text = "";
     try {
       text = await navigator.clipboard.readText();
     } catch (err) {
+      // 여기서 return 하지 않는다 — 텍스트 포맷이 하나도 없는 클립보드에서 readText 가
+      // 거부될 수 있고, 그게 바로 이 경로가 존재하는 이유인 이미지 전용 클립보드다.
+      // 권한 거부가 원인이면 아래 clipboardHasImage 도 같이 실패해 결국 no-op 이라
+      // 손해가 없다.
       console.error("clipboard read failed", err);
-      return;
     }
     if (text.length > 0) {
       this.term.paste(text);
