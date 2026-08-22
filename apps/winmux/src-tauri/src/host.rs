@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use tauri::AppHandle;
 use winmux_core::command::{SessionHost, ShellSpawnReq};
 use winmux_core::deadline::call_with_deadline;
+use winmux_core::model::TabId;
 use winmux_core::session::{SessionId, SessionManager, SessionOptions, SpawnSpec};
 
 use crate::router::OscRouter;
@@ -379,7 +380,89 @@ impl SessionHost for TauriHost {
         self.sinks.remove(id);
         let _ = self.sessions.remove(id);
     }
+
+    fn release_tabs(&self, tabs: &[TabId], distro: Option<&str>) {
+        release_tab_files(tabs, distro);
+    }
 }
+
+/// 닫힌 탭들의 셸측 자원 삭제 — 탭별 `HISTFILE` 과 resume 힌트, 그리고 훅이
+/// 쓰다 만 힌트 임시 파일(`tab-<id>.tmp.<pid>`)까지.
+///
+/// **Windows 에서 경로를 조립하지 않고 WSL 안에서 `$HOME` 을 펼친다.** 이 디렉터리를
+/// 만드는 쪽(`bash_argv` 의 `mkdir -p`)이 같은 이유로 같은 규율을 따른다 — 리눅스
+/// 홈 위치는 배포판·사용자마다 다르고, UNC 로 추측하면 틀렸을 때 조용히 아무것도
+/// 지우지 않는다.
+///
+/// **탭 목록 전체가 한 번의 wsl.exe 왕복이다.** 워크스페이스 하나를 닫으면 탭이
+/// 열몇 개씩 사라지는데, 그때 wsl.exe 를 그만큼 동시에 띄우는 것이 부팅 재스폰
+/// 사고의 모양이었다 (ADR-0010 개정).
+///
+/// **호출은 Dispatcher lock 아래다** (이 파일 모듈 doc) — 그래서 왕복을 분리 스레드로
+/// 넘기고 즉시 돌아온다. 결과는 로그로만 쓴다 — 실패해도 사용자가 할 수 있는 일이
+/// 없다. 앱이 이 직후 종료하면 삭제가 통째로 유실되는 창도 남는데, 둘 다 부팅 시
+/// sweep 이 덮을 자리다 (백로그, ADR-0013 "Consequences").
+#[cfg(windows)]
+fn release_tab_files(tabs: &[TabId], distro: Option<&str>) {
+    use std::os::windows::process::CommandExt;
+
+    // 콘솔 창 억제 — boot.rs·commands.rs 의 wsl.exe 호출과 같은 플래그다.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let script = release_script(tabs);
+    let distro = resolve_distro(distro.map(str::to_string));
+    let count = tabs.len();
+    let spawned = std::thread::Builder::new()
+        .name("winmux-release-tabs".to_string())
+        .spawn(move || {
+            let mut cmd = std::process::Command::new("wsl.exe");
+            if let Some(distro) = &distro {
+                cmd.arg("-d").arg(distro);
+            }
+            // `--exec` 인 이유는 spawn_spec 과 같다 — 명령이 배포판 기본 셸을 한 번
+            // 더 거치면 스크립트가 다른 문법으로 평가된다.
+            let status = cmd
+                .arg("--exec")
+                .arg("bash")
+                .arg("-c")
+                .arg(&script)
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    eprintln!("[winmux] releasing {count} closed tab(s) exited with {status}")
+                }
+                Err(err) => eprintln!("[winmux] could not release {count} closed tab(s): {err}"),
+            }
+        });
+    if let Err(err) = spawned {
+        eprintln!("[winmux] could not start the release thread for {count} closed tab(s): {err}");
+    }
+}
+
+/// 삭제 스크립트 본문. 탭 하나가 남기는 파일은 셋이다 — 탭별 `HISTFILE`, resume
+/// 힌트, 그리고 훅이 쓰다 만 힌트 임시 파일(`tab-<id>.tmp.<pid>`).
+///
+/// 탭 id 는 10진수 `u64` 라 셸 메타문자가 될 수 없다 — 그대로 박아도 안전하다.
+/// `.tmp.*` 만 따옴표 밖에 두어 glob 이 살아 있고, 매치가 없으면 그 리터럴이 그대로
+/// 남는데 `rm -f` 는 없는 파일에 침묵한다 (그래서 없는 파일 셋도 조용히 지나간다).
+#[cfg(windows)]
+fn release_script(tabs: &[TabId]) -> String {
+    let mut script = String::from("rm -f --");
+    for tab in tabs {
+        let id = tab.0;
+        script.push_str(&format!(
+            r#" "$HOME/.winmux/history/tab-{id}" "$HOME/.winmux/resume/tab-{id}" "$HOME/.winmux/resume/tab-{id}".tmp.*"#
+        ));
+    }
+    script
+}
+
+/// unix 개발 실행에는 지울 것이 없다 — `spawn_spec` 이 탭별 `HISTFILE` 을 물리지
+/// 않으므로(그 함수 주석) 탭 전용 파일 자체가 만들어지지 않는다.
+#[cfg(not(windows))]
+fn release_tab_files(_tabs: &[TabId], _distro: Option<&str>) {}
 
 /// 스폰 명령 구성 테스트 — Windows 대상에서만 성립하는 argv 계약이라 그 타깃에서만
 /// 컴파일·실행된다 (unix 개발 경로는 `$SHELL -l` 무변경).
@@ -484,6 +567,21 @@ mod tests {
         assert!(
             script.contains(r#"PROMPT_COMMAND='printf "\033]7;file://%s\007" "${PWD//%/%25}"'"#),
             "{script}"
+        );
+    }
+
+    /// 닫힌 탭 정리 스크립트 — 탭마다 세 자리(history·resume·resume 임시)를 지우고,
+    /// 여러 탭이 한 번의 `rm` 으로 들어간다 (SessionHost::release_tabs 의 배치 계약).
+    /// 닫힌 탭 정리 스크립트는 통짜로 비교한다 — 짧고 거의 변하지 않는 데다, 여기서
+    /// 틀리면 남의 파일을 지우거나 아무것도 못 지운다. `$HOME` 이 따옴표 안에서
+    /// **셸이 펼칠** 형태로 남아 있는지, glob 이 임시 파일 자리에만 있는지(탭 id 를
+    /// 접두사로 쓸어 담으면 탭 1 을 지울 때 탭 12·13 이 함께 사라진다), 탭 둘이 `rm`
+    /// 하나로 묶이는지가 한 번에 걸린다.
+    #[test]
+    fn release_script_removes_all_three_per_tab_files_in_one_rm() {
+        assert_eq!(
+            release_script(&[TabId(7), TabId(12)]),
+            r#"rm -f -- "$HOME/.winmux/history/tab-7" "$HOME/.winmux/resume/tab-7" "$HOME/.winmux/resume/tab-7".tmp.* "$HOME/.winmux/history/tab-12" "$HOME/.winmux/resume/tab-12" "$HOME/.winmux/resume/tab-12".tmp.*"#
         );
     }
 }

@@ -172,31 +172,42 @@ Accepted deferrals, one line each. None of these block the MVP.
   showing `?` for a tab whose shell is in another distro or a Windows shell** (it is read
   from this distro's `/proc`). Keyboard targeting for the old manual send mode stays absorbed
   by the stage-17 retirement — it is not coming back.
-- **`winmux send` submits to shells but not to TUI agents** — found in the field 2026-08-15,
-  not fixed. `cmd_send` appends **LF** (`printf '%s\n' "$text"`, the CLI heredoc in
-  `provision.rs`). A shell runs the line because its line discipline takes LF as end-of-line,
-  but a raw-mode TUI does not — the terminal sends **CR** for Enter, so Codex and Claude Code
-  take the text into their prompt and then sit there, never submitting. Confirmed both ways: a
-  send to a Codex tab pre-filled but never ran, and a bare CR to that same tab started it
-  immediately. The contract already carries the assumption in its wording — "Include the
-  newline if the target **shell** should run the line"
-  (`scripts/wsl/claude-hook-example.md`) — while the channel exists precisely to hand work to
-  *agents*, which is what the skill advertises. Fix is to append `\r` instead: a shell's
-  `ICRNL` turns CR into NL, so the shell case is unaffected. That is a `provision.rs` heredoc
-  edit plus a `SETUP_VERSION` bump, with the same correction in the contract doc and in
-  `scripts/wsl/skills/winmux-send/SKILL.md`.
+- **`winmux send` submitted to shells but not to TUI agents — fixed 2026-08-22** (found in
+  the field 2026-08-15, v0.3.11). `cmd_send` appended **LF** (`printf '%s\n' "$text"`, the CLI
+  heredoc in `provision.rs`). A shell ran the line because its line discipline takes LF as
+  end-of-line, but a raw-mode TUI did not — the terminal sends **CR** for Enter, so Codex and
+  Claude Code took the text into their prompt and then sat there, never submitting. Confirmed
+  both ways: a send to a Codex tab pre-filled but never ran, and a bare CR to that same tab
+  started it immediately. The contract carried the assumption in its own wording — "Include the
+  newline if the target **shell** should run the line" — while the channel exists precisely to
+  hand work to *agents*, which is what the skill advertises. Now it appends `\r`: a shell's
+  `ICRNL` turns CR back into NL, so the shell case is unchanged, and the same byte submits in a
+  TUI. `SETUP_VERSION` 9 reinstalls the CLI for existing users; the contract doc and both copies
+  of `SKILL.md` (tracked, and the one embedded in `provision.rs`) say CR now. Verification:
+  WINDOWS-BUILD §10 v0.3.11 item 1 — field-only, since the failure is inside an agent's TUI.
 - **Cross-workspace send/`ls` would need an explicit opt-in** — both halves of the agent
   channel stop at the requester's own workspace (2026-08-11 decision, ADR-0005 addendum); if
   reaching another project's pane ever becomes a real need it arrives as a named opt-in, never
   as the default radius.
 - **≤100MB RAM** — ~129MB at checkpoint 2 sits inside the 100–150MB adoption band
   (ADR-0001); getting under 100MB is a v2 optimization.
-- **Per-tab shell history GC** — `~/.winmux/history/tab-<id>` files outlive the tabs that
-  created them and nothing prunes them. `~/.winmux/resume/tab-<id>` (the agent resume hint)
-  has the same shape and the same gap, so one sweep should take both — including any
-  `tab-<id>.tmp.<pid>` a hook killed mid-write left behind. Open alongside it:
-  whether a tab closed through the kill path writes its `HISTFILE` at all (a `history -a`
-  follow-up if it does not).
+- **Per-tab shell history GC — landed 2026-08-22 as delete-on-close** (user decision,
+  v0.3.11). Closing a tab now deletes its `~/.winmux/history/tab-<id>`, its
+  `~/.winmux/resume/tab-<id>` and any `tab-<id>.tmp.<pid>` a killed hook left mid-write. The
+  core reports the removal — `SessionHost::release_tabs` is reached from `CloseTab`,
+  `ClosePane` and `CloseWorkspace` only, **never from `SessionExited`**, because an exited tab
+  is revivable under the same id (ADR-0010) and has to find its own history when it comes back.
+  The host runs one `wsl.exe --exec bash -c 'rm -f …'` for the **whole batch** on a detached
+  thread: a batch because closing a workspace retires a dozen tabs at once and one `wsl.exe`
+  each is the shape of the ADR-0010 boot-wave failure, and detached because the call sits under
+  the dispatcher lock. `$HOME` is expanded inside WSL rather than assembled into a UNC path on
+  the Windows side, the same discipline the `mkdir -p` in `bash_argv` follows. Kill precedes
+  delete on purpose — a shell writes `HISTFILE` as it dies, so the reverse order lets the
+  dying shell recreate what was just removed. **Still open**: files orphaned when the app is
+  force-quit or crashes between the close and the `rm` — nothing sweeps those, and a boot-time
+  sweep against the tab ids in `state.json` is what would. Decisions and the rejected
+  alternatives: [ADR-0013](docs/adr/0013-retiring-a-closed-tab.md). Verification:
+  WINDOWS-BUILD §10 v0.3.11 item 2.
 - **The resume hint covers Codex too — landed 2026-08-12** (setup v7). A new
   `~/.winmux/bin/winmux-codex-notify.sh` reads Codex's notify payload from `$1` (it arrives as
   the final **argv** element, not on stdin), records `codex resume <thread-id>` in the same

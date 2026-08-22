@@ -160,11 +160,11 @@ agent to call is `winmux send`:
 
 ```bash
 winmux send '#181' 'cargo test'     # runs the line in tab 181
-winmux send -l '#181' 'cargo test'  # literal: only pre-fills the prompt
+winmux send -l '#181' 'cargo test'  # literal: only pre-fills the prompt, submits nothing
 winmux send build 'cargo test'      # by title substring instead of id
 ```
 
-The CLI encodes the text, appends the trailing newline (unless `-l`), and resolves the
+The CLI encodes the text, appends a trailing **CR** (unless `-l`), and resolves the
 terminal device with the same two-step discipline as `winmux-notify.sh` — so it works from a
 hook too. Delivery stays silent (exit 0 either way); only a usage error is reported.
 
@@ -202,7 +202,10 @@ a title is the weaker address because a prompt hook may rewrite it on every prom
   else's terminal (and in its replay buffer) is worse pollution than a missed send. Failures
   go to the app's stderr only, so sending is silent fire-and-forget.
 - The bytes reach the target exactly as sent: no bracketed paste, no quoting, no trailing
-  newline added. **Include the newline** if the target shell should run the line.
+  byte added. **Include a CR (`\r`)** if the target should run the line — that is the byte a
+  real terminal sends for Enter, so it submits in a raw-mode TUI (Codex, Claude Code) as well
+  as in a shell, whose `ICRNL` turns it back into a newline. A bare LF only submits in a
+  shell; a TUI takes it into its prompt and sits there.
 - The effective size limit is far below 32 KiB: the OSC scanner discards any payload over
   64 KiB before parsing — sized so the full 32 KiB text contract survives base64
   expansion. Pass a path, not

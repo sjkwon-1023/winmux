@@ -1748,6 +1748,40 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
    - **The opener refuses what it should.** In a tab: `winmux-open ms-settings:privacy` must exit
      non-zero with a refusal, and `winmux-open ~/code` must open Explorer at that folder.
 
+### v0.3.11 — verification
+
+Both items need provisioning **v9**, which runs once on first launch of this build;
+`~/.winmux/setup.log` records it. Check that first — neither item can pass without it.
+
+1. **`winmux send` submits to an agent, not just a shell** — the CLI now ends the text with
+   **CR** instead of LF, which is the byte a terminal sends for Enter.
+
+   - **The case that was broken.** Open Codex (or Claude Code) in one tab and a shell in
+     another. From the shell: `winmux send '#<agent tab id>' 'say hello'`. The agent must
+     **start working**, not sit with the text in its prompt. This is the whole point of the
+     change — before v0.3.11 the text arrived and nothing ran.
+   - **The shell case did not regress.** `winmux send '#<shell tab id>' 'echo delivered'` must
+     still run the line. A shell's `ICRNL` turns the CR back into a newline; if this one breaks,
+     the terminal was opened in raw mode by something.
+   - **`-l` still only pre-fills.** `winmux send -l '#<agent tab id>' 'say hello'` must leave the
+     text in the prompt unsubmitted, in the agent and in a shell alike.
+
+2. **A closed tab takes its shell-side files with it** — closing a tab (not a shell *exiting*)
+   deletes that tab's `HISTFILE` and resume hint inside WSL.
+
+   - **The delete.** In a tab, note its id (`winmux id`), run a command or two so its history
+     file exists, and confirm from another tab:
+     `ls ~/.winmux/history/tab-<id> ~/.winmux/resume/tab-<id>`. Close the tab, wait a second,
+     and list again — both must be gone.
+   - **One round trip, not N.** Open a workspace with several terminal tabs and close the whole
+     **workspace**. All of their files must disappear, and `Get-Process wsl` during the close
+     must not show a burst of `wsl.exe` processes — the cleanup is one call for all of them.
+   - **An exited tab keeps its history.** In a tab, run a few commands, then type `exit`. The tab
+     goes to the `exited` badge — its files must **still be there**, because Restart revives that
+     tab under the same id and `↑` has to reach those commands. Restart it and confirm `↑` does.
+   - **Quitting the app deletes nothing.** Close the app with tabs open, relaunch: every tab's
+     history must survive, since quitting is not closing.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

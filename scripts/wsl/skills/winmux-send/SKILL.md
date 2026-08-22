@@ -33,7 +33,7 @@ reaches only them — a tab in another workspace is unreachable by title and by 
 ## 2. Send
 
 ```bash
-winmux send '#181' 'cargo test'     # arrives with a newline, so the target runs it
+winmux send '#181' 'cargo test'     # arrives with a CR, so the target runs it
 winmux send -l '#181' 'cargo test'  # literal: pre-fills the prompt, runs nothing
 ```
 
@@ -48,7 +48,7 @@ joined with single spaces, so quote anything your own shell would expand.
 | Your workspace only | Candidates stop at the workspace your own tab is in, and so does `winmux ls`. An id from elsewhere resolves to nothing, exactly like an id that does not exist. |
 | Never yourself | Your own tab is excluded from the candidates either way. |
 | Live terminals only | An exited tab or a viewer tab is never a target, whatever its title. |
-| Raw bytes | The text reaches the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. The trailing newline is what runs it; `-l` leaves it off. |
+| Raw bytes | The text reaches the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. The trailing CR is what runs it, in a shell and in a TUI agent alike; `-l` leaves it off. |
 | Size | 32 KiB after decoding. Send a path, not a file. |
 | Silent | No reply, no acknowledgement, no error: success and failure look identical and the exit code is 0 either way. Failures are logged by the winmux app, not by you. |
 

@@ -334,6 +334,22 @@ pub trait SessionHost: Send {
     /// 세션 종료. 미지·이미 종료된 id 에도 무해해야 한다 (멱등 —
     /// `PtySession::kill` 과 동일 계약).
     fn kill(&self, id: SessionId);
+
+    /// 탭들이 **영구히** 사라졌음을 알린다 — 그 탭 전용으로 만들어 둔 셸측 자원
+    /// (탭별 `HISTFILE`·resume 힌트)을 정리하라는 신호다. 탭 id 는 재사용되지
+    /// 않으므로 되살아날 일이 없다.
+    ///
+    /// **`SessionExited` 는 이 경로가 아니다** — 죽은 탭은 재시작으로 되살아나고
+    /// (ADR-0010) 그때 같은 탭 id 로 자기 history 를 다시 물어야 한다. 여기로 오는
+    /// 것은 `CloseTab`·`ClosePane`·`CloseWorkspace` 뿐이다.
+    ///
+    /// 여러 탭을 한 번에 받는 이유는 워크스페이스·pane 하나가 탭 N 개를 데리고
+    /// 사라지기 때문이다. 탭마다 부르면 정리 명령이 N 개 동시에 나가는데, 그것이
+    /// 부팅 재스폰이 콜드 VM 과 부딪혔던 바로 그 모양이다 (ADR-0010 개정).
+    ///
+    /// 기본 구현은 no-op — 탭별 셸측 자원이 없는 호스트(테스트·unix 개발 경로)를
+    /// 위해서다.
+    fn release_tabs(&self, _tabs: &[TabId], _distro: Option<&str>) {}
 }
 
 /// revision 을 곁들인 상태 직렬화 뷰 — `state-changed` emit·`get_state` 응답 형태.
@@ -1039,11 +1055,10 @@ impl Dispatcher {
                     .position(|ws| ws.id == workspace)
                     .ok_or_else(|| unknown("workspace", workspace.0))?;
                 let removed = self.state.workspaces.remove(wi);
-                for pane in removed.panes.values() {
-                    for tab in &pane.tabs {
-                        self.kill_if_terminal(tab);
-                    }
-                }
+                self.retire_tabs(
+                    removed.distro.as_deref(),
+                    removed.panes.values().flat_map(|pane| &pane.tabs),
+                );
                 if self.state.active_workspace == Some(workspace) {
                     // 닫은 워크스페이스가 active 였으면 남은 것 중 첫 번째로,
                     // 없으면 None (마지막 워크스페이스 닫기 허용). fallback 으로
@@ -1150,8 +1165,9 @@ impl Dispatcher {
                     // 사라지는 탭이 워크스페이스 상태의 출처면 Idle 로 되돌린다
                     // (pane 하나에 여러 탭이 있을 수 있어 제거되는 탭 전부 확인).
                     reset_agent_source(&mut self.state.workspaces[wi], tab.id);
-                    self.kill_if_terminal(tab);
                 }
+                let distro = self.state.workspaces[wi].distro.clone();
+                self.retire_tabs(distro.as_deref(), removed.tabs.iter());
                 Ok(CommandOutput::Done)
             }
 
@@ -1222,7 +1238,8 @@ impl Dispatcher {
                 }
                 // 닫힌 탭이 워크스페이스 상태의 출처면 Idle 로 되돌린다.
                 reset_agent_source(ws, tab);
-                self.kill_if_terminal(&removed);
+                let distro = ws.distro.clone();
+                self.retire_tabs(distro.as_deref(), std::iter::once(&removed));
                 Ok(CommandOutput::Done)
             }
 
@@ -1384,15 +1401,30 @@ impl Dispatcher {
         Ok((session, cwd))
     }
 
-    /// terminal 탭이면 소속 세션을 kill 한다. status 와 무관하게 kill 하며(이미
-    /// Exited 여도 무해 — SessionHost::kill 은 멱등 계약), 뷰어 탭은 no-op.
-    fn kill_if_terminal(&self, tab: &Tab) {
-        if let TabKind::Terminal {
-            pty_session: Some(s),
-            ..
-        } = tab.kind
-        {
-            self.host.kill(s);
+    /// 영구히 사라지는 탭들의 정리 — terminal 탭마다 소속 세션을 kill 하고, 그
+    /// 탭들의 셸측 자원 해제를 호스트에 **한 번** 알린다. 뷰어 탭은 어느 쪽도 아니다.
+    ///
+    /// kill 은 status 와 무관하다 (이미 Exited 여도 무해 — `SessionHost::kill` 은
+    /// 멱등 계약). 해제 통지는 세션 유무와도 무관하다: 스폰이 실패했거나 시작 표식이
+    /// 오지 않아 세션이 없는 탭도 자기 `HISTFILE` 은 이미 만들어져 있을 수 있다.
+    ///
+    /// kill 이 먼저인 것은 순서 계약이다 — 셸은 종료할 때 `HISTFILE` 을 쓰므로,
+    /// 지우기부터 하면 죽어 가는 셸이 파일을 되살린다. 반대 순서라면 남는 경합은
+    /// "kill 통지가 셸에 닿기 전에 해제가 끝나는" 경우뿐인데, 해제는 WSL 왕복이라
+    /// 셸의 종료 flush 보다 자릿수가 느리다.
+    fn retire_tabs<'a>(&self, distro: Option<&str>, tabs: impl Iterator<Item = &'a Tab>) {
+        let mut released = Vec::new();
+        for tab in tabs {
+            let TabKind::Terminal { pty_session, .. } = &tab.kind else {
+                continue;
+            };
+            if let Some(s) = pty_session {
+                self.host.kill(*s);
+            }
+            released.push(tab.id);
+        }
+        if !released.is_empty() {
+            self.host.release_tabs(&released, distro);
         }
     }
 
@@ -1610,13 +1642,16 @@ mod tests {
     use super::*;
     use crate::osc::OscEvent;
 
-    /// 테스트용 fake 호스트 — 스폰 id 순차 발급(1부터), kill·스폰 요청 기록,
+    /// 테스트용 fake 호스트 — 스폰 id 순차 발급(1부터), kill·스폰·해제 통지 기록,
     /// 스폰 실패 주입.
     #[derive(Default)]
     struct FakeHostInner {
         next_session: AtomicU32,
         kills: Mutex<Vec<SessionId>>,
         spawns: Mutex<Vec<ShellSpawnReq>>,
+        /// `release_tabs` 호출 한 번이 원소 하나 — 배치 계약(호출 횟수)까지
+        /// 검사할 수 있게 탭 목록을 평탄화하지 않는다.
+        releases: Mutex<Vec<(Vec<TabId>, Option<String>)>>,
         fail_spawn: AtomicBool,
     }
 
@@ -1630,6 +1665,10 @@ mod tests {
 
         fn spawns(&self) -> Vec<ShellSpawnReq> {
             self.0.spawns.lock().unwrap().clone()
+        }
+
+        fn releases(&self) -> Vec<(Vec<TabId>, Option<String>)> {
+            self.0.releases.lock().unwrap().clone()
         }
 
         fn set_fail_spawn(&self, fail: bool) {
@@ -1648,6 +1687,14 @@ mod tests {
 
         fn kill(&self, id: SessionId) {
             self.0.kills.lock().unwrap().push(id);
+        }
+
+        fn release_tabs(&self, tabs: &[TabId], distro: Option<&str>) {
+            self.0
+                .releases
+                .lock()
+                .unwrap()
+                .push((tabs.to_vec(), distro.map(str::to_string)));
         }
     }
 
@@ -3429,6 +3476,116 @@ mod tests {
         d.dispatch(Command::ClosePane { pane: pane2 }).unwrap();
         assert_eq!(agent(&d, ws).0, AgentStatus::Idle);
         assert_eq!(agent(&d, ws).1, None);
+    }
+
+    /// distro 를 단 워크스페이스 헬퍼 — 해제 통지가 어느 배포판으로 가야 하는지
+    /// 검사하려면 distro 가 실려 있어야 한다.
+    fn create_ws_on(d: &mut Dispatcher, name: &str, distro: &str) -> (WorkspaceId, PaneId) {
+        match d
+            .dispatch(Command::CreateWorkspace {
+                name: name.into(),
+                root_path: None,
+                distro: Some(distro.into()),
+                tab: None,
+            })
+            .unwrap()
+        {
+            CommandOutput::WorkspaceCreated { workspace, pane, .. } => (workspace, pane),
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn closing_a_tab_releases_its_shell_side_files() {
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws_on(&mut d, "ws", "Ubuntu");
+        let (tab, _s) = create_terminal_tab(&mut d, pane);
+
+        d.dispatch(Command::CloseTab { tab }).unwrap();
+
+        assert_eq!(
+            host.releases(),
+            vec![(vec![tab], Some("Ubuntu".to_string()))]
+        );
+    }
+
+    #[test]
+    fn a_pane_or_workspace_releases_all_of_its_tabs_in_one_call() {
+        // 배치 계약: 탭 N 개가 함께 사라져도 통지는 한 번이다. 탭마다 통지하면
+        // 호스트가 정리 왕복을 N 개 동시에 띄운다 (SessionHost rustdoc).
+        let (mut d, host) = dispatcher();
+        let (_ws, pane1) = create_ws_on(&mut d, "ws", "Ubuntu");
+        let (pane2, _split) = split_empty(&mut d, pane1, SplitDirection::Vertical);
+        let (a, _sa) = create_terminal_tab(&mut d, pane2);
+        let (b, _sb) = create_terminal_tab(&mut d, pane2);
+
+        d.dispatch(Command::ClosePane { pane: pane2 }).unwrap();
+        assert_eq!(host.releases(), vec![(vec![a, b], Some("Ubuntu".into()))]);
+
+        let (ws2, pane3) = create_ws_on(&mut d, "ws2", "Debian");
+        let (c, _sc) = create_terminal_tab(&mut d, pane3);
+        let (dd, _sd) = create_terminal_tab(&mut d, pane3);
+        d.dispatch(Command::CloseWorkspace { workspace: ws2 })
+            .unwrap();
+        assert_eq!(
+            host.releases().last().cloned(),
+            Some((vec![c, dd], Some("Debian".into())))
+        );
+    }
+
+    #[test]
+    fn a_tab_whose_shell_exited_keeps_its_files() {
+        // Exited 는 되살아나는 상태다 (ADR-0010) — 같은 탭 id 로 재시작하면 자기
+        // history 를 다시 물어야 하므로 지우면 안 된다.
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws_on(&mut d, "ws", "Ubuntu");
+        let (_tab, session) = create_terminal_tab(&mut d, pane);
+
+        d.apply_event(SessionEvent::SessionExited {
+            session,
+            code: Some(1),
+        });
+
+        assert!(host.releases().is_empty());
+    }
+
+    #[test]
+    fn a_terminal_tab_with_no_session_is_still_released() {
+        // 세션을 잃은 탭 — 셸이 죽은 뒤 재시작마저 실패하면 `pty_session` 이
+        // 비워진다 (ADR-0009). 그래도 HISTFILE 은 이미 만들어져 있으므로 세션
+        // 유무로 거르면 그 파일이 영원히 남는다.
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws_on(&mut d, "ws", "Ubuntu");
+        let (tab, session) = create_terminal_tab(&mut d, pane);
+        d.apply_event(SessionEvent::SessionExited {
+            session,
+            code: Some(1),
+        });
+        host.set_fail_spawn(true);
+        assert!(d.respawn_tab(tab).is_err());
+
+        d.dispatch(Command::CloseTab { tab }).unwrap();
+        assert_eq!(host.releases(), vec![(vec![tab], Some("Ubuntu".into()))]);
+    }
+
+    #[test]
+    fn closing_a_viewer_tab_releases_nothing() {
+        let (mut d, host) = dispatcher();
+        let (_ws, pane) = create_ws_on(&mut d, "ws", "Ubuntu");
+        let tab = match d
+            .dispatch(Command::CreateTab {
+                pane,
+                tab: NewTab::FolderBrowser { path: None },
+            })
+            .unwrap()
+        {
+            CommandOutput::TabCreated { tab, session: None } => tab,
+            other => panic!("unexpected output: {other:?}"),
+        };
+
+        d.dispatch(Command::CloseTab { tab }).unwrap();
+
+        assert!(host.releases().is_empty());
     }
 
     #[test]
