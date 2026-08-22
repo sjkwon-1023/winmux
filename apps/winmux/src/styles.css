@@ -39,6 +39,39 @@
   box-sizing: border-box;
 }
 
+/* 스크롤바를 직접 그린다. WebView2 는 Windows 의 "스크롤 막대 항상 표시" 설정을
+   따라가는데, 그 설정이 꺼진 기본 상태에서는 스크롤하는 동안만 나타났다 사라지는
+   오버레이 막대가 된다 — 터미널 스크롤백처럼 "지금 어디쯤인지"가 곧 정보인 표면
+   에서는 위치 표시가 아예 없는 것과 같다. `::-webkit-scrollbar` 에 폭을 주면
+   Chromium 이 그 요소를 자리를 차지하는 고전 막대로 되돌리므로 OS 설정과 무관하게
+   항상 보인다.
+
+   터미널에도 그대로 걸린다: xterm 의 `.xterm-viewport` 는 `overflow-y: scroll` 이라
+   막대 자리가 늘 잡혀 있고(스크롤백이 없어도 폭이 일정해 리사이즈로 흔들리지
+   않는다), 트랙을 투명으로 두면 xterm 이 런타임에 뷰포트에 칠하는 테마 배경이
+   그대로 비친다. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-muted);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 html,
 body {
   margin: 0;

@@ -377,6 +377,13 @@ Accepted deferrals, one line each. None of these block the MVP.
   levels down. One contract question rides along: `split` always puts the new pane in
   `second` (right/bottom), so a root wrap either takes the insertion side as a parameter or
   is right/bottom-only.
+- **CI takes whatever stable Rust the runner ships, so a new lint can turn a clean tree red**
+  — 2026-08-22 the runner moved to 1.98 and `clippy::chunks_exact_to_as_chunks` failed two
+  untouched UTF-16 decoders on a push that changed neither (fixed with the suggested
+  `as_chunks::<2>()`, which also compiles on the older local toolchain). Pinning with a
+  `rust-toolchain.toml` would make the gate reproducible, at the cost of not hearing about new
+  lints until someone bumps the pin. Undecided; noted so the next occurrence is recognized as
+  toolchain drift rather than a regression in the change under test.
 - **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
 - **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
   smaller replay cap, progressive replay, hide-until-parsed.
@@ -384,8 +391,39 @@ Accepted deferrals, one line each. None of these block the MVP.
   buttons as "split the *selected* pane".
 - **The `◎` browser tab button** was removed from the pane header (permanently disabled,
   taking up space); it returns in v2 with the feature behind it.
-- **Diagnostic stderr/console logging** kept from checkpoint-1 debugging (activity source,
-  focus/visible, rebuild order) — revisit the noise now that the repo is public.
+- **Diagnostic stderr/console logging — cleaned up 2026-08-22** (ADR-0004 deferred it until
+  "before any public release"; v0.3.11). The rule applied: **per-event tracing of normal
+  operation whose question has been answered goes; failure reports and once-per-boot facts
+  stay.** Removed — `reset_supervisor`'s three signal traces (activity source, `focused=`,
+  `visible=`), which fired on every click, ping, alt-tab and minimize to answer a checkpoint-1
+  question about which signals actually arrive, plus the front end's rebuild-order dump (every
+  layout rebuild) and pane-icon click log (every header button), both from the same concluded
+  "wrong pane split" investigation. The `source` tag `user_input` took existed only for its log
+  line and went with it. Kept — every `console.debug` that reports a *failure* (toast send,
+  stale auto-response, the chime's three), and the boot/reset/spawn lines that report a rare
+  significant event. The switch tracer keeps measuring but no longer prints: the report still
+  lands on `window.__winmux.lastSwitch`, so the open ~236ms item keeps its instrument. Note the
+  backend half was already invisible in release (`windows_subsystem = "windows"` leaves
+  `eprintln!` nowhere to land), so this bought code clarity, not runtime quiet — the actual gap
+  is the "No runtime log file" entry above.
+- **No scrollbar in a terminal pane — fixed 2026-08-22** (user report, v0.3.11). Scrolling
+  worked; there was simply no bar to see position or drag. Nothing in the app hid it and
+  xterm's own `.xterm-viewport` is `overflow-y: scroll`, so the cause is outside the app:
+  WebView2 follows the Windows *Always show scrollbars* setting, and with it off (the Windows 11
+  default) Chromium renders **overlay** scrollbars that fade out when idle. On a terminal
+  scrollback, where "where am I" is the information, a bar that is only visible while you are
+  already scrolling is the same as no bar. Fixed app-side and app-wide with an explicit
+  `::-webkit-scrollbar` rule set (10px, themed thumb): giving the pseudo-element a width makes
+  Chromium fall back to the classic space-occupying bar regardless of the OS setting, and one
+  rule covers the viewers and sidebar too rather than leaving the terminal the only surface with
+  a bar. Verification: WINDOWS-BUILD §10 v0.3.11 item 3 — field-only, since the whole cause is
+  a rendering mode this dev box does not have.
+- **The chime is gone but its class is not** — `chime.ts` still exports `Chime`,
+  `installChimeUnlock` and `AudioContextFactory`, and nothing outside its own tests imports
+  them (v0.3.7 removed the chime itself; `main.ts` takes only `detectNeedsInputOnset` /
+  `needsInputToastTargets` from that module). Dead code with a live test surface, so deleting it
+  is its own small change — noticed during the 2026-08-22 log cleanup, which is why three of the
+  surviving `console.debug` lines sit in code that never runs.
 - **Reload while minimized** resumes markdown polling until the next minimize/restore
   cycle — accepted narrow window.
 - **OSC scanner C0 handling** — CAN/SUB abort is implemented; the remaining C0 cases were

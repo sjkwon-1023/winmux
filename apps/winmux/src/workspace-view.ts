@@ -538,14 +538,6 @@ export class WorkspaceView {
     // inline flex 를 확정값으로 덮는다.
     built.style.flex = "1 1 0px";
     this.rootEl.replaceChildren(built);
-    // 진단 (체크포인트 1 버그 3): 렌더 직후 DOM 문서 순서(=시각 순서)의 pane id
-    // 나열 — 트리 leaves() 순서와 어긋나면 배치 버그가 즉시 드러난다.
-    console.debug(
-      "[winmux] rebuild order",
-      Array.from(this.rootEl.querySelectorAll<HTMLElement>(".pane")).map(
-        (el) => el.dataset.paneId,
-      ),
-    );
   }
 
   private buildNode(tree: SplitTree): HTMLElement {

@@ -130,10 +130,11 @@ class App {
   private readonly statusEl = requireElement("status-line");
   private readonly viewEl = requireElement("view");
   private readonly store = new Store();
-  /** 전환 지연 tracer (14단계) — 정착 시 report 를 콘솔·dev 훅에 노출한다.
+  /** 전환 지연 tracer (14단계) — 정착 시 report 를 dev 훅에 남긴다
+   *  (`window.__winmux.lastSwitch`). 전환마다 콘솔에 찍지는 않는다: 재는 사람이
+   *  훅을 읽으면 되고, 열려 있는 전환 지연 항목(ADR-0004)의 계측 수단은 그대로다.
    *  wsView 필드 초기화가 참조하므로 선언 순서상 wsView 보다 앞이어야 한다. */
   private readonly tracer = new SwitchTracer((report) => {
-    console.debug("[winmux] switch", report);
     window.__winmux.lastSwitch = report;
   });
   private readonly wsView = new WorkspaceView(

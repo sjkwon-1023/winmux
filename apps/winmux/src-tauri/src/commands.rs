@@ -89,7 +89,7 @@ pub async fn dispatch(
     // 성공한 dispatch 는 실제 사용자 활동이다 (UI·dev 훅 발) — 계획 16단계 C-2.
     // SwitchWorkspace 성공은 추가로 pending 워치독의 "안전한 순간" 신호.
     if result.is_ok() {
-        state.reset.user_input("dispatch");
+        state.reset.user_input();
         if is_workspace_switch {
             state.reset.workspace_switch();
         }
@@ -272,7 +272,7 @@ pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
         // visible=true 동기화는 idle 을 재무장해 30초 주기 재발화 루프가 된다.
         // 최소화 클릭 같은 실제 제스처는 그 직전의 mousedown 핑이 이미 잡는다.
         Some(visible) => state.reset.visibility(visible),
-        None => state.reset.user_input("ping"),
+        None => state.reset.user_input(),
     }
 }
 
@@ -970,7 +970,9 @@ fn query_default_distro() -> Result<String, String> {
 #[cfg(windows)]
 fn decode_utf16le(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     String::from_utf16_lossy(&units)

@@ -1782,6 +1782,28 @@ Both items need provisioning **v9**, which runs once on first launch of this bui
    - **Quitting the app deletes nothing.** Close the app with tabs open, relaunch: every tab's
      history must survive, since quitting is not closing.
 
+3. **Terminal panes have a visible scrollbar** — the app now draws its own instead of taking
+   whatever WebView2's overlay mode gives it. Provisioning is irrelevant here; this one is pure
+   front end.
+
+   - **The bar is there before you touch it.** In a terminal tab, `seq 1 500`. A scrollbar must
+     be visible on the right **without scrolling first**, its thumb sized to the scrollback, and
+     dragging it must move the view.
+   - **Confirm the cause while you are there.** Windows Settings › Accessibility › Visual
+     effects › *Always show scrollbars*. Note whether it is on or off — the fix matters only
+     when it is **off**, and knowing which state the field machine was in is what makes this
+     result mean anything.
+   - **It did not eat the terminal.** The bar takes ~10px, so `tput cols` should be one or two
+     lower than before at the same window size, and no text may be clipped underneath it. Resize
+     the window and confirm the terminal refits cleanly.
+   - **Everything else that scrolls got one too.** Open a text viewer on a long file, a folder
+     browser on a large directory, and a workspace list long enough to overflow the sidebar:
+     each must show the same bar.
+   - **An agent that scrolls itself is a different case.** With Claude Code running, check
+     whether the pane shows a scrollbar. If it does not while a plain shell does, the agent is
+     drawing on the alternate screen buffer, where there is no terminal scrollback to show — not
+     a regression, and nothing app-side can change it.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
