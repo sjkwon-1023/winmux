@@ -34,6 +34,7 @@ use tauri::AppHandle;
 use winmux_core::command::{CommandError, Dispatcher};
 
 use crate::state;
+use crate::winlog;
 
 /// 탭 사이 간격 (ms). 미설정이면 [`DEFAULT_STAGGER`], `0` 이면 간격 없음.
 const STAGGER_ENV: &str = "WINMUX_RESPAWN_STAGGER_MS";
@@ -58,8 +59,8 @@ pub fn respawn_restored_tabs(handle: AppHandle, dispatcher: Arc<Mutex<Dispatcher
         return;
     }
     let stagger = stagger_from_env();
-    eprintln!(
-        "[winmux] boot: respawning {} tab(s), stagger {} ms",
+    winlog!(
+        "boot: respawning {} tab(s), stagger {} ms",
         targets.len(),
         stagger.as_millis()
     );
@@ -86,19 +87,19 @@ pub fn respawn_restored_tabs(handle: AppHandle, dispatcher: Arc<Mutex<Dispatcher
                     // 스레드로 옮겨 가면서 **정상 동작이 된** 경합이라 실패로 적지
                     // 않는다 (상태·revision 은 불변이다).
                     Err(CommandError::UnknownTarget { .. }) => {
-                        eprintln!("[winmux] boot: tab {} closed before respawn; skipped", tab.0);
+                        winlog!("boot: tab {} closed before respawn; skipped", tab.0);
                     }
                     // 스폰 실패는 respawn_tab 이 이미 그 탭을 Exited{None} 으로 강등해
                     // 상태에 반영했다 — 여기서는 loud 기록만 남긴다.
                     Err(err) => {
-                        eprintln!("[winmux] boot: respawn failed (tab={}): {err}", tab.0);
+                        winlog!("boot: respawn failed (tab={}): {err}", tab.0);
                     }
                 }
                 state::publish_state(&handle, d_guard);
             }
         })
     {
-        eprintln!("[winmux] boot: respawn thread failed to start: {err}");
+        winlog!("boot: respawn thread failed to start: {err}");
     }
 }
 
@@ -123,7 +124,7 @@ fn stagger_from_env() -> Duration {
         Ok(raw) => match raw.trim().parse::<u64>() {
             Ok(ms) => Duration::from_millis(ms),
             Err(err) => {
-                eprintln!("[winmux] boot: {STAGGER_ENV}={raw:?} is not a number ({err}); using default");
+                winlog!("boot: {STAGGER_ENV}={raw:?} is not a number ({err}); using default");
                 DEFAULT_STAGGER
             }
         },
@@ -166,13 +167,13 @@ fn warm_wsl(distros: &[Option<String>]) {
         let elapsed = started.elapsed().as_millis();
         match status {
             Some(Ok(status)) => {
-                eprintln!("[winmux] boot: warmed WSL {label} in {elapsed} ms ({status})")
+                winlog!("boot: warmed WSL {label} in {elapsed} ms ({status})")
             }
             Some(Err(err)) => {
-                eprintln!("[winmux] boot: WSL warm-up failed for {label} after {elapsed} ms: {err}")
+                winlog!("boot: WSL warm-up failed for {label} after {elapsed} ms: {err}")
             }
-            None => eprintln!(
-                "[winmux] boot: WSL warm-up for {label} exceeded {} ms; respawning anyway",
+            None => winlog!(
+                "boot: WSL warm-up for {label} exceeded {} ms; respawning anyway",
                 WARMUP_DEADLINE.as_millis()
             ),
         }

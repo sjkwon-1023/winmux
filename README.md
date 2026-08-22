@@ -70,7 +70,8 @@ file reports itself in the status line instead of being silently ignored.
 {
   "fontFamily": "Cascadia Code, monospace",
   "fontSize": 15,
-  "highlightLanguages": ["python", "javascript", "typescript", "rust", "json", "toml", "css", "html"]
+  "highlightLanguages": ["python", "javascript", "typescript", "rust", "json", "toml", "css", "html"],
+  "log": false
 }
 ```
 
@@ -87,6 +88,14 @@ an unknown name is reported rather than ignored. The language comes from the fil
 (`.jsx` highlights as `javascript`, `.tsx` as `typescript`), and anything outside the set stays
 plain text. `[]` turns highlighting off. The highlighter is loaded on demand, so a session that
 never opens a matching file never pays for it.
+
+`log` writes a diagnostic log to `winmux.log` next to `state.json`, for reporting a bug that is
+hard to reproduce. It is **off unless you turn it on**, and turning it on takes a restart. While
+off nothing is opened, written or listened for; while on, the app records what it does — startup,
+shell spawns and how long they took, session exits, failures — plus the browser-level input
+events that are otherwise invisible from outside the window. **Terminal output and the text you
+type are never written**: input events record how many characters were involved, not which ones.
+The file is capped and rolls over into `winmux.log.1`, so leaving it on will not fill a disk.
 
 ## Setup
 

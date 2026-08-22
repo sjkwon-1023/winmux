@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 use winmux_core::reset::{ResetConfig, ResetPolicy, ResetTrigger};
+use crate::{winlog, wintrace};
 
 /// env 하나를 u64 로 파싱한다. 미설정은 기본값, 잘못된 값(비정수·음수·비UTF-8)은
 /// 기본값 + loud 경고 — 조용히 다른 의미로 해석하지 않는다.
@@ -36,14 +37,14 @@ fn env_u64(name: &str, default: u64) -> u64 {
     match std::env::var(name) {
         Err(std::env::VarError::NotPresent) => default,
         Err(err) => {
-            eprintln!("[winmux] reset: {name} unreadable ({err}); using default {default}");
+            winlog!("reset: {name} unreadable ({err}); using default {default}");
             default
         }
         Ok(raw) => match raw.trim().parse::<u64>() {
             Ok(v) => v,
             Err(_) => {
-                eprintln!(
-                    "[winmux] reset: {name}={raw:?} is not a non-negative integer; \
+                winlog!(
+                    "reset: {name}={raw:?} is not a non-negative integer; \
                      using default {default}"
                 );
                 default
@@ -63,7 +64,7 @@ fn config_from_env() -> ResetConfig {
     let mem_mb = env_u64("WINMUX_RESET_MEM_MB", 1536);
     let mut mem_poll_secs = env_u64("WINMUX_RESET_MEM_POLL_SECS", 60);
     if mem_poll_secs == 0 {
-        eprintln!("[winmux] reset: WINMUX_RESET_MEM_POLL_SECS=0 would busy-loop; using default 60");
+        winlog!("reset: WINMUX_RESET_MEM_POLL_SECS=0 would busy-loop; using default 60");
         mem_poll_secs = 60;
     }
     let safe_idle_secs = env_u64("WINMUX_RESET_SAFE_IDLE_SECS", 60);
@@ -75,7 +76,7 @@ fn config_from_env() -> ResetConfig {
     #[cfg(not(windows))]
     let mem_limit_bytes = match mem_limit_bytes {
         Some(_) => {
-            eprintln!("[winmux] reset: mem watchdog unsupported on this platform; disabled");
+            winlog!("reset: mem watchdog unsupported on this platform; disabled");
             None
         }
         None => None,
@@ -140,8 +141,8 @@ impl ResetSupervisor {
     /// 로그로 남긴다 (체크포인트 검증에서 env 반영 여부를 눈으로 확인하는 근거).
     pub fn spawn(app: AppHandle) -> Self {
         let cfg = config_from_env();
-        eprintln!(
-            "[winmux] reset: config idle_ms={:?} hidden_ms={:?} mem_limit_bytes={:?} \
+        winlog!(
+            "reset: config idle_ms={:?} hidden_ms={:?} mem_limit_bytes={:?} \
              mem_poll_ms={} safe_idle_ms={} cooldown_ms={} (None/off = disabled)",
             cfg.idle_ms,
             cfg.hidden_ms,
@@ -178,12 +179,17 @@ impl ResetSupervisor {
 
     /// 실제 사용자 입력 신호 — dispatch 성공·activity 핑. attach/resize/ack/
     /// stdin 은 부르지 않는다 (리셋 후 자동 동작·단말 자동 응답의 자기루프 차단).
-    pub fn user_input(&self) {
+    ///
+    /// `source` 는 로그 파일 전용 출처 태그다 — 체크포인트 1 에서 idle 이 무입력에도
+    /// 재발화한 원인을 판별하려면 재무장이 어디서 왔는지가 필요했다. 콘솔에서는
+    /// 소음이라 걷어냈고(2026-08-22), 로그 파일이 생기면서 제자리를 찾았다.
+    pub fn user_input(&self, source: &'static str) {
         let now = self.shared.now_ms();
         let mut g = self.shared.guarded.lock().unwrap();
         g.policy.on_user_input(now);
         g.last_input_at = now;
         drop(g);
+        wintrace!("reset: activity source={source} (idle/hidden re-armed)");
         self.shared.cond.notify_all();
     }
 
@@ -193,6 +199,8 @@ impl ResetSupervisor {
         let mut g = self.shared.guarded.lock().unwrap();
         g.policy.on_focus(focused, now);
         drop(g);
+        // 실기에서 최소화·포커스아웃 때 어떤 신호가 실제로 도착하는지 판별하는 줄.
+        wintrace!("reset: signal focused={focused}");
         self.shared.cond.notify_all();
     }
 
@@ -203,6 +211,7 @@ impl ResetSupervisor {
         let mut g = self.shared.guarded.lock().unwrap();
         g.policy.on_visibility(visible, now);
         drop(g);
+        wintrace!("reset: signal visible={visible}");
         self.shared.cond.notify_all();
     }
 
@@ -259,14 +268,14 @@ fn describe_trigger(trigger: ResetTrigger, g: &Guarded, cfg: &ResetConfig, now: 
 /// 돌아가고, 프론트는 attach 프로토콜로 복원한다 (계획 v2 12장). 실패는 삼키지
 /// 않고 loud — 다음 트리거·수동 리로드(Ctrl+Shift+R)가 재시도 경로다.
 fn perform_reset(app: &AppHandle, reason: &str) {
-    eprintln!("[winmux] reset: reloading webview ({reason})");
+    winlog!("reset: reloading webview ({reason})");
     match app.get_webview_window("main") {
         Some(window) => {
             if let Err(err) = window.reload() {
-                eprintln!("[winmux] reset: reload failed: {err}");
+                winlog!("reset: reload failed: {err}");
             }
         }
-        None => eprintln!("[winmux] reset: webview window \"main\" not found; reset skipped"),
+        None => winlog!("reset: webview window \"main\" not found; reset skipped"),
     }
 }
 
@@ -290,8 +299,8 @@ fn worker(shared: &Shared) {
                     if scan.failed > 0 {
                         // 자손인데 조회가 거부되는 비정상 — 합산이 과소평가라는
                         // 사실을 가리지 않는다.
-                        eprintln!(
-                            "[winmux] reset: mem scan: {}/{} webview processes unreadable; \
+                        winlog!(
+                            "reset: mem scan: {}/{} webview processes unreadable; \
                              sum is an undercount",
                             scan.failed, scan.matched
                         );
@@ -305,8 +314,8 @@ fn worker(shared: &Shared) {
                     // 불능이므로 0 으로 넣는다 (pending 유지 근거도 함께 사라짐)
                     // — 단 반드시 loud 로 드러낸다.
                     if !g.zero_scan_logged {
-                        eprintln!(
-                            "[winmux] reset: mem watchdog found no msedgewebview2.exe \
+                        winlog!(
+                            "reset: mem watchdog found no msedgewebview2.exe \
                              descendants — another instance may own the shared WebView2 \
                              browser process; memory is unmeasurable (watchdog inert)"
                         );
@@ -315,7 +324,7 @@ fn worker(shared: &Shared) {
                     0
                 }
                 Err(err) => {
-                    eprintln!("[winmux] reset: mem scan failed: {err}");
+                    winlog!("reset: mem scan failed: {err}");
                     0
                 }
             };
@@ -338,8 +347,8 @@ fn worker(shared: &Shared) {
         //    을 cooldown 이 가리는 창 (코어 rustdoc). 에피소드당 1회 loud.
         if g.policy.suppressed() {
             if !g.suppressed_logged {
-                eprintln!(
-                    "[winmux] reset: mem watchdog fire suppressed by cooldown — memory \
+                winlog!(
+                    "reset: mem watchdog fire suppressed by cooldown — memory \
                      still over limit right after a reset (possible real leak); will \
                      fire when cooldown ends"
                 );

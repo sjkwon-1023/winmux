@@ -1804,6 +1804,44 @@ Both items need provisioning **v9**, which runs once on first launch of this bui
      drawing on the alternate screen buffer, where there is no terminal scrollback to show — not
      a regression, and nothing app-side can change it.
 
+### v0.3.12 — verification
+
+The runtime log ([ADR-0014](adr/0014-opt-in-runtime-log.md)). Everything here is field-only: the
+file is written by the Windows build, and the input events it exists to catch only happen in a
+real WebView with a real IME.
+
+1. **Off is genuinely off.** Launch with no `log` key in `settings.json` (or `"log": false`). No
+   `winmux.log` may appear next to `state.json` — not an empty one either. Open tabs, split
+   panes, type, switch workspaces, then look again: still nothing.
+
+2. **On takes a restart, and says so in the file.** Add `"log": true`, and **without restarting**
+   confirm no file appears. Restart: `winmux.log` must exist and its first line must be
+   `log: enabled (v0.3.12)`. Wrong version there means the exe and the file are from different
+   builds.
+
+3. **The boot is in it.** After that restart the file must show the spawn lines for the restored
+   tabs — `spawn: starting`, `spawn: session N up in <ms> ms` — with plausible durations. Compare
+   the count against the tabs on screen; a tab with no spawn line is a finding.
+
+4. **The IME case, which is why this exists.** With logging on, type Korean in a terminal tab.
+   The file must show `ime: compositionstart`, `compositionupdate`, `compositionend` with
+   `len=` counts — and **no Korean text anywhere in the file**. Grep it to be sure. Then, if the
+   stuck-composition bug reproduces (previously typed syllable repeating, shortcuts dead): press
+   Alt+Left a few times while stuck, click another pane to clear it, quit, and **keep the file** —
+   it now carries the answer the code could not give. Look for whether a `compositionend` arrived
+   before the `ime: shortcut dropped while composing` lines, and how long they continued.
+
+5. **Terminal content never reaches it.** In a tab, `echo winmux-log-canary-12345`, and open a
+   file in the text viewer. Neither the canary nor any file content may appear in `winmux.log`.
+
+6. **It does not fill the disk or slow the terminal.** With logging on, `yes | head -c 20000000`
+   in a tab (a heavy output burst): the terminal must stay responsive, and `winmux.log` must not
+   grow with that output. Then check that rotation works at all — the file caps at 4 MiB and
+   rolls into `winmux.log.1`.
+
+7. **Turn it back off.** Set `"log": false`, restart, confirm nothing new is appended. The
+   existing file stays — deleting the user's file is not ours to do.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

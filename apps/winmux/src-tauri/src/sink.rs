@@ -27,6 +27,7 @@ use winmux_core::session::{Delivery, SessionId, SessionSink};
 
 use crate::router::OscRouter;
 use crate::state::{publish_state, AppState};
+use crate::{winlog, wintrace};
 
 /// 세션 1개 분의 sink. 레지스트리(`SinkRegistry`)와 리더 스레드([`SinkHandle`])가
 /// `Arc` 로 공유한다 — attach_terminal 이 실행 중인 세션의 채널 슬롯을 갈아끼울
@@ -104,8 +105,8 @@ impl SessionSink for SinkHandle {
                 // send 실패(webview 소멸 등) — 죽은 채널을 슬롯에서 해제해 이후
                 // chunk 가 send 시도 없이 Dropped 로 빠지게 한다. 실패 자체는
                 // 삼키지 않고 stderr 에 남긴다.
-                eprintln!(
-                    "[winmux] output channel send failed (session={}): {err}",
+                winlog!(
+                    "output channel send failed (session={}): {err}",
                     self.0.session
                 );
                 *slot = None;
@@ -144,12 +145,13 @@ impl SessionSink for SinkHandle {
         // 가 무해한 no-op 으로 보장한다 (계획 0-5).
         let Some(state) = self.0.app.try_state::<AppState>() else {
             // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 — 기록만 남긴다.
-            eprintln!(
-                "[winmux] on_exit: managed state unavailable (session={})",
+            winlog!(
+                "on_exit: managed state unavailable (session={})",
                 self.0.session
             );
             return;
         };
+        wintrace!("session {} exited (code={code:?})", self.0.session);
         let mut dispatcher = state.dispatcher.lock().unwrap();
         dispatcher.apply_event(SessionEvent::SessionExited {
             session: self.0.session,
@@ -163,8 +165,8 @@ impl SessionSink for SinkHandle {
         // 이유로 안전하다. 다만 이쪽은 세션을 죽이지 않으므로, 표식이 늦게 도착하면
         // 라우터 경로(OscBatch)가 이 상태를 되돌린다.
         let Some(state) = self.0.app.try_state::<AppState>() else {
-            eprintln!(
-                "[winmux] on_startup_timeout: managed state unavailable (session={})",
+            winlog!(
+                "on_startup_timeout: managed state unavailable (session={})",
                 self.0.session
             );
             return;
@@ -235,8 +237,8 @@ fn acquire_in_flight() -> Option<InFlightGuard> {
 /// 섞이면 그게 더 나쁜 오염이다. 송신 측에서 보면 전송은 무음 fire-and-forget 이다.
 fn deliver_send(app: &AppHandle, sender: SessionId, target: &str, text_b64: &str) {
     let Some(guard) = acquire_in_flight() else {
-        eprintln!(
-            "[winmux] send: dropped from session {sender}: too many deliveries in flight \
+        winlog!(
+            "send: dropped from session {sender}: too many deliveries in flight \
              (cap {MAX_IN_FLIGHT})"
         );
         return;
@@ -249,13 +251,13 @@ fn deliver_send(app: &AppHandle, sender: SessionId, target: &str, text_b64: &str
         let bytes = match decode_send_text(&text_b64) {
             Ok(bytes) => bytes,
             Err(err) => {
-                eprintln!("[winmux] send: rejected from session {sender}: {err}");
+                winlog!("send: rejected from session {sender}: {err}");
                 return;
             }
         };
         let Some(state) = app.try_state::<AppState>() else {
             // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 (on_exit 과 같은 규율).
-            eprintln!("[winmux] send: managed state unavailable; dropped");
+            winlog!("send: managed state unavailable; dropped");
             return;
         };
         // 대상 해석은 순수 조회다 — lock 은 조회 동안만 잡고 곧바로 놓는다.
@@ -267,17 +269,17 @@ fn deliver_send(app: &AppHandle, sender: SessionId, target: &str, text_b64: &str
         let session = match resolved {
             Ok(session) => session,
             Err(err) => {
-                eprintln!("[winmux] send: {err} (target={target:?}, from session {sender})");
+                winlog!("send: {err} (target={target:?}, from session {sender})");
                 return;
             }
         };
         let Some(handle) = state.sessions.get(session) else {
             // 해석과 write 사이에 탭이 닫힌 경우 — 드물지만 정상 순서다.
-            eprintln!("[winmux] send: target session {session} is gone; dropped");
+            winlog!("send: target session {session} is gone; dropped");
             return;
         };
         if let Err(err) = handle.write(&bytes) {
-            eprintln!("[winmux] send: write to session {session} failed: {err:#}");
+            winlog!("send: write to session {session} failed: {err:#}");
         }
     });
 }
@@ -324,8 +326,8 @@ struct QueryReply<'a> {
 /// 것이 요청자가 보는 유일한 신호다.
 fn deliver_query(app: &AppHandle, requester: SessionId, kind: &str, reply_b64: &str) {
     let Some(guard) = acquire_in_flight() else {
-        eprintln!(
-            "[winmux] query: dropped from session {requester}: too many deliveries in flight \
+        winlog!(
+            "query: dropped from session {requester}: too many deliveries in flight \
              (cap {MAX_IN_FLIGHT})"
         );
         return;
@@ -339,19 +341,19 @@ fn deliver_query(app: &AppHandle, requester: SessionId, kind: &str, reply_b64: &
         let reply_path = match decode_reply_path(&reply_b64) {
             Ok(path) => path,
             Err(err) => {
-                eprintln!("[winmux] query: rejected from session {requester}: {err}");
+                winlog!("query: rejected from session {requester}: {err}");
                 return;
             }
         };
         if kind != QUERY_KIND_LIST_TABS {
-            eprintln!(
-                "[winmux] query: unsupported kind {kind:?} from session {requester}; ignored"
+            winlog!(
+                "query: unsupported kind {kind:?} from session {requester}; ignored"
             );
             return;
         }
         let Some(state) = app.try_state::<AppState>() else {
             // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 (send 와 같은 규율).
-            eprintln!("[winmux] query: managed state unavailable; dropped");
+            winlog!("query: managed state unavailable; dropped");
             return;
         };
         // 열거와 요청자 역매핑은 둘 다 순수 조회다 — 한 번 잡은 lock 아래에서
@@ -371,12 +373,12 @@ fn deliver_query(app: &AppHandle, requester: SessionId, kind: &str, reply_b64: &
         }) {
             Ok(json) => json,
             Err(err) => {
-                eprintln!("[winmux] query: cannot serialize reply for session {requester}: {err}");
+                winlog!("query: cannot serialize reply for session {requester}: {err}");
                 return;
             }
         };
         if let Err(err) = write_reply_file(distro, &reply_path, &json) {
-            eprintln!("[winmux] query: reply for session {requester} failed: {err}");
+            winlog!("query: reply for session {requester} failed: {err}");
         }
     });
 }
@@ -467,15 +469,15 @@ fn answer_color_query(app: &AppHandle, session: SessionId, code: u8) {
         // 코어 파서가 10/11 만 이 이벤트로 만든다 — 다른 값이 오면 계약이 갈라진
         // 것이므로 지어낸 색으로 답하지 않고 드러낸다.
         other => {
-            eprintln!(
-                "[winmux] color query: unsupported code {other} (session={session}); ignored"
+            winlog!(
+                "color query: unsupported code {other} (session={session}); ignored"
             );
             return;
         }
     };
     let Some(guard) = acquire_in_flight() else {
-        eprintln!(
-            "[winmux] color query: dropped from session {session}: too many deliveries in flight \
+        winlog!(
+            "color query: dropped from session {session}: too many deliveries in flight \
              (cap {MAX_IN_FLIGHT})"
         );
         return;
@@ -485,20 +487,20 @@ fn answer_color_query(app: &AppHandle, session: SessionId, code: u8) {
         let _guard = guard;
         let Some(state) = app.try_state::<AppState>() else {
             // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 (send 와 같은 규율).
-            eprintln!("[winmux] color query: managed state unavailable; dropped");
+            winlog!("color query: managed state unavailable; dropped");
             return;
         };
         let Some(handle) = state.sessions.get(session) else {
             // 질의와 write 사이에 탭이 닫힌 경우 — 드물지만 정상 순서다.
-            eprintln!("[winmux] color query: session {session} is gone; dropped");
+            winlog!("color query: session {session} is gone; dropped");
             return;
         };
         if let Err(err) = handle.write(reply.as_bytes()) {
-            eprintln!("[winmux] color query: write to session {session} failed: {err:#}");
+            winlog!("color query: write to session {session} failed: {err:#}");
             return;
         }
         // v0.3.1 진단 관측점 — 이 줄이 없으면 질의가 conhost 에서 소멸한 것이다.
-        eprintln!("[winmux] color query {code} answered (session={session})");
+        winlog!("color query {code} answered (session={session})");
     });
 }
 

@@ -126,6 +126,9 @@ export interface UiSettings {
    *  "하이라이팅 끄기"** 라는 유효한 설정이고, null 은 미설정이라 프론트의 기본
    *  목록(text-view.ts DEFAULT_HIGHLIGHT_LANGUAGES)을 쓴다. */
   highlightLanguages: string[] | null;
+  /** 런타임 로그 파일을 켤지. null·false 는 꺼진 것이고, 그때 프론트는 로그를
+   *  **부르지 않을 뿐 아니라 진단 리스너를 설치조차 하지 않는다** (logging.ts). */
+  log: boolean | null;
 }
 
 /** 앱 설정 디렉터리의 settings.json 을 읽는다. **파일이 없으면 전부 null 인
@@ -134,6 +137,13 @@ export interface UiSettings {
  *  가리지 않는다). */
 export function getUiSettings(): Promise<UiSettings> {
   return invoke<UiSettings>("get_ui_settings");
+}
+
+/** 런타임 로그 파일에 한 줄 남긴다 — 로그가 꺼져 있으면 백엔드가 no-op 이지만,
+ *  프론트도 꺼져 있으면 애초에 부르지 않는다 (logging.ts 의 설치 규율). 실패는
+ *  던지지 않는다: 로그를 남기려다 기능이 죽으면 본말전도다. */
+export function logLine(text: string): Promise<void> {
+  return invoke<void>("log_line", { text });
 }
 
 // --- 뷰어 파일 접근 (21단계) --------------------------------------------------

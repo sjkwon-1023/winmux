@@ -28,6 +28,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use tauri::AppHandle;
+use crate::winlog;
 
 /// 설치 스크립트 버전. 마커 파일명(`~/.winmux/.setup-v<N>`)에 들어가므로, 스크립트
 /// 내용을 바꿔 기존 사용자에게도 다시 깔아야 할 때 이 값을 올리면 된다 (마커가
@@ -80,8 +81,8 @@ pub fn ensure_provisioned(_app: &AppHandle, distro: Option<&str>) {
                 Some(distro) => distro.as_str(),
                 None => "default distro",
             };
-            eprintln!(
-                "[winmux] provisioning failed ({target}): {err}; \
+            winlog!(
+                "provisioning failed ({target}): {err}; \
                  agent notification hooks are not wired — see scripts/wsl/claude-hook-example.md \
                  for the manual path"
             );
@@ -152,7 +153,7 @@ fn run(distro: Option<&str>) -> Result<(), String> {
         // 끝낸 경로(python3 부재 등). 조용히 버리면 그 경고가 사라지므로
         // 성공 경로에서도 그대로 흘려 준다.
         if !stderr.is_empty() {
-            eprintln!("[winmux] provisioning notice: {stderr}");
+            winlog!("provisioning notice: {stderr}");
         }
         return Ok(());
     }

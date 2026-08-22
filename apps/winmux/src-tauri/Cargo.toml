@@ -3,7 +3,7 @@
 
 [package]
 name = "winmux-app"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 
 [build-dependencies]
@@ -25,6 +25,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
+    # 로그 타임스탬프의 로컬 시각 (GetLocalTime) — 시간 크레이트를 들이지 않기 위해.
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 # 워크스페이스 폴더 선택 대화상자 (Windows 네이티브 IFileDialog). Windows 백엔드는

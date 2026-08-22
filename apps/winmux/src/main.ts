@@ -37,6 +37,7 @@ import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import { SwitchTracer } from "./switch-trace";
 import type { SwitchReport } from "./switch-trace";
+import { installFrontEndLogging, logSwallowedShortcut } from "./logging";
 import { adjustFontSize, applyTerminalSettings, resetFontSize } from "./terminal-view";
 import { applyHighlightSettings } from "./text-view";
 import {
@@ -213,6 +214,9 @@ class App {
     // 기본값으로 온다.
     try {
       const settings = await getUiSettings();
+      // 로그 배선이 먼저다 — 뒤따르는 적용에서 뭔가 어긋나면 그것도 로그에
+      // 남아야 하고, 이 함수 안에서 실패하는 것은 전부 그 뒤에 있다.
+      installFrontEndLogging(settings);
       applyTerminalSettings(settings);
       applyViewerFontSettings(settings);
       applyHighlightSettings(settings);
@@ -279,7 +283,14 @@ class App {
           shift: ev.shiftKey,
           isComposing: ev.isComposing,
         });
-        if (action === null) return;
+        if (action === null) {
+          // 조합 중이라는 이유로 수식키 조합이 통째로 삼켜졌다면 로그에 남긴다
+          // (logging.ts 모듈 주석). 2026-08-22 의 IME 건에서 "Alt+화살표가 안
+          // 먹는다"가 곧 "브라우저가 아직 조합 중이라고 믿는다"였는데, 그 상태가
+          // 언제 시작해 언제까지 갔는지는 이 줄로만 보인다.
+          if (ev.isComposing && (ev.ctrlKey || ev.altKey)) logSwallowedShortcut(ev);
+          return;
+        }
         ev.preventDefault();
         ev.stopPropagation();
         this.runNavAction(action);

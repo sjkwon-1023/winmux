@@ -16,6 +16,7 @@ use winmux_core::session::{SessionId, SessionManager, SessionOptions, SpawnSpec}
 use crate::router::OscRouter;
 use crate::sink::{SinkHandle, TerminalSink};
 use crate::state::SinkRegistry;
+use crate::{winlog, wintrace};
 
 /// Tauri 앱의 `SessionHost`. Dispatcher 가 소유하며(`Box<dyn SessionHost>`),
 /// 세션·sink 레지스트리는 관리 상태(`AppState`)와 `Arc` 로 공유한다.
@@ -286,7 +287,7 @@ fn env_deadline(var: &str, fallback: Option<Duration>) -> Option<Duration> {
         Ok(0) => None,
         Ok(ms) => Some(Duration::from_millis(ms)),
         Err(err) => {
-            eprintln!("[winmux] {var}={raw:?} is not a number ({err}); using the default");
+            winlog!("{var}={raw:?} is not a number ({err}); using the default");
             fallback
         }
     }
@@ -337,6 +338,40 @@ fn create_session(
 
 impl SessionHost for TauriHost {
     fn spawn_shell(&self, req: ShellSpawnReq) -> anyhow::Result<SessionId> {
+        // 스폰은 Dispatcher lock 아래의 유일한 블로킹 구간이라(모듈 doc), 여기서
+        // 얼마나 걸렸는지가 "앱 전체가 멈춘 것처럼 보였다"류 신고의 첫 단서다.
+        let started = std::time::Instant::now();
+        wintrace!("spawn: starting (tab={:?})", req.history_tab);
+        let result = self.spawn_shell_inner(req);
+        match &result {
+            Ok(session) => wintrace!(
+                "spawn: session {session} up in {} ms",
+                started.elapsed().as_millis()
+            ),
+            Err(err) => wintrace!(
+                "spawn: failed after {} ms: {err:#}",
+                started.elapsed().as_millis()
+            ),
+        }
+        result
+    }
+
+    fn kill(&self, id: SessionId) {
+        // 멱등 계약 (SessionHost rustdoc): 미지·이미 종료된 id 도 무해 —
+        // 양쪽 레지스트리 remove 모두 no-op 으로 끝난다. `SessionManager::remove`
+        // 는 레지스트리 lock 을 놓은 뒤 kill 신호를 보낸다 (코어 계약).
+        self.sinks.remove(id);
+        let _ = self.sessions.remove(id);
+    }
+
+    fn release_tabs(&self, tabs: &[TabId], distro: Option<&str>) {
+        wintrace!("release: {} closed tab(s)", tabs.len());
+        release_tab_files(tabs, distro);
+    }
+}
+
+impl TauriHost {
+    fn spawn_shell_inner(&self, req: ShellSpawnReq) -> anyhow::Result<SessionId> {
         let spec = spawn_spec(&req);
         let opts = SessionOptions {
             startup_deadline: startup_deadline(),
@@ -371,18 +406,6 @@ impl SessionHost for TauriHost {
                  ever completes"
             ))
         })
-    }
-
-    fn kill(&self, id: SessionId) {
-        // 멱등 계약 (SessionHost rustdoc): 미지·이미 종료된 id 도 무해 —
-        // 양쪽 레지스트리 remove 모두 no-op 으로 끝난다. `SessionManager::remove`
-        // 는 레지스트리 lock 을 놓은 뒤 kill 신호를 보낸다 (코어 계약).
-        self.sinks.remove(id);
-        let _ = self.sessions.remove(id);
-    }
-
-    fn release_tabs(&self, tabs: &[TabId], distro: Option<&str>) {
-        release_tab_files(tabs, distro);
     }
 }
 
@@ -431,13 +454,13 @@ fn release_tab_files(tabs: &[TabId], distro: Option<&str>) {
             match status {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
-                    eprintln!("[winmux] releasing {count} closed tab(s) exited with {status}")
+                    winlog!("releasing {count} closed tab(s) exited with {status}")
                 }
-                Err(err) => eprintln!("[winmux] could not release {count} closed tab(s): {err}"),
+                Err(err) => winlog!("could not release {count} closed tab(s): {err}"),
             }
         });
     if let Err(err) = spawned {
-        eprintln!("[winmux] could not start the release thread for {count} closed tab(s): {err}");
+        winlog!("could not start the release thread for {count} closed tab(s): {err}");
     }
 }
 

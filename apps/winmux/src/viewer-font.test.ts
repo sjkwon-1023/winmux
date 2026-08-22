@@ -36,7 +36,7 @@ const FAMILY_VAR = "--viewer-font-family";
 const SIZE_VAR = "--viewer-font-size";
 
 function settings(fontFamily: string | null, fontSize: number | null): UiSettings {
-  return { fontFamily, fontSize, highlightLanguages: null };
+  return { fontFamily, fontSize, highlightLanguages: null, log: null };
 }
 
 function rootValue(name: string): string {

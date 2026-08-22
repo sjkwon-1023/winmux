@@ -347,15 +347,26 @@ Accepted deferrals, one line each. None of these block the MVP.
   complexity, not cost: socket lifetime, attach-vs-new arbitration, resize forwarding and
   provisioning all grow. Sessions dying with the app is intended, memory pressure belongs to
   `.wslconfig`, and users who need more can run tmux themselves.
-- **No runtime log file** — everything the app says at runtime goes to `eprintln!`, and the
-  release build is `windows_subsystem = "windows"` (`main.rs:15`), so there is no console for it
-  to land in. `~/.winmux/setup.log` is provisioning-only and `toast.log` records toast sends;
-  neither sees the backend. Reconstructing the bug above took `dmesg` plus forensics on relay
-  processes that happened to still be alive — winmux itself had recorded nothing, and two
-  hypotheses were chased and discarded before the process tree settled it. A rolling file log
-  next to `state.json` (spawn start/finish with duration, exit, write errors) is what turns that
-  into a five-minute diagnosis. Keep it **off by default** with an opt-in switch, and never put
-  terminal output in it.
+- **Opt-in runtime log — landed 2026-08-22** (user request, v0.3.12). Until now everything the
+  app said at runtime went to `eprintln!` and the release build is
+  `windows_subsystem = "windows"`, so there was no console for it to land in: two field
+  incidents were reconstructed from `dmesg` and process trees that happened to still be alive.
+  Now `settings.json`'s `"log": true` (default off, read once at boot — enabling it takes a
+  restart) opens `winmux.log` next to `state.json`. Two macros split by purpose: `winlog!` goes
+  to stderr **and** the file and replaced all 66 `eprintln!("[winmux] …")` sites verbatim, so
+  dev behaviour is unchanged and what the app already said now lands somewhere; `wintrace!` is
+  file-only and is where the per-event traces removed from the console the same day came back
+  (see the entry above — noise in a console is the content of a diagnostic log). **While off
+  nothing exists**: no file, no writer thread, no front-end listeners, and `wintrace!` checks an
+  `AtomicBool` before formatting so a disabled trace does not even allocate. The front end
+  writes through a `log_line` command, which is what makes the IME class of bug visible at all —
+  it was the trigger for the feature. **Terminal output and typed text are never written**:
+  composition events record data *length*, and a swallowed shortcut records named keys as
+  themselves and any printable character as `(char)`. A bounded queue drops rather than blocks
+  (and says how many it dropped), and two 4 MiB files cap the disk cost.
+  [ADR-0014](docs/adr/0014-opt-in-runtime-log.md). Verification: WINDOWS-BUILD §10 v0.3.12.
+  **Open**: a bare `eprintln!` in the glue now silently keeps its line out of the file — nothing
+  enforces `winlog!`.
 - **`isCommandError`'s variant table is hand-maintained** — the `formatCommandError`
   switch is compile-time exhaustive via `assertNever`, but the type guard above it is a
   literal list, so a new `CommandError` variant falls silently through to the raw-JSON
@@ -418,6 +429,19 @@ Accepted deferrals, one line each. None of these block the MVP.
   rule covers the viewers and sidebar too rather than leaving the terminal the only surface with
   a bar. Verification: WINDOWS-BUILD §10 v0.3.11 item 3 — field-only, since the whole cause is
   a rendering mode this dev box does not have.
+- **Korean IME composition can get stuck, and every shortcut dies with it** (user report
+  2026-08-22, not fixed). Typing Korean produced a previously typed syllable repeating, no
+  shortcut worked, and clicking another pane and coming back cleared it. What the code settles:
+  `keys.ts:212` drops **every** shortcut while `ev.isComposing` is true, so a dead Alt+Arrow is
+  direct evidence that the browser still believed a composition was open; the repeated syllable
+  is xterm's hidden textarea re-sending stale composition text; the click fixed it because blur
+  forces the IME to commit. What the code cannot settle: whether `compositionend` never arrived
+  or arrived without clearing. That is why the opt-in log (above) records the composition events
+  and the swallowed shortcuts — the next reproduction answers it. Two candidate responses when it
+  does: narrow the `isComposing` guard to unmodified keys (every winmux shortcut carries Ctrl or
+  Alt and no IME uses those, so this restores an escape hatch without touching the cause), or
+  track composition state in the app and force it closed on blur and tab switch (heavier, and
+  premature without knowing the trigger).
 - **The chime is gone but its class is not** — `chime.ts` still exports `Chime`,
   `installChimeUnlock` and `AudioContextFactory`, and nothing outside its own tests imports
   them (v0.3.7 removed the chime itself; `main.ts` takes only `detectNeedsInputOnset` /

@@ -33,6 +33,7 @@ use winmux_core::osc::OscEvent;
 use winmux_core::session::SessionId;
 
 use crate::state::{publish_state, AppState};
+use crate::winlog;
 
 /// 트레일링 flush 창 기본값 — 이 창 안에 도착한 OSC 는 한 배치로 합쳐진다.
 const DEFAULT_FLUSH_MS: u64 = 100;
@@ -45,8 +46,8 @@ fn flush_window_from_env() -> Duration {
     let ms = match std::env::var("WINMUX_OSC_FLUSH_MS") {
         Err(std::env::VarError::NotPresent) => DEFAULT_FLUSH_MS,
         Err(err) => {
-            eprintln!(
-                "[winmux] osc: WINMUX_OSC_FLUSH_MS unreadable ({err}); \
+            winlog!(
+                "osc: WINMUX_OSC_FLUSH_MS unreadable ({err}); \
                  using default {DEFAULT_FLUSH_MS}"
             );
             DEFAULT_FLUSH_MS
@@ -54,8 +55,8 @@ fn flush_window_from_env() -> Duration {
         Ok(raw) => match raw.trim().parse::<u64>() {
             Ok(v) => v,
             Err(_) => {
-                eprintln!(
-                    "[winmux] osc: WINMUX_OSC_FLUSH_MS={raw:?} is not a non-negative integer; \
+                winlog!(
+                    "osc: WINMUX_OSC_FLUSH_MS={raw:?} is not a non-negative integer; \
                      using default {DEFAULT_FLUSH_MS}"
                 );
                 DEFAULT_FLUSH_MS
@@ -101,7 +102,7 @@ impl OscRouter {
     /// 세션 스폰은 manage 뒤다 — main.rs 의 manage-first 불변식).
     pub fn spawn(app: AppHandle) -> Self {
         let window = flush_window_from_env();
-        eprintln!("[winmux] osc: flush window {} ms", window.as_millis());
+        winlog!("osc: flush window {} ms", window.as_millis());
         let inner = Arc::new(RouterInner {
             app,
             pending: Mutex::new(RouterState {
@@ -148,7 +149,7 @@ impl Drop for OscRouter {
         self.inner.cond.notify_all();
         if let Some(worker) = self.worker.take() {
             if worker.join().is_err() {
-                eprintln!("[winmux] osc: router worker thread panicked");
+                winlog!("osc: router worker thread panicked");
             }
         }
     }
@@ -193,7 +194,7 @@ fn apply_batch(inner: &RouterInner, batch: OscBatch) {
     let Some(managed) = inner.app.try_state::<AppState>() else {
         // 앱 teardown 중 관리 상태가 이미 내려간 경우뿐 — sink on_exit 과 같은 규율로
         // 기록만 남긴다.
-        eprintln!("[winmux] osc: managed state unavailable; batch dropped");
+        winlog!("osc: managed state unavailable; batch dropped");
         return;
     };
     let mut dispatcher = managed.dispatcher.lock().unwrap();

@@ -50,6 +50,7 @@
 //! 앱 코드 예제(`TryCreateShortcut`/`InstallShortcut`)를 따라 앱 시작 시 만든다.
 
 use std::path::{Path, PathBuf};
+use crate::winlog;
 
 /// AUMID 문자열 리터럴의 단일 출처. [`APP_USER_MODEL_ID`] 와 아래 컴파일 타임
 /// 대조용 `concat!` 이 같은 리터럴을 쓰게 하려고 매크로로 둔다 (`concat!` 은 상수가
@@ -175,15 +176,15 @@ impl ShortcutOutcome {
 pub fn register() {
     match register_inner() {
         Ok(outcome) => {
-            eprintln!(
-                "[winmux] app-identity: AUMID {APP_USER_MODEL_ID} registered; start menu shortcut {}",
+            winlog!(
+                "app-identity: AUMID {APP_USER_MODEL_ID} registered; start menu shortcut {}",
                 outcome.as_str()
             );
         }
         Err(err) => {
             // loud 하게 남긴다: 이게 실패하면 needsInput 토스트가 통째로 안 뜬다.
-            eprintln!(
-                "[winmux] app-identity: FAILED to register the shell identity; \
+            winlog!(
+                "app-identity: FAILED to register the shell identity; \
                  needs-input toasts will not appear: {err}"
             );
         }
@@ -226,7 +227,7 @@ fn ensure_shortcut(
         // 읽기 실패는 "판정 불가" 로 취급해 덮어쓴다 — 손상된 .lnk 를 그대로 두면
         // 토스트가 계속 안 뜬다.
         let existing = read_shortcut(shortcut).unwrap_or_else(|err| {
-            eprintln!("[winmux] app-identity: cannot read the existing shortcut, rewriting it: {err}");
+            winlog!("app-identity: cannot read the existing shortcut, rewriting it: {err}");
             ExistingLink {
                 target: None,
                 aumid: None,

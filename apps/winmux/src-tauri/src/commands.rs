@@ -89,7 +89,7 @@ pub async fn dispatch(
     // 성공한 dispatch 는 실제 사용자 활동이다 (UI·dev 훅 발) — 계획 16단계 C-2.
     // SwitchWorkspace 성공은 추가로 pending 워치독의 "안전한 순간" 신호.
     if result.is_ok() {
-        state.reset.user_input();
+        state.reset.user_input("dispatch");
         if is_workspace_switch {
             state.reset.workspace_switch();
         }
@@ -272,7 +272,7 @@ pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
         // visible=true 동기화는 idle 을 재무장해 30초 주기 재발화 루프가 된다.
         // 최소화 클릭 같은 실제 제스처는 그 직전의 mousedown 핑이 이미 잡는다.
         Some(visible) => state.reset.visibility(visible),
-        None => state.reset.user_input(),
+        None => state.reset.user_input("ping"),
     }
 }
 
@@ -302,6 +302,10 @@ pub struct UiSettings {
     /// 텍스트 뷰어에서 구문 하이라이팅을 켤 언어 이름. [`HIGHLIGHT_LANGUAGES`]
     /// 밖의 이름이 하나라도 있으면 에러이고, **빈 배열은 "끄기"** 로 유효하다.
     pub highlight_languages: Option<Vec<String>>,
+    /// 런타임 로그 파일(`winmux.log`)을 켤지. 미설정·`false` 면 꺼진 것이고, 그때는
+    /// 파일도 열지 않고 쓰기 스레드도 뜨지 않는다 ([`crate::logfile`]). 켠 뒤에는
+    /// 앱을 다시 시작해야 한다 — 부팅 때 한 번만 읽는다.
+    pub log: Option<bool>,
 }
 
 /// 허용 폰트 크기(px). 밖의 값은 조용히 조정하지 않고 **거부**한다 — 0 이나 5000
@@ -333,6 +337,13 @@ const HIGHLIGHT_LANGUAGES: [&str; 8] = [
 /// 다르다) 작은 파일 읽기 한 번이고, 호출도 부팅당 1회다.
 #[tauri::command]
 pub fn get_ui_settings(app: AppHandle) -> Result<UiSettings, String> {
+    read_ui_settings(&app)
+}
+
+/// [`get_ui_settings`] 의 알맹이 — 커맨드가 아닌 호출자도 쓴다. 부팅 시
+/// [`crate::logfile::init`] 이 `log` 플래그를 보려고 프론트보다 먼저 부른다
+/// (프론트의 `get_ui_settings` 는 webview 가 뜬 뒤라 너무 늦다).
+pub(crate) fn read_ui_settings(app: &AppHandle) -> Result<UiSettings, String> {
     let dir = app
         .path()
         .app_config_dir()
@@ -379,6 +390,32 @@ pub fn get_ui_settings(app: AppHandle) -> Result<UiSettings, String> {
         }
     }
     Ok(settings)
+}
+
+/// 프론트엔드가 런타임 로그 파일에 한 줄 남긴다 — 로그가 켜져 있을 때만이고,
+/// 꺼져 있으면 이 커맨드 자체가 no-op 이다 (프론트도 꺼져 있으면 부르지 않는다).
+///
+/// **이 창구가 있는 이유**: 2026-08-22 한글 IME 조합이 풀리지 않던 건처럼 전부
+/// WebView 안에서 벌어지는 문제는 글루 로그로는 한 줄도 안 잡힌다.
+///
+/// 길이를 자르는 것은 방어다 — 프론트의 버그 하나가 루프에서 부르면 로그가 그
+/// 내용으로만 차 정작 필요한 줄이 회전으로 밀려난다. 자를 때는 잘랐다는 사실을
+/// 남긴다 (조용히 잘라 내면 읽는 사람이 원문으로 오독한다).
+#[tauri::command]
+pub fn log_line(text: String) {
+    if !crate::logfile::enabled() {
+        return;
+    }
+    let line = if text.len() > crate::logfile::MAX_LINE_BYTES {
+        let mut cut = crate::logfile::MAX_LINE_BYTES;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}… (truncated)", &text[..cut])
+    } else {
+        text
+    };
+    crate::logfile::write(line);
 }
 
 /// 수동 WebView 리셋 — **dev 훅(`window.__winmux.resetUi`)·향후 MCP 전용이며 UI

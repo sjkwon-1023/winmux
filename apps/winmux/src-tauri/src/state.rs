@@ -25,6 +25,7 @@ use winmux_core::session::{SessionId, SessionManager};
 use crate::reset_supervisor::ResetSupervisor;
 use crate::router::OscRouter;
 use crate::sink::TerminalSink;
+use crate::winlog;
 
 /// 세션별 출력 sink 레지스트리 — `attach_terminal` 이 채널을 장착할 대상을
 /// 찾는 곳. `SessionManager` 와 마찬가지로 Dispatcher lock 밖 자체 동기화.
@@ -82,15 +83,15 @@ pub fn publish_state(app: &AppHandle, dispatcher: &Dispatcher) {
     match serde_json::to_value(dispatcher.snapshot()) {
         Ok(payload) => {
             if let Err(err) = app.emit("state-changed", payload) {
-                eprintln!("[winmux] state-changed emit failed: {err}");
+                winlog!("state-changed emit failed: {err}");
             }
         }
-        Err(err) => eprintln!("[winmux] state snapshot serialize failed: {err}"),
+        Err(err) => winlog!("state snapshot serialize failed: {err}"),
     }
     match app.try_state::<AppState>() {
         Some(managed) => managed.saver.schedule(dispatcher.state().clone()),
         // manage-first 부팅 계약상 이 함수는 manage 후에만 불린다 — 아니라면
         // 저장이 누락되고 있는 프로그램 결함이므로 숨기지 않는다.
-        None => eprintln!("[winmux] publish_state: managed state unavailable; save skipped"),
+        None => winlog!("publish_state: managed state unavailable; save skipped"),
     }
 }

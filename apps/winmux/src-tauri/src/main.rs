@@ -21,6 +21,7 @@ mod app_identity;
 mod boot;
 mod commands;
 mod host;
+mod logfile;
 mod provision;
 mod reset_supervisor;
 mod router;
@@ -77,6 +78,10 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
+            // 로그가 켜져 있다면 **제일 먼저** 연다 — 부팅 자체(상태 복원·재스폰
+            // 파도)가 실기에서 가장 자주 실패하는 구간이라, 그 줄들을 놓치면
+            // 로그를 켠 의미가 절반이다.
+            logfile::init(&handle);
             let sessions = Arc::new(SessionManager::new());
             let sinks = Arc::new(state::SinkRegistry::default());
             // OSC 라우터는 sink 생성보다 먼저 — sink factory(TauriHost)가 핸들을
@@ -96,7 +101,7 @@ fn main() {
             let (dispatcher, needs_dogfood) = match persist::load(&state_path) {
                 LoadOutcome::Restored { state, repairs } => {
                     for repair in &repairs {
-                        eprintln!("[winmux] boot: state repaired: {repair}");
+                        winlog!("boot: state repaired: {repair}");
                     }
                     // 스폰 없이 채택만 — 재스폰은 manage 후 아래 루프에서 (모듈
                     // doc 의 manage-first 근거 참조).
@@ -106,16 +111,16 @@ fn main() {
                     // Fresh 사유를 부팅 결정 로그로 남긴다 — 손상·버전 강등의
                     // 세부는 persist::load 가 이미 stderr 에 남겼다.
                     match &reason {
-                        FreshReason::NoFile => eprintln!(
-                            "[winmux] boot: no saved state at {} — starting fresh",
+                        FreshReason::NoFile => winlog!(
+                            "boot: no saved state at {} — starting fresh",
                             state_path.display()
                         ),
-                        FreshReason::Corrupt { backup, error } => eprintln!(
-                            "[winmux] boot: saved state corrupt: {error}; original kept at {} — starting fresh",
+                        FreshReason::Corrupt { backup, error } => winlog!(
+                            "boot: saved state corrupt: {error}; original kept at {} — starting fresh",
                             backup_label(backup)
                         ),
-                        FreshReason::UnsupportedVersion { found, backup } => eprintln!(
-                            "[winmux] boot: saved state version {found} unsupported; original kept at {} — starting fresh",
+                        FreshReason::UnsupportedVersion { found, backup } => winlog!(
+                            "boot: saved state version {found} unsupported; original kept at {} — starting fresh",
                             backup_label(backup)
                         ),
                     }
@@ -205,8 +210,8 @@ fn main() {
             tauri::WindowEvent::Focused(focused) => {
                 match window.app_handle().try_state::<state::AppState>() {
                     Some(managed) => managed.reset.focus(*focused),
-                    None => eprintln!(
-                        "[winmux] focus event before managed state; reset signal dropped"
+                    None => winlog!(
+                        "focus event before managed state; reset signal dropped"
                     ),
                 }
                 // 프론트에도 같은 사실을 넘긴다 — 소비처가 달라(리셋 정책 vs 토스트)
@@ -220,7 +225,7 @@ fn main() {
                 // 현재 포커스를 한 번 조회해 신호 유실에서 스스로 복구한다
                 // (main.ts installWindowFocus).
                 if let Err(err) = window.emit(WINDOW_FOCUS_EVENT, *focused) {
-                    eprintln!("[winmux] window-focus emit failed (focused={focused}): {err}");
+                    winlog!("window-focus emit failed (focused={focused}): {err}");
                 }
             }
             // 최소화 → 프론트 폴링 정지 신호 (체크포인트 2 실기 결함: WebView2
@@ -242,7 +247,7 @@ fn main() {
                     // emit 실패는 프론트가 폴링을 계속하는 것(=기존 동작)일 뿐이라
                     // 치명적이지 않다 — 가리지 않고 기록만 남긴다.
                     if let Err(err) = window.emit(WINDOW_HIDDEN_EVENT, hidden) {
-                        eprintln!("[winmux] window-hidden emit failed (hidden={hidden}): {err}");
+                        winlog!("window-hidden emit failed (hidden={hidden}): {err}");
                     }
                 }
             }
@@ -263,6 +268,8 @@ fn main() {
             commands::reset_ui,
             // settings.json 의 UI 설정 (터미널 폰트) — 부팅당 1회, 설정 UI 는 없다.
             commands::get_ui_settings,
+            // 프론트엔드 → 런타임 로그 파일 (로그가 켜져 있을 때만).
+            commands::log_line,
             // 워크스페이스 폴더 선택 (Windows 네이티브 대화상자).
             commands::pick_workspace_folder,
             // 터미널 링크 클릭 → Windows 기본 브라우저 (ADR-0012).
@@ -291,7 +298,7 @@ fn main() {
                     }
                     // setup 실패로 manage 전에 종료되는 경로뿐 — flush 할 상태
                     // 자체가 없다.
-                    None => eprintln!("[winmux] exit: managed state unavailable; nothing to flush"),
+                    None => winlog!("exit: managed state unavailable; nothing to flush"),
                 }
             }
         });
