@@ -40,12 +40,34 @@
 // 않는다 (편집 중 F2 는 편집을 다시 시작할 뿐이다).
 
 import { shortcutLabel } from "./keys";
-import { hasRunningTerminals, reconcilePlan, sameCard, sidebarModel } from "./sidebar-model";
-import type { WorkspaceCardModel } from "./sidebar-model";
+import {
+  dropBefore,
+  hasRunningTerminals,
+  reconcilePlan,
+  sameCard,
+  sidebarModel,
+} from "./sidebar-model";
+import type { CardBox, WorkspaceCardModel } from "./sidebar-model";
 import type { Command, CommandOutput, StateSnapshot, WorkspaceId } from "./types";
 
 /** UI 발 dispatch — main.ts dispatchUI 래퍼 (실패는 null, reject 없음). */
 type DispatchFn = (cmd: Command) => Promise<CommandOutput | null>;
+
+/** 포인터가 이만큼 세로로 움직여야 드래그로 친다. 카드 클릭이 워크스페이스
+ *  전환이라, 손이 조금 흔들린 클릭이 순서를 바꿔 버리면 안 된다 (splitter 의
+ *  드래그 판정과 같은 규율). */
+const DRAG_THRESHOLD_PX = 4;
+
+/** 진행 중인 드래그. `moving` 이 false 인 동안은 아직 문턱을 못 넘은 눌림이라
+ *  클릭으로 끝날 수 있고, 그때는 DOM 도 커맨드도 건드리지 않는다. */
+interface DragState {
+  workspace: WorkspaceId;
+  pointerId: number;
+  startY: number;
+  moving: boolean;
+  /** 지금 포인터 위치가 가리키는 놓을 자리 (`moveWorkspace` 의 before 계약). */
+  before: WorkspaceId | null;
+}
 
 /** 카드 1개의 DOM 노드 묶음 — in-place 패치 대상. model 은 이 카드가 지금 그리고
  *  있는 모델로, 클릭 핸들러가 stale 클로저 대신 여기서 최신 값을 읽는다.
@@ -85,6 +107,12 @@ export class Sidebar {
   private readonly cardNodes = new Map<WorkspaceId, CardNodes>();
   /** 이름 인라인 편집 중인 워크스페이스 (없으면 null) — 편집 상태 가드의 주체. */
   private editing: WorkspaceId | null = null;
+  /** 진행 중인 드래그 재배치 (없으면 null). 이게 켜져 있는 동안 render 는 DOM 을
+   *  건드리지 않는다 — 끌고 있는 카드가 재조립으로 사라지면 드래그가 끊긴다. */
+  private drag: DragState | null = null;
+  /** 방금 드래그로 끝난 상호작용인가 — 뒤따르는 click 하나를 삼킨다 (아래
+   *  onCardPointerDown 주석). */
+  private dragged = false;
 
   constructor(
     rootEl: HTMLElement,
@@ -114,6 +142,11 @@ export class Sidebar {
   /** 스냅샷 반영 진입점 — store 구독에서 revision 순으로 호출된다. */
   render(snapshot: StateSnapshot): void {
     this.lastSnapshot = snapshot;
+    // 드래그 중에는 DOM 을 건드리지 않는다. 상태 변화는 OSC 마다 오므로 끄는 도중
+    // 재조립이 끼어들기 쉬운데, 그러면 끌고 있던 엘리먼트가 갈아치워져 포인터
+    // 캡처가 끊긴다 — 편집 중 카드를 건너뛰는 것과 같은 규율이고, 밀린 갱신도
+    // 같은 방식으로 종료 시(endDrag) 한 번에 만회한다.
+    if (this.drag !== null) return;
     const model = sidebarModel(snapshot.state.workspaces, snapshot.state.activeWorkspace);
     const prev = this.lastCards;
     const plan = reconcilePlan(prev, model);
@@ -264,7 +297,18 @@ export class Sidebar {
     const nodes: CardNodes = { root: el, name, rename, dot, status, path, model };
     this.applyCard(nodes, model);
 
+    el.addEventListener("pointerdown", (ev) => this.onCardPointerDown(ev, nodes));
+    el.addEventListener("pointermove", (ev) => this.onCardPointerMove(ev));
+    el.addEventListener("pointerup", () => this.endDrag(true));
+    el.addEventListener("pointercancel", () => this.endDrag(false));
+
     el.addEventListener("click", () => {
+      // 드래그로 끝난 상호작용의 click 은 삼킨다 — 순서를 바꾸려고 끌었을 뿐인데
+      // 워크스페이스까지 전환되면 안 된다.
+      if (this.dragged) {
+        this.dragged = false;
+        return;
+      }
       // 편집 중 카드 안의 클릭은 입력 조작이다 — 전환을 보내지 않는다.
       if (this.editing === nodes.model.workspace) return;
       // 이미 활성이면 no-op 스킵 (계획 D4). in-place 패치로 카드가 살아남는 동안
@@ -274,6 +318,121 @@ export class Sidebar {
       }
     });
     return nodes;
+  }
+
+  /** 카드 눌림 — 아직 드래그가 아니다. 문턱(DRAG_THRESHOLD_PX)을 넘어야 시작한다.
+   *
+   *  ×·이름 입력 위의 눌림은 그 컨트롤의 것이라 제외한다. 편집 중인 카드도
+   *  제외한다 — 텍스트 선택 드래그가 카드 재배치가 되면 안 된다. */
+  private onCardPointerDown(ev: PointerEvent, nodes: CardNodes): void {
+    // 이전 드래그가 남긴 클릭 삼킴은 여기서 만료된다. 드래그가 카드 밖에서 끝나면
+    // click 이 아예 안 오므로, 플래그를 클릭에서만 지우면 다음 클릭이 억울하게
+    // 삼켜진다.
+    this.dragged = false;
+    if (ev.button !== 0) return;
+    if (this.editing === nodes.model.workspace) return;
+    const target = ev.target;
+    if (target instanceof HTMLElement && target.closest("button, input") !== null) return;
+
+    this.drag = {
+      workspace: nodes.model.workspace,
+      pointerId: ev.pointerId,
+      startY: ev.clientY,
+      moving: false,
+      before: null,
+    };
+  }
+
+  private onCardPointerMove(ev: PointerEvent): void {
+    const drag = this.drag;
+    if (drag === null || ev.pointerId !== drag.pointerId) return;
+    if (!drag.moving) {
+      if (Math.abs(ev.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
+      drag.moving = true;
+      // 캡처는 문턱을 넘은 뒤에만 잡는다 — 먼저 잡으면 평범한 클릭까지 이 카드가
+      // 붙들어 다른 요소의 hover·click 이 어긋난다.
+      if (ev.target instanceof Element) ev.target.setPointerCapture(ev.pointerId);
+      this.cardNodes.get(drag.workspace)?.root.classList.add("dragging");
+    }
+    drag.before = dropBefore(this.dropBoxes(), ev.clientY);
+    this.showDropIndicator(drag);
+  }
+
+  /** 드래그 종료. `commit` 이 참이고 자리가 실제로 바뀌면 커맨드를 보낸다.
+   *
+   *  드래그 중 밀어 둔 렌더는 여기서 만회한다 — 그 사이 스냅샷들의 sameCard 판정은
+   *  이미 지나갔으므로 다음 렌더가 저절로 고쳐 주지 않는다 (stopEditing 과 동형). */
+  private endDrag(commit: boolean): void {
+    const drag = this.drag;
+    if (drag === null) return;
+    this.drag = null;
+    if (!drag.moving) return;
+
+    this.dragged = true;
+    this.clearDropIndicator();
+    this.cardNodes.get(drag.workspace)?.root.classList.remove("dragging");
+
+    if (commit && this.movesAnything(drag)) {
+      void this.dispatch({
+        type: "moveWorkspace",
+        workspace: drag.workspace,
+        before: drag.before,
+      });
+    }
+    if (this.lastSnapshot !== null) this.render(this.lastSnapshot);
+  }
+
+  /** 이 드래그가 순서를 실제로 바꾸는가 — 제자리에 놓았으면 커맨드를 보내지
+   *  않는다. 코어가 no-op 으로 받아 주긴 하지만 revision 은 올라가고, 그러면
+   *  카드를 집었다 놓기만 해도 저장이 예약된다 (카드 클릭의 "이미 활성이면
+   *  no-op 스킵" 과 같은 규칙). */
+  private movesAnything(drag: DragState): boolean {
+    if (drag.before === drag.workspace) return false;
+    const cards = this.lastCards ?? [];
+    const from = cards.findIndex((c) => c.workspace === drag.workspace);
+    if (from < 0) return false;
+    const to =
+      drag.before === null
+        ? cards.length
+        : cards.findIndex((c) => c.workspace === drag.before);
+    // 자기 바로 뒤 카드 앞 = 제자리.
+    return !(to === from || to === from + 1);
+  }
+
+  /** 화면에 보이는 순서 그대로의 카드 세로 위치 — dropBefore 의 입력.
+   *
+   *  매 이동마다 다시 잰다. 드래그 중에는 렌더가 멈춰 있어 목록 자체는 안 변하지만
+   *  사이드바는 스크롤되므로, 한 번 재서 캐시하면 스크롤 뒤에 엉뚱한 자리를
+   *  가리킨다. 카드는 한 자릿수라 매번 재도 싸다. */
+  private dropBoxes(): CardBox[] {
+    const boxes: CardBox[] = [];
+    for (const card of this.lastCards ?? []) {
+      const nodes = this.cardNodes.get(card.workspace);
+      if (nodes === undefined) continue;
+      const rect = nodes.root.getBoundingClientRect();
+      boxes.push({ workspace: card.workspace, top: rect.top, height: rect.height });
+    }
+    return boxes;
+  }
+
+  /** 놓을 자리 표시 — 카드 **하나**만 표시를 갖는다. 맨 뒤로 가는 경우에는 마지막
+   *  카드의 아래쪽에 붙인다 (컨테이너에 따로 표시를 두면 카드가 없을 때의 빈
+   *  컨테이너까지 신경 써야 한다). */
+  private showDropIndicator(drag: DragState): void {
+    this.clearDropIndicator();
+    if (drag.before === null) {
+      const last = this.lastCards?.at(-1);
+      if (last === undefined) return;
+      this.cardNodes.get(last.workspace)?.root.classList.add("drop-after");
+      return;
+    }
+    this.cardNodes.get(drag.before)?.root.classList.add("drop-before");
+  }
+
+  private clearDropIndicator(): void {
+    for (const nodes of this.cardNodes.values()) {
+      nodes.root.classList.remove("drop-before", "drop-after");
+    }
   }
 
   /** 카드 모델을 기존 노드에 반영 — 조립 직후와 in-place 패치가 같은 경로를 탄다. */

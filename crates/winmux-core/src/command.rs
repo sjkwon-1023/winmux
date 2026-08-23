@@ -74,6 +74,28 @@ pub enum Command {
         workspace: WorkspaceId,
         name: String,
     },
+    /// 사이드바에서 워크스페이스 순서를 바꾼다 (드래그 재배치). `workspace` 를
+    /// 빼서 `before` **바로 앞**에 넣고, `before` 가 None 이면 맨 뒤로 보낸다.
+    ///
+    /// 목적지를 **인덱스가 아니라 이웃의 id 로** 받는 이유가 둘이다. 하나는
+    /// 인덱스의 "빼기 전 기준인가 뺀 뒤 기준인가"라는 해묵은 모호함이 아예 없어서고,
+    /// 다른 하나는 프론트가 보는 스냅샷이 낡았을 때의 결과가 낫기 때문이다 — 그
+    /// 사이 목록이 바뀌었어도 "이 카드 앞"은 여전히 뜻이 통하고, 이웃이 사라졌으면
+    /// 엉뚱한 자리에 꽂히는 대신 [`CommandError::UnknownTarget`] 으로 깨끗이 실패한다.
+    /// 인덱스였다면 같은 상황에서 조용히 다른 자리로 갔을 것이다.
+    ///
+    /// `before == Some(workspace)` 는 "자기 앞으로"라 아무 일도 일어나지 않지만
+    /// 에러도 아니다 (제자리에 놓은 드래그의 자연스러운 표현).
+    ///
+    /// **순서가 곧 `Ctrl+1`~`Ctrl+9` 의 번호다** (사이드바 순서 1-based — `keys.ts`).
+    /// 재배치는 그 번호까지 같이 옮긴다 — 자주 쓰는 워크스페이스를 `Ctrl+1` 로
+    /// 만드는 것이 이 기능의 실질적 값어치라는 사용자 판단(2026-08-22)이다.
+    /// active_workspace 는 건드리지 않는다: 정리하려고 끈 드래그가 화면까지 바꾸면
+    /// 안 된다 (SwitchWorkspace 와의 직교성 — FocusPane 주석과 같은 규율).
+    MoveWorkspace {
+        workspace: WorkspaceId,
+        before: Option<WorkspaceId>,
+    },
     /// 소속 워크스페이스의 active_pane 을 바꾼다. active_workspace 는 바꾸지
     /// 않는다 — 워크스페이스 전환은 SwitchWorkspace 로 명시한다 (명령 직교성).
     FocusPane {
@@ -1087,6 +1109,41 @@ impl Dispatcher {
                 // 바꾸는 것은 워크스페이스 이름뿐이다 — 탭 제목(OSC 2 소유)은
                 // 건드리지 않는다.
                 ws.name = name;
+                Ok(CommandOutput::Done)
+            }
+
+            Command::MoveWorkspace { workspace, before } => {
+                // 검증을 전부 마친 뒤에 옮긴다 — 중간에 실패하면 반쯤 옮겨진
+                // 목록이 남는다 ("실패 시 상태 불변" 계약, 모듈 doc).
+                let from = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.id == workspace)
+                    .ok_or_else(|| unknown("workspace", workspace.0))?;
+                if let Some(target) = before {
+                    if target == workspace {
+                        // 자기 앞 = 제자리. 옮길 것이 없다 (variant rustdoc).
+                        return Ok(CommandOutput::Done);
+                    }
+                    if !self.state.workspaces.iter().any(|ws| ws.id == target) {
+                        return Err(unknown("workspace", target.0));
+                    }
+                }
+
+                let moved = self.state.workspaces.remove(from);
+                // 삽입 위치는 **뺀 뒤의** 목록에서 다시 찾는다. 빼기 전 인덱스를
+                // 그대로 쓰면 뒤로 옮길 때 한 칸씩 어긋난다.
+                let at = match before {
+                    None => self.state.workspaces.len(),
+                    Some(target) => self
+                        .state
+                        .workspaces
+                        .iter()
+                        .position(|ws| ws.id == target)
+                        .expect("위에서 존재를 확인했고 그 뒤로 목록은 remove 뿐이다"),
+                };
+                self.state.workspaces.insert(at, moved);
                 Ok(CommandOutput::Done)
             }
 
@@ -3493,6 +3550,117 @@ mod tests {
             CommandOutput::WorkspaceCreated { workspace, pane, .. } => (workspace, pane),
             other => panic!("unexpected output: {other:?}"),
         }
+    }
+
+    /// 사이드바 순서 = `state.workspaces` 순서. 이름 목록으로 읽어야 재배치가
+    /// 눈에 보인다 (id 는 생성 순서라 순서 변화를 못 보여 준다).
+    fn order(d: &Dispatcher) -> Vec<&str> {
+        d.state()
+            .workspaces
+            .iter()
+            .map(|ws| ws.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn moving_a_workspace_puts_it_before_the_named_neighbour() {
+        let (mut d, _host) = dispatcher();
+        let (a, _) = create_ws(&mut d, "a");
+        let (b, _) = create_ws(&mut d, "b");
+        let (c, _) = create_ws(&mut d, "c");
+        assert_eq!(order(&d), ["a", "b", "c"]);
+
+        // 뒤에서 앞으로.
+        d.dispatch(Command::MoveWorkspace {
+            workspace: c,
+            before: Some(a),
+        })
+        .unwrap();
+        assert_eq!(order(&d), ["c", "a", "b"]);
+
+        // 앞에서 뒤로 — 삽입 위치를 뺀 뒤의 목록에서 다시 찾지 않으면 여기서
+        // 한 칸 어긋난다.
+        d.dispatch(Command::MoveWorkspace {
+            workspace: c,
+            before: Some(b),
+        })
+        .unwrap();
+        assert_eq!(order(&d), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn a_none_neighbour_moves_it_to_the_end() {
+        let (mut d, _host) = dispatcher();
+        let (a, _) = create_ws(&mut d, "a");
+        create_ws(&mut d, "b");
+        create_ws(&mut d, "c");
+
+        d.dispatch(Command::MoveWorkspace {
+            workspace: a,
+            before: None,
+        })
+        .unwrap();
+        assert_eq!(order(&d), ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn moving_a_workspace_before_itself_changes_nothing() {
+        // 제자리에 놓은 드래그 — 에러가 아니다 (variant rustdoc).
+        let (mut d, _host) = dispatcher();
+        let (a, _) = create_ws(&mut d, "a");
+        create_ws(&mut d, "b");
+
+        d.dispatch(Command::MoveWorkspace {
+            workspace: a,
+            before: Some(a),
+        })
+        .unwrap();
+        assert_eq!(order(&d), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_move_does_not_change_the_active_workspace() {
+        // 정리하려고 끈 드래그가 화면까지 바꾸면 안 된다 (사용자 결정 2026-08-22).
+        let (mut d, _host) = dispatcher();
+        let (a, _) = create_ws(&mut d, "a");
+        let (b, _) = create_ws(&mut d, "b");
+        d.dispatch(Command::SwitchWorkspace { workspace: a }).unwrap();
+        assert_eq!(d.state().active_workspace, Some(a));
+
+        d.dispatch(Command::MoveWorkspace {
+            workspace: b,
+            before: Some(a),
+        })
+        .unwrap();
+        assert_eq!(order(&d), ["b", "a"]);
+        assert_eq!(d.state().active_workspace, Some(a));
+    }
+
+    #[test]
+    fn an_unknown_id_on_either_side_leaves_the_order_untouched() {
+        // 낡은 스냅샷으로 사라진 이웃 앞에 놓으려 한 경우 — 인덱스 계약이었다면
+        // 조용히 다른 자리로 갔을 자리다 (variant rustdoc).
+        let (mut d, _host) = dispatcher();
+        let (a, _) = create_ws(&mut d, "a");
+        create_ws(&mut d, "b");
+        let revision = d.snapshot().revision;
+
+        assert!(matches!(
+            d.dispatch(Command::MoveWorkspace {
+                workspace: a,
+                before: Some(WorkspaceId(999)),
+            }),
+            Err(CommandError::UnknownTarget { .. })
+        ));
+        assert!(matches!(
+            d.dispatch(Command::MoveWorkspace {
+                workspace: WorkspaceId(999),
+                before: Some(a),
+            }),
+            Err(CommandError::UnknownTarget { .. })
+        ));
+        assert_eq!(order(&d), ["a", "b"]);
+        assert_eq!(d.snapshot().revision, revision, "실패는 revision 도 안 올린다");
     }
 
     #[test]

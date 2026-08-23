@@ -400,3 +400,131 @@ describe("Sidebar close (× 버튼 · Ctrl+Shift+Q)", () => {
     expect(shortcutLabel("closeWorkspace")).toBe("Ctrl+Shift+Q");
   });
 });
+
+
+describe("Sidebar drag reordering", () => {
+  // happy-dom 의 getBoundingClientRect 는 전부 0 을 준다 — 히트 테스트가 좌표를
+  // 읽는 유일한 창구라 여기서 직접 심는다. 카드 높이 100, 중앙은 50/150/250.
+  function layout(cards: HTMLElement[]): void {
+    cards.forEach((card, i) => {
+      const top = i * 100;
+      card.getBoundingClientRect = () =>
+        ({ top, height: 100, bottom: top + 100 }) as DOMRect;
+    });
+  }
+
+  function pointer(el: HTMLElement, type: string, clientY: number): void {
+    el.dispatchEvent(
+      new window.PointerEvent(type, { bubbles: true, clientY, pointerId: 1, button: 0 }),
+    );
+  }
+
+  /** 카드를 집어 y 로 끌고 놓는다 — 실제 리스너와 같은 이벤트 순서. */
+  function drag(card: HTMLElement, fromY: number, toY: number): void {
+    pointer(card, "pointerdown", fromY);
+    pointer(card, "pointermove", toY);
+    pointer(card, "pointerup", toY);
+    // 브라우저는 pointerup 뒤 click 을 발화한다 — 삼켜지는지까지 봐야 계약이다.
+    card.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  }
+
+  it("카드를 위로 끌면 그 자리 앞으로 옮기고, 전환은 보내지 않는다", () => {
+    const { sidebar, cards, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    layout(cards());
+
+    drag(cards()[2], 250, 10);
+
+    // 활성 워크스페이스는 안 바뀐다 (사용자 결정) — switchWorkspace 가 없어야 한다.
+    expect(dispatched).toEqual([{ type: "moveWorkspace", workspace: 3, before: 1 }]);
+  });
+
+  it("맨 아래로 끌면 before 가 null 이다", () => {
+    const { sidebar, cards, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    layout(cards());
+
+    drag(cards()[0], 10, 290);
+
+    expect(dispatched).toEqual([{ type: "moveWorkspace", workspace: 1, before: null }]);
+  });
+
+  it("문턱을 못 넘은 움직임은 드래그가 아니라 클릭이다", () => {
+    const { sidebar, cards, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    layout(cards());
+
+    // 3px — 손 떨림 수준. 카드 클릭의 본래 동작(전환)이 그대로 나가야 한다.
+    drag(cards()[2], 250, 253);
+
+    expect(dispatched).toEqual([{ type: "switchWorkspace", workspace: 3 }]);
+  });
+
+  it("제자리에 놓으면 아무것도 보내지 않는다", () => {
+    const { sidebar, cards, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    layout(cards());
+
+    // 2번 카드를 집어 자기 바로 뒤(3번 앞)에 놓는다 = 제자리.
+    drag(cards()[1], 150, 210);
+
+    expect(dispatched).toEqual([]);
+  });
+
+  it("놓기 전에는 놓일 자리가 한 카드에만 표시된다", () => {
+    const { sidebar, cards } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    layout(cards());
+
+    pointer(cards()[2], "pointerdown", 250);
+    pointer(cards()[2], "pointermove", 120);
+
+    const marked = cards().map((c) => [c.classList.contains("drop-before"), c.classList.contains("drop-after")]);
+    expect(marked).toEqual([
+      [false, false],
+      [true, false],
+      [false, false],
+    ]);
+    expect(cards()[2].classList.contains("dragging")).toBe(true);
+
+    pointer(cards()[2], "pointerup", 120);
+    expect(cards().some((c) => c.className.includes("drop-"))).toBe(false);
+  });
+
+  it("드래그 중 도착한 스냅샷은 카드를 갈아치우지 않는다", () => {
+    // 끌고 있는 엘리먼트가 재조립으로 사라지면 포인터 캡처가 끊긴다 — 상태 변화는
+    // OSC 마다 오므로 이 가드가 없으면 드래그가 수시로 끊긴다.
+    const { sidebar, cards } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    layout(cards());
+    const dragged = cards()[2];
+
+    pointer(dragged, "pointerdown", 250);
+    pointer(dragged, "pointermove", 10);
+    // 워크스페이스 하나가 사라진 스냅샷 — 평소라면 rebuild 판정이다.
+    sidebar.render(snapshot(2, [ws(1), ws(2)], 1));
+
+    expect(cards()[2]).toBe(dragged);
+    expect(cards()).toHaveLength(3);
+
+    // 드래그가 끝나면 밀린 갱신을 만회한다.
+    pointer(dragged, "pointerup", 10);
+    expect(cards()).toHaveLength(2);
+  });
+
+  it("× 버튼 위에서 시작한 눌림은 드래그가 아니다", () => {
+    // 눌림이 버블링으로 카드까지 올라오지만 그 컨트롤의 것이다 — 닫으려다 손이
+    // 흔들렸다고 순서가 바뀌면 안 된다.
+    const { sidebar, cards, dispatched } = mount();
+    sidebar.render(snapshot(1, THREE, 1));
+    layout(cards());
+
+    const close = child(cards()[2], ".ws-card-close");
+    pointer(close, "pointerdown", 250);
+    pointer(close, "pointermove", 10);
+    pointer(close, "pointerup", 10);
+
+    expect(cards()[2].classList.contains("dragging")).toBe(false);
+    expect(dispatched).toEqual([]);
+  });
+});

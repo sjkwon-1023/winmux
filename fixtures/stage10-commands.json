@@ -43,5 +43,7 @@
     "rootPath": null,
     "distro": null
   },
-  { "type": "renameWorkspace", "workspace": 1, "name": "winmux (renamed)" }
+  { "type": "renameWorkspace", "workspace": 1, "name": "winmux (renamed)" },
+  { "type": "moveWorkspace", "workspace": 1, "before": 2 },
+  { "type": "moveWorkspace", "workspace": 1, "before": null }
 ]

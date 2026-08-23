@@ -133,11 +133,12 @@ fn commands_fixture_round_trips() {
     let original: serde_json::Value = serde_json::from_str(&text).unwrap();
     let parsed: Vec<Command> = serde_json::from_str(&text).unwrap();
 
-    // 전 Command variant 1개씩(13종) + 뷰어 NewTab 3종을 실은 createTab 3개
-    // (21단계) + createWorkspace 의 tab 필드 누락 하위호환 형태 1개 —
+    // 전 Command variant 1개씩(14종) + 뷰어 NewTab 3종을 실은 createTab 3개
+    // (21단계) + createWorkspace 의 tab 필드 누락 하위호환 형태 1개 +
+    // moveWorkspace 의 before 두 형태 중 나머지 하나(null = 맨 뒤) —
     // variant 추가 시 fixture 도 갱신할 것 (새 variant 는 뒤에 덧붙인다:
     // 앞에 끼우면 아래 인덱스 단언이 전부 밀린다).
-    assert_eq!(parsed.len(), 17);
+    assert_eq!(parsed.len(), 19);
 
     // 뷰어 NewTab 잠금 (21단계): folderBrowser 의 path 는 nullable(= 워크스페이스
     // root_path 상속), textViewer·markdownViewer 는 필수다.

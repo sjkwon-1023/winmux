@@ -129,6 +129,33 @@ export function sameCard(a: WorkspaceCardModel, b: WorkspaceCardModel): boolean 
   );
 }
 
+/** 드래그 재배치의 히트 테스트 입력 — 카드 하나의 세로 위치. viewport 좌표
+ *  (`getBoundingClientRect`)든 컨테이너 상대 좌표든, 포인터 Y 와 같은 기준이기만
+ *  하면 된다. */
+export interface CardBox {
+  workspace: WorkspaceId;
+  top: number;
+  height: number;
+}
+
+/** 포인터 Y → 놓을 자리를, 인덱스가 아니라 **이 카드 앞**으로 돌려준다
+ *  (`moveWorkspace` 커맨드의 `before` 계약과 같은 형태 — 코어 rustdoc).
+ *  맨 뒤면 null 이다.
+ *
+ *  경계는 각 카드의 **세로 중앙**이다: 카드 위쪽 절반에 있으면 그 앞, 아래쪽
+ *  절반이면 그다음 카드 앞. 카드 사이 간격이 아니라 카드 자체를 반씩 나누는
+ *  것이라 목록 어디에 있어도 놓을 자리가 반드시 하나 정해진다 — 틈에만
+ *  반응하면 카드 한가운데서 놓았을 때 아무 일도 안 일어난다.
+ *
+ *  `boxes` 는 **화면에 보이는 순서**여야 한다. 순서가 어긋나면 첫 일치가 엉뚱한
+ *  카드가 된다. */
+export function dropBefore(boxes: CardBox[], y: number): WorkspaceId | null {
+  for (const box of boxes) {
+    if (y < box.top + box.height / 2) return box.workspace;
+  }
+  return null;
+}
+
 /** 직전 렌더 모델(첫 렌더면 null) × 이번 모델 → 렌더 판정. 순수 함수 —
  *  실행(재조립·패치)은 sidebar.ts 몫이다.
  *

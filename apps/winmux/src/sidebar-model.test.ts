@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   abbreviatePath,
+  dropBefore,
   hasRunningTerminals,
   reconcilePlan,
   sidebarModel,
@@ -236,5 +237,32 @@ describe("reconcilePlan", () => {
 
   it("rebuilds when the cards are reordered (same membership)", () => {
     expect(reconcilePlan(three(), sidebarModel([ws(2), ws(1), ws(3)], 1))).toBe("rebuild");
+  });
+});
+
+describe("dropBefore", () => {
+  // 카드 3개, 각각 높이 100 — 중앙이 50 / 150 / 250 이다.
+  const boxes = [
+    { workspace: 1, top: 0, height: 100 },
+    { workspace: 2, top: 100, height: 100 },
+    { workspace: 3, top: 200, height: 100 },
+  ];
+
+  it("카드의 세로 중앙을 경계로 앞뒤가 갈린다", () => {
+    expect(dropBefore(boxes, 0)).toBe(1);
+    expect(dropBefore(boxes, 49)).toBe(1);
+    // 정확히 중앙은 뒤쪽 — 경계가 한쪽에만 속해야 놓을 자리가 하나로 정해진다.
+    expect(dropBefore(boxes, 50)).toBe(2);
+    expect(dropBefore(boxes, 149)).toBe(2);
+    expect(dropBefore(boxes, 150)).toBe(3);
+  });
+
+  it("마지막 카드의 아래쪽 절반은 맨 뒤(null)다", () => {
+    expect(dropBefore(boxes, 250)).toBeNull();
+    expect(dropBefore(boxes, 10_000)).toBeNull();
+  });
+
+  it("카드가 없으면 어디에 놓아도 맨 뒤다", () => {
+    expect(dropBefore([], 42)).toBeNull();
   });
 });

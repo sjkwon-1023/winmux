@@ -395,6 +395,27 @@ Accepted deferrals, one line each. None of these block the MVP.
   `rust-toolchain.toml` would make the gate reproducible, at the cost of not hearing about new
   lints until someone bumps the pin. Undecided; noted so the next occurrence is recognized as
   toolchain drift rather than a regression in the change under test.
+- **Workspace order was fixed at creation order — draggable since 2026-08-22** (user request,
+  v0.3.13). The sidebar list *is* `AppState.workspaces` order, so reordering needed no new
+  storage and no persistence change; what was missing was a command that reaches it. The new
+  `MoveWorkspace { workspace, before }` names the **neighbour to land in front of** rather than
+  an index: an index carries the perennial "before or after removal?" ambiguity, and a stale
+  front-end snapshot would silently drop the card somewhere else, where a missing neighbour
+  fails cleanly as `UnknownTarget`. `before: None` means the end, and `before == workspace` is
+  an in-place drop — allowed and a no-op. **`Ctrl+1`–`Ctrl+9` follow the new order**, which the
+  user named as the point of the feature; `active_workspace` deliberately does not change, so
+  tidying the list never yanks the screen (user decision). Front-end mechanics: pointer events
+  (not HTML5 DnD — the splitter already sets that precedent and drag images / `dragleave`
+  flicker are avoidable), a 4px threshold so a shaky click stays a click, one swallowed `click`
+  after a drag, and the drop target computed from card **mid-heights** so every position in the
+  list resolves to exactly one slot. The real hazard was the same one `reconcilePlan` exists
+  for: agent status changes arrive on every OSC, so a rebuild mid-drag would swap out the
+  element being dragged and break the pointer capture. `render` therefore does nothing while a
+  drag is live and `endDrag` replays the skipped update — the same shape as the inline-rename
+  guard. No ADR: every decision above is defended at its point of use (the `MoveWorkspace`
+  rustdoc and the drag code), so one would only restate them. **Not done**: autoscroll when
+  dragging past the visible list, which is why the drop boxes are re-measured on every move
+  rather than cached — a short list makes both moot for now.
 - **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
 - **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
   smaller replay cap, progressive replay, hide-until-parsed.

@@ -135,6 +135,11 @@ export type Command =
   /** 워크스페이스 이름만 변경 (사이드바 F2 인라인 편집). 빈/공백뿐인 이름은
    *  invalidName 에러 — 코어는 받은 값을 그대로 저장하므로 다듬기는 UI 몫이다. */
   | { type: "renameWorkspace"; workspace: WorkspaceId; name: string }
+  /** 사이드바 드래그 재배치 — `workspace` 를 `before` 바로 앞으로, `before` 가
+   *  null 이면 맨 뒤로. 목적지를 인덱스가 아니라 이웃 id 로 주는 이유는 코어
+   *  rustdoc 참조 (낡은 스냅샷에서 조용히 엉뚱한 자리로 가지 않는다). 순서는 곧
+   *  `Ctrl+1`~`Ctrl+9` 의 번호이고, 활성 워크스페이스는 바뀌지 않는다. */
+  | { type: "moveWorkspace"; workspace: WorkspaceId; before: WorkspaceId | null }
   | { type: "focusPane"; pane: PaneId }
   /** tab 이 non-null 이면 새 pane 에 그 탭까지 원자 생성 (계획 D5). */
   | { type: "splitPane"; pane: PaneId; direction: SplitDirection; tab: NewTab | null }

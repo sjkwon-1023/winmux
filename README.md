@@ -89,6 +89,10 @@ an unknown name is reported rather than ignored. The language comes from the fil
 plain text. `[]` turns highlighting off. The highlighter is loaded on demand, so a session that
 never opens a matching file never pays for it.
 
+Workspace cards can be dragged to reorder them, and `Ctrl+1`–`Ctrl+9` follow that order — drag
+the one you switch to most to the top and it becomes `Ctrl+1`. Dragging never changes which
+workspace is on screen.
+
 `log` writes a diagnostic log to `winmux.log` next to `state.json`, for reporting a bug that is
 hard to reproduce. It is **off unless you turn it on**, and turning it on takes a restart. While
 off nothing is opened, written or listened for; while on, the app records what it does — startup,

@@ -1842,6 +1842,37 @@ real WebView with a real IME.
 7. **Turn it back off.** Set `"log": false`, restart, confirm nothing new is appended. The
    existing file stays — deleting the user's file is not ours to do.
 
+### v0.3.13 — verification
+
+Workspace drag reordering. The core half is covered by unit tests; what needs a real window is
+the pointer behaviour and the fact that reordering survives a restart.
+
+1. **The basic drag.** With three or more workspaces, drag the bottom card above the top one. It
+   must land there, an accent line must show where it will land *before* you release, and the
+   dragged card must dim while moving.
+
+2. **It does not switch workspaces.** Note which workspace is active, then drag a *different*
+   card somewhere. The active workspace — and the terminal on screen — must not change. This is
+   the decision the feature was shaped around.
+
+3. **A click is still a click.** Click a card normally: it must switch, not reorder. Then click
+   with a tiny wobble (a few pixels while the button is down): still a switch. Then drag properly
+   and release: reorder, and **no** switch.
+
+4. **`Ctrl+1`–`Ctrl+9` follow.** After reordering, `Ctrl+1` must select whatever is now at the
+   top. This is the point of the feature, per the user.
+
+5. **It survives a restart.** Reorder, quit, relaunch: the order must be the one you left.
+
+6. **Dragging while things are happening.** Start an agent so its workspace changes status
+   (`running` → `needsInput`), then drag a card *while* those updates are arriving. The drag must
+   not stutter or drop — a rebuild mid-drag would kill the pointer capture. Release, and the card
+   must immediately show whatever status changed during the drag.
+
+7. **The × button is not a drag handle.** Press the mouse down on a card's ×, move a little, and
+   release: nothing may reorder. (Whether the close dialog appears is the existing behaviour, not
+   part of this item.)
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

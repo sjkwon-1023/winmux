@@ -124,6 +124,11 @@ function commandTag(cmd: Command): string {
       expect(typeof cmd.split).toBe("number");
       expect(typeof cmd.ratio).toBe("number");
       return cmd.type;
+    case "moveWorkspace":
+      expect(typeof cmd.workspace).toBe("number");
+      // before 는 nullable — null 이 "맨 뒤로" 라는 유효한 값이다 (코어 rustdoc).
+      expect(cmd.before === null || typeof cmd.before === "number").toBe(true);
+      return cmd.type;
     case "closePane":
       expect(typeof cmd.pane).toBe("number");
       return cmd.type;
@@ -344,6 +349,8 @@ describe("stage10-commands.json", () => {
       "createTab",
       "createWorkspace",
       "renameWorkspace",
+      "moveWorkspace",
+      "moveWorkspace",
     ]);
   });
 
@@ -360,9 +367,18 @@ describe("stage10-commands.json", () => {
     if (legacy.type !== "createWorkspace") throw new Error("16th must be createWorkspace");
     expect(legacy.tab).toBeUndefined();
 
+    // 재배치의 두 형태 — 이웃 앞으로, 그리고 맨 뒤로(before = null). null 이
+    // 누락(undefined)으로 새면 "맨 뒤"가 조용히 사라지므로 둘 다 잠근다.
+    const before = commandsFixture[17];
+    if (before.type !== "moveWorkspace") throw new Error("18th must be moveWorkspace");
+    expect(before.before).toBe(2);
+    const toEnd = commandsFixture[18];
+    if (toEnd.type !== "moveWorkspace") throw new Error("19th must be moveWorkspace");
+    expect(toEnd.before).toBeNull();
+
     // 이름 변경 (F2 사이드바 인라인 편집) — workspace + name 두 필드뿐이다.
     const rename = commandsFixture[16];
-    if (rename.type !== "renameWorkspace") throw new Error("last must be renameWorkspace");
+    if (rename.type !== "renameWorkspace") throw new Error("17th must be renameWorkspace");
     expect(rename.workspace).toBe(1);
     expect(rename.name).toBe("winmux (renamed)");
 
