@@ -29,7 +29,8 @@ ConPTY → `wsl.exe` → a login shell. There is no PowerShell or CMD profile.
 - **Workspace sidebar** — one status card per workspace: agent state and its last message.
 - **Agent status** — driven by OSC 777/9 from a Claude Code hook or your shell prompt. No
   daemon, no IPC server, no named pipe.
-- **Pane-to-pane text passing** — send text to another pane, optionally running it on arrival.
+- **Pane-to-pane text passing** — send text to another pane, where it runs on arrival unless
+  you ask to pre-fill the prompt instead.
 - **Viewer tabs** — folder browser, text viewer, and markdown viewer reading over
   `\\wsl.localhost`. Large files page in 512KiB windows.
 - **Layout persistence** — workspaces, splits, and tabs come back, each shell respawned in the
