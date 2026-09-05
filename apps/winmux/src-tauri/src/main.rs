@@ -23,6 +23,7 @@ mod commands;
 mod host;
 mod logfile;
 mod provision;
+mod remote;
 mod reset_supervisor;
 mod router;
 mod sink;
@@ -138,6 +139,10 @@ fn main() {
             // managed state 경유로 넣는다.
             let reset = reset_supervisor::ResetSupervisor::spawn(handle.clone());
 
+            // 원격 표면은 `AppState` 와 같은 `SessionManager` 를 읽는다 — 아래 manage
+            // 가 소유권을 가져가므로 그 전에 핸들을 하나 더 잡아 둔다.
+            let sessions_for_remote = Arc::clone(&sessions);
+
             // manage 를 재스폰보다 먼저 (계획 0장) — 재스폰된 세션의 on_exit 은
             // try_state 로 관리 상태를 찾으므로, 스폰이 먼저면 그 사이 exit
             // 이벤트가 소실되는 창이 생긴다.
@@ -196,6 +201,16 @@ fn main() {
             for distro in &distros {
                 provision::ensure_provisioned(&handle, Some(distro));
             }
+
+            // 원격 표면(LAN 폴링)은 **부팅의 맨 끝**이다: 설정에 `remote` 가 없으면
+            // 리스너도 스레드도 토큰 파일도 생기지 않고, 있으면 그때부터 이 프로세스
+            // 밖에서 상태를 읽을 수 있게 된다 — 상태 복원·재스폰이 다 지나간 뒤에
+            // 여는 것이 맞다. 결과는 꺼져 있어도 manage 한다 (`remote` 모듈 doc).
+            app.manage(remote::init(
+                &handle,
+                Arc::clone(&dispatcher),
+                sessions_for_remote,
+            ));
             Ok(())
         })
         // 창 이벤트 두 갈래 — 포커스 전이는 리셋 정책 + 프론트 토스트 억제 신호,
@@ -281,6 +296,10 @@ fn main() {
             commands::fs_list_dir,
             commands::fs_stat,
             commands::fs_read_chunk,
+            // 원격 표면의 부팅 결과와 페어링 URL (계획 3.5장). 상태는 부팅당 1회,
+            // 페어링은 다이얼로그를 열 때만.
+            remote::remote_status,
+            remote::remote_pairing,
         ])
         .build(tauri::generate_context!())
         .expect("error while building winmux")

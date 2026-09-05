@@ -306,11 +306,31 @@ pub struct UiSettings {
     /// 파일도 열지 않고 쓰기 스레드도 뜨지 않는다 ([`crate::logfile`]). 켠 뒤에는
     /// 앱을 다시 시작해야 한다 — 부팅 때 한 번만 읽는다.
     pub log: Option<bool>,
+    /// 원격 표면(LAN 폴링, [`crate::remote`]). **키가 있으면 켜짐**이고 없으면
+    /// 리스너도 스레드도 토큰 파일도 생기지 않는다. `log` 와 같은 규율으로 부팅 때
+    /// 한 번만 읽으므로 바꾼 뒤에는 앱을 다시 시작해야 한다.
+    pub remote: Option<RemoteSettings>,
+}
+
+/// `settings.json` 의 `remote` 객체.
+///
+/// `port` 를 `Option` 으로 두지 않는 것이 계약이다 — 빠지면 serde 가 "missing field"
+/// 로 파일 전체의 파싱을 실패시켜 사용자가 상태 라인에서 이유를 본다. 기본 포트를
+/// 몰래 채우면 사용자가 쓰지 않은 포트가 LAN 에 열린다.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSettings {
+    /// 바인드할 TCP 포트. [`REMOTE_PORT_RANGE`] 밖이면 에러다.
+    pub port: u16,
 }
 
 /// 허용 폰트 크기(px). 밖의 값은 조용히 조정하지 않고 **거부**한다 — 0 이나 5000
 /// 이 들어간 파일을 말없이 고쳐 쓰면 사용자는 자기가 쓴 값이 먹은 줄 안다.
 const FONT_SIZE_RANGE: std::ops::RangeInclusive<u16> = 6..=72;
+
+/// 허용 원격 포트. 1024 미만은 Windows 에서도 관리자 권한이 필요한 well-known 대역이라
+/// 실수로 쓰면 바인드가 통째로 실패한다.
+const REMOTE_PORT_RANGE: std::ops::RangeInclusive<u16> = 1024..=65535;
 
 /// 구문 하이라이팅을 지원하는 언어 이름. 프론트가 언어당 하나씩 lazy-load 하는
 /// hljs 모듈 목록(`apps/winmux/src/text-view.ts` 의 `LANGUAGE_LOADERS`)과 **같은
@@ -365,6 +385,17 @@ pub(crate) fn read_ui_settings(app: &AppHandle) -> Result<UiSettings, String> {
                 path.display(),
                 FONT_SIZE_RANGE.start(),
                 FONT_SIZE_RANGE.end()
+            ));
+        }
+    }
+    if let Some(remote) = &settings.remote {
+        if !REMOTE_PORT_RANGE.contains(&remote.port) {
+            return Err(format!(
+                "remote.port {} in {} is out of range ({}-{})",
+                remote.port,
+                path.display(),
+                REMOTE_PORT_RANGE.start(),
+                REMOTE_PORT_RANGE.end()
             ));
         }
     }

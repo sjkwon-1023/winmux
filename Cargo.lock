@@ -4368,6 +4368,7 @@ dependencies = [
  "windows",
  "windows-sys 0.61.2",
  "winmux-core",
+ "winmux-remote",
 ]
 
 [[package]]
