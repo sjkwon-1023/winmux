@@ -1,0 +1,251 @@
+/* 폰 뷰포트 전용 스타일. 데스크톱 styles.css 와 공유하지 않는다 — 두 페이지는
+   다른 빌드이고, 여기서 중요한 것은 손가락으로 누를 수 있는 크기다. */
+
+:root {
+  --bg: #1e1e1e;
+  --bg-raised: #252526;
+  --fg: #d4d4d4;
+  --fg-muted: #8a8a8a;
+  --border: #3c3c3c;
+  --accent: #4ea1ff;
+  --danger: #e06c75;
+  /* 손가락 타깃 최소 크기 */
+  --touch: 44px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  -webkit-text-size-adjust: 100%;
+}
+
+#app {
+  height: 100%;
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.bar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+.bar-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-back {
+  min-height: var(--touch);
+  padding: 0 12px;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 15px;
+}
+
+.notice {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  color: var(--danger);
+  background: #2d2323;
+  font-size: 13px;
+}
+
+/* ── 목록 화면 ───────────────────────────────────────────────── */
+
+.list {
+  flex: 1 1 auto;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.ws {
+  margin-bottom: 14px;
+  padding: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.ws-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.ws-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.badge-needsInput {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.ws-message {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane {
+  margin-top: 8px;
+  padding-left: 6px;
+  border-left: 2px solid var(--border);
+}
+
+.tab {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: var(--touch);
+  margin-top: 4px;
+  padding: 0 10px;
+  color: var(--fg);
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.tab-static {
+  color: var(--fg-muted);
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-detail {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.empty,
+.hint {
+  padding: 24px 16px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.hint-detail {
+  font-size: 13px;
+}
+
+/* ── 탭 화면 ─────────────────────────────────────────────────── */
+
+/* 화면 폭은 PTY 의 cols 가 정한다 — 폰 화면보다 넓은 것이 정상이라 가로로
+   스크롤한다 (줄바꿈으로 접으면 TUI 레이아웃이 깨져 읽을 수 없다). */
+.screen-scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+  background: #000;
+}
+
+.screen-host {
+  min-width: max-content;
+}
+
+.composer {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.composer-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  /* 16px 미만이면 iOS Safari 가 포커스 시 화면을 확대한다. */
+  font-size: 16px;
+  resize: none;
+}
+
+.composer-send {
+  flex: 0 0 auto;
+  min-width: 72px;
+  min-height: var(--touch);
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.keys {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 8px 10px;
+}
+
+.key {
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0 10px;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 15px;
+}
+
+button:disabled {
+  opacity: 0.4;
+}

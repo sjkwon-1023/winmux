@@ -18,6 +18,7 @@ import {
   getUiSettings,
   notifyToast,
   pickWorkspaceFolder,
+  remoteStatus,
   resetUi,
   userActivity,
 } from "./backend";
@@ -34,6 +35,7 @@ import {
   workspaceAtOrdinal,
 } from "./keys";
 import type { KeyAction } from "./keys";
+import { openPairingDialog } from "./pairing-dialog";
 import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import { SwitchTracer } from "./switch-trace";
@@ -157,6 +159,7 @@ class App {
     // 버튼도 단축키와 같은 동작 (사용자 버그 리포트 2026-08-11: 버튼만 픽커를
     // 여는 비일관 제거) — 픽커는 createWorkspaceHere 의 무워크스페이스 폴백뿐이다.
     () => this.createWorkspaceHere(),
+    () => openPairingDialog(),
   );
   /** 직전 스냅샷의 워크스페이스별 agentStatus — needsInput 상승 전이 판정 기준선.
    *  부팅 첫 렌더 전까지 null 이고, 그 첫 스냅샷은 알림 없이 기준선으로만
@@ -225,8 +228,30 @@ class App {
       console.error("get_ui_settings failed", err);
       this.showError(formatCommandError(err));
     }
+    await this.initRemote();
     this.store.subscribe((snapshot) => this.render(snapshot));
     await this.store.init();
+  }
+
+  /** LAN 원격 표면 배선 (계획 3.5장).
+   *
+   *  **설정과 무관하게 무조건 부른다.** settings.json 은 webview 초기화마다 다시
+   *  읽히지만 서버는 앱 부팅 때 한 번 정해지므로, 프론트가 설정으로 게이트하면
+   *  "설정은 켜져 있는데 서버는 뜨지 못한" 상태를 아무도 말해 주지 않는다 —
+   *  그 사유를 나르는 것이 이 호출이다.
+   *
+   *  호출 자체가 실패하는 것은 커맨드가 없거나 IPC 가 깨진 경우뿐이라 콘솔에만
+   *  남기고 넘어간다 — 부트를 막지 않는다 (활동 핑·창 가시성과 같은 규율). */
+  private async initRemote(): Promise<void> {
+    try {
+      const status = await remoteStatus();
+      if (status.state === "failed") {
+        this.showError(status.reason ?? "remote surface failed to start");
+      }
+      this.sidebar.setRemoteEnabled(status.state === "on");
+    } catch (err) {
+      console.error("remote_status failed", err);
+    }
   }
 
   /** 창 포커스 추적 배선 — needsInput 토스트 억제 판정의 유일한 근거다 (WebView2 의

@@ -92,11 +92,15 @@ function mount(): {
   /** "+ New workspace" 콜백 호출 횟수 — 폴더 선택 흐름은 main.ts 소유라
    *  사이드바는 콜백만 부른다. */
   newWorkspaceCalls: () => number;
+  /** "Pair phone" 버튼 — 원격 표면이 떠 있을 때만 보인다. */
+  pairBtn: () => HTMLButtonElement;
+  pairingCalls: () => number;
 } {
   const root = document.createElement("div");
   document.body.replaceChildren(root);
   const dispatched: Command[] = [];
   let newWorkspaceCalls = 0;
+  let pairingCalls = 0;
   const sidebar = new Sidebar(
     root,
     async (cmd) => {
@@ -106,14 +110,21 @@ function mount(): {
     () => {
       newWorkspaceCalls += 1;
     },
+    () => {
+      pairingCalls += 1;
+    },
   );
   const cardsEl = root.querySelector<HTMLElement>(".sidebar-cards");
   if (cardsEl === null) throw new Error("sidebar-cards not mounted");
+  const pairEl = root.querySelector<HTMLButtonElement>(".sidebar-pair");
+  if (pairEl === null) throw new Error("sidebar-pair not mounted");
   return {
     sidebar,
     cards: () => Array.from(cardsEl.querySelectorAll<HTMLElement>(".ws-card")),
     dispatched,
     newWorkspaceCalls: () => newWorkspaceCalls,
+    pairBtn: () => pairEl,
+    pairingCalls: () => pairingCalls,
   };
 }
 
@@ -526,5 +537,18 @@ describe("Sidebar drag reordering", () => {
 
     expect(cards()[2].classList.contains("dragging")).toBe(false);
     expect(dispatched).toEqual([]);
+  });
+});
+
+describe("Sidebar pairing button", () => {
+  it("stays hidden until the remote surface is on", () => {
+    const { sidebar, pairBtn, pairingCalls } = mount();
+    expect(pairBtn().hidden).toBe(true);
+    sidebar.setRemoteEnabled(true);
+    expect(pairBtn().hidden).toBe(false);
+    pairBtn().click();
+    expect(pairingCalls()).toBe(1);
+    sidebar.setRemoteEnabled(false);
+    expect(pairBtn().hidden).toBe(true);
   });
 });
