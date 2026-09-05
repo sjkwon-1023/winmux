@@ -2020,6 +2020,22 @@ LAN address and `<port>` with the configured port; the token comes from the pair
 
 9. **RAM.** `scripts/win/measure.ps1` with the remote on and the phone connected, versus off.
 
+### v0.3.18 — verification
+
+Phone-page only; the server is unchanged.
+
+1. **Vertical only.** Open a tab whose desktop terminal is wider than the phone. The screen
+   wraps long lines and never scrolls sideways; new output appends at the bottom and the view
+   follows it unless you had scrolled up to read.
+2. **Font size.** `A−` / `A+` in the header change the text size; reload the page and the size
+   is kept.
+3. **Keyboard.** Tap the text box so the keyboard opens, then scroll the output up and down: the
+   text box and the Send/Stop/Esc buttons stay visible above the keyboard the whole time
+   (Safari and Chrome).
+4. **Buttons.** Send with text submits it (Claude Code receives it as one message); Send with an
+   empty box is a bare Enter; Stop interrupts; Esc escapes. Tapping a button does not close the
+   keyboard.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

@@ -465,9 +465,10 @@ Accepted deferrals, one line each. None of these block the MVP.
   since `tiny_http` has no head cap and drains a rejected body — tested on Linux against a real
   listener; the glue only reads settings, keeps the token file, gates static assets by the
   embedded key set (Tauri's release lookup falls back to `index.html` for unknown paths) and
-  serves the second Vite bundle under `/remote/`. The phone's xterm runs with `disableStdin`
-  and the page encodes input itself, sending Enter as a separate request after a paste for the
-  v0.3.16 reason. Decisions and the accepted limits (plain HTTP, slowloris, the shared `writer`
+  serves the second Vite bundle under `/remote/`. The phone renders a headless xterm buffer as
+  wrapped text (v0.3.18: vertical scroll only, A−/A+ font size, Send/Stop/Esc, the app box sized
+  to the visual viewport so the composer stays above the keyboard) and encodes input itself,
+  sending Enter as a separate request after a paste for the v0.3.16 reason. Decisions and the accepted limits (plain HTTP, slowloris, the shared `writer`
   mutex, first-frame fidelity): [ADR-0016](docs/adr/0016-remote-surface-over-lan.md).
   Verification: WINDOWS-BUILD §10 v0.3.17 — all field-only. **Open**: `PtySession::kill` waits
   on the `writer` mutex under the Dispatcher lock, so a remote write into a shell that stopped

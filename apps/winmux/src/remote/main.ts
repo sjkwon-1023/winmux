@@ -5,7 +5,6 @@
 // 옮긴 뒤 `history.replaceState` 로 주소창에서 지운다 — 지우지 않으면 화면 공유나
 // 스크린샷 한 장으로 토큰이 새고, 새로고침·뒤로가기마다 다시 붙는다.
 
-import "@xterm/xterm/css/xterm.css";
 import "./remote.css";
 
 import { fetchState, HttpError, loadToken, saveToken } from "./api";
@@ -105,8 +104,30 @@ function showPairingHint(root: HTMLElement): void {
   root.replaceChildren(hint);
 }
 
+/** 앱 상자를 **보이는** 뷰포트에 맞춘다.
+ *
+ *  폰 브라우저는 키보드가 올라와도 문서의 레이아웃 높이를 줄이지 않고(iOS Safari 가
+ *  특히 그렇다) "보이는 창"만 줄인다. 그러면 화면 아래에 붙은 입력칸이 키보드 밑으로
+ *  들어가고, 위아래로 스크롤하면 사라졌다 나타났다 한다. `visualViewport` 가 그 보이는
+ *  창의 높이와 위치를 주므로, 앱 상자를 그 크기로 잡고 스크롤은 상자 안(출력 영역)에서만
+ *  일어나게 하면 입력칸이 늘 키보드 위에 붙어 있다. `interactive-widget=resizes-content`
+ *  를 아는 브라우저(Android Chrome)는 레이아웃 자체를 줄여 주지만, 그때도 이 계산은
+ *  같은 값을 내므로 해롭지 않다. */
+function fitToVisualViewport(root: HTMLElement): void {
+  const viewport = window.visualViewport;
+  if (viewport === null || viewport === undefined) return;
+  const apply = (): void => {
+    root.style.height = `${viewport.height}px`;
+    root.style.transform = `translateY(${viewport.offsetTop}px)`;
+  };
+  viewport.addEventListener("resize", apply);
+  viewport.addEventListener("scroll", apply);
+  apply();
+}
+
 const root = document.getElementById("app");
 if (root !== null) {
+  fitToVisualViewport(root);
   claimTokenFromFragment();
   if (loadToken() === null) showPairingHint(root);
   else new RemoteApp(root).start();
