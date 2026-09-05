@@ -6,11 +6,14 @@
 //!
 //! 세션마다 리더 스레드 하나가 PTY 출력을 chunk 단위로 읽어 다음 순서로 처리한다.
 //!
-//! 1. `OscScanner::feed` 로 OSC 이벤트를 감지하고(passthrough — 원본 바이트는
-//!    그대로 흘러간다) `sink.on_osc` 로 전달한다 (lock 밖).
-//! 2. 상태 lock **안**에서 OSC 계정 → `offset = bytes_out` 캡처 → `replay.push`
-//!    → `flow.on_sent(n)` → `bytes_out += n` 까지 끝낸다. offset·replay·flow
-//!    계정이 한 lock 에서 일관되게 확정된다.
+//! 1. `OscScanner::feed` 로 제어 시퀀스를 감지하고(passthrough — 원본 바이트는
+//!    그대로 흘러간다) **OSC 이벤트만** `sink.on_osc` 로 전달한다 (lock 밖).
+//!    DEC private mode·리셋은 OSC 가 아니므로 세션이 소비한다 — sink 로도 가지
+//!    않고 OSC 계정에도 잡히지 않는다 ([`PtySession::reattach`] 의 preamble).
+//! 2. 상태 lock **안**에서 OSC 계정 → 모드 추적 갱신 → `offset = bytes_out`
+//!    캡처 → `replay.push` → `flow.on_sent(n)` → `bytes_out += n` 까지 끝낸다.
+//!    모드 맵과 replay 가 같은 lock 에서 확정되므로 둘은 chunk 단위로 정합하고,
+//!    offset·replay·flow 계정도 한 lock 에서 일관되게 확정된다.
 //! 3. lock 을 놓은 **뒤** `sink.on_output(offset, chunk)` 를 호출한다 — 콜백이
 //!    `ack()` 등을 재진입 호출해도 안전하다. `Dropped` 반환 시 lock 재취득 후
 //!    `flow.on_acked(n)` 보상 롤백 (순서 근거는 리더 루프 주석 참조).
@@ -44,7 +47,7 @@
 //! "채널 먼저 장착, reattach 나중" 불변식과 offset 기반 dedup 규칙은 해당
 //! rustdoc 이 호출자 계약으로 명시한다.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -60,6 +63,42 @@ use crate::replay::ReplayBuffer;
 
 /// 리더 스레드의 1회 read 버퍼 크기.
 const READ_BUF_BYTES: usize = 16 * 1024;
+
+/// 재-attach 때 다시 세워 줄 DEC private mode 의 최대 가짓수. 실제 TUI 가 쓰는
+/// 모드는 열 몇 개 수준이라 정상 사용은 닿지 않는 선이고, 넘어가는 것은 모드
+/// 번호를 흘리는 스트림뿐이다 — 맵이 무한히 자라지 않게 하는 메모리 방어선이다.
+const MAX_TRACKED_DEC_MODES: usize = 64;
+
+/// **추적하지 않는** DEC private mode. 여기 있는 번호들은 설정값이 아니라
+/// **부수효과가 있는 전이(transition)** 라서, 나중에 다시 세우는 것 자체가 틀린
+/// 동작이 된다.
+///
+/// - 대체 화면 전환(47·1047·1049)과 커서 저장/복원(1048·1049): xterm.js 의
+///   `setModePrivate` 은 1049 에서 `saveCursor()` 후 `activateAltBuffer()` 로
+///   흘러가는데, `BufferSet.activateAltBuffer` 는 **이미 alt 버퍼면 곧바로
+///   반환한다**(`src/common/buffer/BufferSet.ts` ~:99-102). preamble 이 replay
+///   보다 앞서므로 `ESC[?1049h` 를 먼저 세우면 replay 안의 진짜 `ESC[?1049h` 가
+///   no-op 이 되고, **전환 이전의 replay(셸 스크롤백)까지 스크롤백이 없는 alt
+///   버퍼에 그려진다**. 반대로 `resetModePrivate` 의 1049 는 `restoreCursor()` 를
+///   불러 커서를 저장된 위치(없으면 0,0)로 옮기므로, 뒤늦은 `ESC[?1049l` 은 살아
+///   있는 프롬프트의 커서를 엉뚱한 데로 보낸다.
+/// - synchronized output(2026): begin(`?2026h`)/end(`?2026l`) 쌍으로만 의미가
+///   있는 일시 상태라, begin 을 다시 세우면 짝이 되는 end 가 영영 오지 않아
+///   xterm 이 replay 전체를 프레임에 묶어 둔 채 아무것도 그리지 않는다.
+const UNTRACKED_DEC_MODES: [u16; 5] = [47, 1047, 1048, 1049, 2026];
+
+/// DECSTR(soft reset)이 기본값으로 되돌리는 DEC private mode. RIS 와 달리 단말
+/// 전체를 초기화하지 않으므로, 추적 맵에서도 이 번호들만 지운다.
+///
+/// 목록은 xterm.js 가 실제로 되돌리는 것과 맞춘 값이다 —
+/// `InputHandler.ts::softReset` 이 `isCursorHidden = false`(25)와
+/// `decPrivateModes.origin = false`(6)를 직접 놓고, `CoreService::reset` 이
+/// `DEFAULT_DEC_PRIVATE_MODES` 로 되돌리는 필드가 `applicationCursorKeys`(1)·
+/// `origin`(6)·`wraparound`(7)·`reverseWraparound`(45)·`applicationKeypad`(66)·
+/// `sendFocus`(1004)·`bracketedPasteMode`(2004)다. 마우스 트래킹은
+/// `CoreMouseService` 에, 대체 화면은 `BufferSet` 에 있어 **둘 다 soft reset 이
+/// 건드리지 않는다** — 그래서 DECSTR 뒤에도 그 모드들은 추적을 유지해야 한다.
+const SOFT_RESET_DEC_MODES: [u16; 8] = [1, 6, 7, 25, 45, 66, 1004, 2004];
 
 /// PTY 세션의 휘발성 런타임 식별자. `SessionManager` 가 발급하며 프로세스 수명
 /// 안에서 재사용하지 않는다. persistence·MCP 대상인 안정 ID(u64 newtype)와는
@@ -166,6 +205,10 @@ struct Shared {
 struct Inner {
     flow: FlowControl,
     replay: ReplayBuffer,
+    /// 실행 중인 프로그램이 DECSET/DECRST 로 건드린 private mode 의 **현재 값**.
+    /// 재-attach preamble 의 재료다 ([`PtySession::reattach`]). 오름차순 순회가
+    /// 필요해 `BTreeMap` 을 쓴다 — preamble 바이트열이 재현 가능해진다.
+    dec_modes: BTreeMap<u16, bool>,
     bytes_out: u64,
     osc_count: u64,
     last_osc: Option<String>,
@@ -238,6 +281,7 @@ impl PtySession {
             inner: Mutex::new(Inner {
                 flow: FlowControl::new(opts.high_water, opts.low_water),
                 replay: ReplayBuffer::new(opts.replay_cap),
+                dec_modes: BTreeMap::new(),
                 bytes_out: 0,
                 osc_count: 0,
                 last_osc: None,
@@ -364,8 +408,22 @@ impl PtySession {
     /// paused 로 대기 중이던 리더를 깨운다. (flow 리셋만 필요한 detach 치유는
     /// [`reset_flow`](Self::reset_flow) — 스냅샷 없는 하위 경로.)
     ///
-    /// 반환 `(end_offset, replay_bytes)`: `replay_bytes` 는 replay buffer 의 최근
-    /// 출력으로, 스트림 오프셋 구간 `[end_offset - len, end_offset)` 에 해당한다.
+    /// 반환 `(end_offset, bytes)`: `bytes` 는 **모드 preamble + replay 스냅샷**이다.
+    /// preamble 은 **추적 중인** DEC private mode 를 새 터미널에 다시 세우는
+    /// `ESC [ ? <mode> h|l` 들이고(모드 번호 오름차순), 그 뒤에 replay buffer 의
+    /// 최근 출력이 이어진다. 관측한 모드가 전부 추적되는 것은 아니다 —
+    /// 대체 화면 전환처럼 "다시 세우는 것 자체가 틀린" 모드는 제외된다
+    /// (`UNTRACKED_DEC_MODES`).
+    ///
+    /// preamble 이 필요한 이유는 프론트가 재-attach 때 **새 xterm 인스턴스**를
+    /// 만들고 상태를 오직 이 바이트열에서만 되살리기 때문이다. 모드를 켠 시퀀스가
+    /// replay 창 밖으로 밀려난 장수 TUI 는 그 방법으로는 모드를 되찾지 못한다
+    /// ([`OscEvent::DecPrivateMode`] rustdoc 의 실기 사례).
+    ///
+    /// **길이로 오프셋을 역산하지 말 것.** preamble 은 스트림에 없던 바이트라
+    /// `bytes` 의 길이는 더 이상 스냅샷 구간의 폭이 아니다 — 스냅샷 구간의 끝은
+    /// `end_offset` 하나로만 말해지고, dedup 규칙(`offset < end_offset`)도 길이를
+    /// 쓰지 않는다.
     ///
     /// # 호출자 계약
     ///
@@ -378,17 +436,22 @@ impl PtySession {
     ///   규칙이라야 어떤 인터리빙에서도 flow 계정이 맞고, 계정이 리셋된 에폭에
     ///   대한 초과 ack 은 saturating 으로 무해하다 (`FlowControl::reset` 참조).
     pub fn reattach(&self) -> (u64, Vec<u8>) {
-        let (end_offset, replay) = {
+        let (end_offset, bytes) = {
             let mut inner = self.shared.inner.lock().unwrap();
             inner.flow.reset();
-            (inner.bytes_out, inner.replay.snapshot())
+            let mut bytes = dec_mode_preamble(&inner.dec_modes);
+            let mut snapshot = inner.replay.snapshot();
+            bytes.append(&mut snapshot);
+            (inner.bytes_out, bytes)
         };
         // lock 을 놓은 뒤 notify — paused 로 대기하던 리더가 즉시 재개된다.
         self.shared.cond.notify_all();
-        (end_offset, replay)
+        (end_offset, bytes)
     }
 
-    /// replay buffer 에 보관 중인 최근 출력 스냅샷.
+    /// replay buffer 에 보관 중인 최근 출력 스냅샷 — **버퍼 원본 그대로**다.
+    /// 모드 preamble 이 붙지 않으므로 새 터미널을 여기서 되살리면 안 된다
+    /// (그 경로는 [`reattach`](Self::reattach)). 진단용 관측 창이다.
     pub fn replay(&self) -> Vec<u8> {
         self.shared.inner.lock().unwrap().replay.snapshot()
     }
@@ -474,11 +537,21 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, sink: Arc<dyn SessionSink>, sha
         };
         let chunk = &buf[..n];
 
-        // 계약 순서: feed → on_osc(lock 밖) → [lock 안: osc 계정 → offset 캡처 →
-        // replay.push → flow.on_sent → bytes_out += n] → on_output(lock 밖).
+        // 계약 순서: feed → on_osc(lock 밖) → [lock 안: osc 계정 → 모드 추적 →
+        // offset 캡처 → replay.push → flow.on_sent → bytes_out += n] →
+        // on_output(lock 밖).
         let events = scanner.feed(chunk);
+        // 모드·리셋은 세션이 **소비**한다 — OSC 가 아니라서 sink 로도, osc 계정
+        // 으로도 가지 않는다 (모듈 rustdoc 1단계).
+        let (mode_events, osc_events): (Vec<OscEvent>, Vec<OscEvent>) =
+            events.into_iter().partition(|event| {
+                matches!(
+                    event,
+                    OscEvent::DecPrivateMode { .. } | OscEvent::TerminalReset { .. }
+                )
+            });
         // 표식 반영이 sink 콜백보다 앞서는 이유는 `Inner::startup_seen` 주석에 있다.
-        if events.contains(&OscEvent::Osc777Started) {
+        if osc_events.contains(&OscEvent::Osc777Started) {
             let mut inner = shared.inner.lock().unwrap();
             if !inner.startup_seen {
                 inner.startup_seen = true;
@@ -486,14 +559,17 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, sink: Arc<dyn SessionSink>, sha
                 shared.cond.notify_all();
             }
         }
-        for event in &events {
+        for event in &osc_events {
             sink.on_osc(event);
         }
         let offset = {
             let mut inner = shared.inner.lock().unwrap();
-            inner.osc_count += events.len() as u64;
-            if let Some(event) = events.last() {
+            inner.osc_count += osc_events.len() as u64;
+            if let Some(event) = osc_events.last() {
                 inner.last_osc = Some(summarize_osc(event));
+            }
+            for event in &mode_events {
+                apply_mode_event(&mut inner.dec_modes, event);
             }
             // 이 chunk 의 시작 오프셋 — bytes_out 가산 전에 캡처해야 한다.
             let offset = inner.bytes_out;
@@ -611,7 +687,66 @@ fn summarize_osc(event: &OscEvent) -> String {
         OscEvent::Osc777Started => "777-started".to_string(),
         // 색상 질의는 코드(10 = 전경, 11 = 배경)만으로 관측이 끝난다.
         OscEvent::OscColorQuery { code } => format!("color-query:{code}"),
+        // 아래 둘은 OSC 가 아니라 리더가 소비하므로 `last_osc` 에 실리지 않는다.
+        // 형식만 정의해 둔다 — 나중에 이 요약을 다른 곳에서 쓰게 돼도 조용히
+        // 틀리지 않게.
+        OscEvent::DecPrivateMode { modes, set } => {
+            let verb = if *set { "set" } else { "reset" };
+            format!("dec-mode-{verb}:{modes:?}")
+        }
+        OscEvent::TerminalReset { soft } => {
+            let kind = if *soft { "soft" } else { "hard" };
+            format!("terminal-reset:{kind}")
+        }
     }
+}
+
+/// 모드 이벤트를 추적 맵에 반영한다. **정책은 여기 있고 스캐너에는 없다** —
+/// 스캐너는 바이트를 알아볼 뿐이고, 무엇을 기억해 둘지는 세션의 판단이다.
+fn apply_mode_event(modes: &mut BTreeMap<u16, bool>, event: &OscEvent) {
+    match event {
+        OscEvent::DecPrivateMode {
+            modes: touched,
+            set,
+        } => {
+            for &mode in touched {
+                if UNTRACKED_DEC_MODES.contains(&mode) {
+                    continue;
+                }
+                // 새 모드는 상한까지만 받는다. 이미 아는 모드의 값 갱신은 맵을
+                // 키우지 않으므로 상한과 무관하게 통과시킨다 — 상한에 걸린 뒤
+                // 추적 중인 모드가 옛 값으로 굳는 쪽이 더 나쁘다.
+                if !modes.contains_key(&mode) && modes.len() >= MAX_TRACKED_DEC_MODES {
+                    continue;
+                }
+                modes.insert(mode, *set);
+            }
+        }
+        // 리셋 뒤에도 옛 값을 들고 있으면 재-attach 가 이미 꺼진 모드를 되살린다.
+        // 지우는 범위는 리셋의 종류를 따른다 — RIS 는 단말 전체, DECSTR 은
+        // `SOFT_RESET_DEC_MODES` 만.
+        OscEvent::TerminalReset { soft } => {
+            if *soft {
+                modes.retain(|mode, _| !SOFT_RESET_DEC_MODES.contains(mode));
+            } else {
+                modes.clear();
+            }
+        }
+        // 나머지는 이 함수의 호출자가 걸러 낸다 (리더 루프의 partition).
+        _ => {}
+    }
+}
+
+/// 재-attach 때 새 터미널에 모드를 다시 세우는 바이트열. 모드 번호 오름차순이라
+/// 같은 맵이면 같은 바이트열이 나온다.
+fn dec_mode_preamble(modes: &BTreeMap<u16, bool>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (mode, set) in modes {
+        out.extend_from_slice(b"\x1b[?");
+        out.extend_from_slice(mode.to_string().as_bytes());
+        out.push(if *set { b'h' } else { b'l' });
+    }
+    out
 }
 
 /// 세션 레지스트리 — `SessionId` 를 발급하고 세션을 보관한다. 내부 동기화는
@@ -732,5 +867,96 @@ mod tests {
             summarize_osc(&OscEvent::OscColorQuery { code: 11 }),
             "color-query:11"
         );
+    }
+
+    fn dec(modes: &[u16], set: bool) -> OscEvent {
+        OscEvent::DecPrivateMode {
+            modes: modes.to_vec(),
+            set,
+        }
+    }
+
+    fn preamble_after(events: &[OscEvent]) -> Vec<u8> {
+        let mut modes = BTreeMap::new();
+        for event in events {
+            apply_mode_event(&mut modes, event);
+        }
+        dec_mode_preamble(&modes)
+    }
+
+    #[test]
+    fn preamble_reasserts_last_value_per_mode_in_ascending_order() {
+        // 같은 모드를 여러 번 건드리면 마지막 값만 남고, 순서는 모드 번호순이다.
+        assert_eq!(
+            preamble_after(&[
+                dec(&[2004], true),
+                dec(&[25], false),
+                dec(&[1000, 1006], true),
+                dec(&[1000], false),
+            ]),
+            b"\x1b[?25l\x1b[?1000l\x1b[?1006h\x1b[?2004h".to_vec()
+        );
+        assert!(preamble_after(&[]).is_empty());
+    }
+
+    #[test]
+    fn transition_modes_are_never_tracked() {
+        // 대체 화면·커서 저장·synchronized output 은 설정이 아니라 전이라서
+        // preamble 로 다시 세우는 것 자체가 틀린 동작이다 (const 주석).
+        for mode in UNTRACKED_DEC_MODES {
+            assert!(
+                preamble_after(&[dec(&[mode], true)]).is_empty(),
+                "{mode} must not be tracked"
+            );
+            assert!(
+                preamble_after(&[dec(&[mode], false)]).is_empty(),
+                "{mode} must not be tracked"
+            );
+        }
+        // 같은 시퀀스에 섞여 와도 나머지 모드만 남는다.
+        assert_eq!(
+            preamble_after(&[dec(&[1049, 25, 2026], true)]),
+            b"\x1b[?25h".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_hard_reset_clears_every_tracked_mode() {
+        let reset = OscEvent::TerminalReset { soft: false };
+        assert!(preamble_after(&[dec(&[1000, 2004], true), reset.clone()]).is_empty());
+        // 리셋 이후에 세운 모드는 다시 추적된다.
+        assert_eq!(
+            preamble_after(&[dec(&[1000], true), reset, dec(&[25], false)]),
+            b"\x1b[?25l".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_soft_reset_clears_only_the_modes_decstr_resets() {
+        // DECSTR 은 마우스 트래킹을 건드리지 않으므로 1000/1002/1006 은 살아남고,
+        // bracketed paste(2004)·커서 표시(25)는 기본값으로 돌아간다 (const 주석).
+        assert_eq!(
+            preamble_after(&[
+                dec(&[1000, 1002, 1006], true),
+                dec(&[2004], true),
+                dec(&[25], false),
+                OscEvent::TerminalReset { soft: true },
+            ]),
+            b"\x1b[?1000h\x1b[?1002h\x1b[?1006h".to_vec()
+        );
+    }
+
+    #[test]
+    fn tracked_mode_count_is_capped_but_known_modes_keep_updating() {
+        let mut modes = BTreeMap::new();
+        for mode in 1..=(MAX_TRACKED_DEC_MODES as u16 + 10) {
+            apply_mode_event(&mut modes, &dec(&[mode], true));
+        }
+        assert_eq!(modes.len(), MAX_TRACKED_DEC_MODES);
+        // 상한에 걸린 뒤에도 이미 아는 모드의 값 갱신은 통과해야 한다 —
+        // 그러지 않으면 추적 중인 모드가 옛 값으로 굳는다.
+        apply_mode_event(&mut modes, &dec(&[1], false));
+        assert_eq!(modes.get(&1), Some(&false));
+        assert_eq!(modes.len(), MAX_TRACKED_DEC_MODES);
     }
 }

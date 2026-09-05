@@ -2,7 +2,8 @@
 // 계약은 코어 session.rs `PtySession::reattach` rustdoc:
 // - 채널 먼저 장착 → reattach 나중이므로, 스냅샷(end_offset) 확정 전에 도착한
 //   chunk 는 큐잉했다가 확정 시점에 일괄 판정한다.
-// - 스냅샷 구간 [end_offset - len, end_offset) 과 겹치는 chunk(offset < end_offset)
+// - 스냅샷 구간(끝은 end_offset — 길이로 시작을 역산하지 않는다, reattach 가 앞에 모드
+//   preamble 을 붙인다)과 겹치는 chunk(offset < end_offset)
 //   는 폐기(dedup)하되, **폐기분 포함 받은 전량을 ack** 해야 flow 계정이 맞는다 —
 //   ack 누락분이 pending 에 남으면 paused 고착으로 세션이 굳는다.
 // 리더 루프 계약상 chunk 는 end_offset 경계에 걸치지 않는다 (reattach 이전

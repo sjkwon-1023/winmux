@@ -107,6 +107,9 @@ impl OscBatch {
             // 즉시 응답을 쓴다 (sink.rs). 여기 슬롯은 만들지 않는다: 질의는 TUI
             // 앱이 그릴 때마다 반복해서 오므로 배치에 담으면 flush 가 헛돈다.
             OscEvent::OscColorQuery { .. } => {}
+            // DEC private mode·리셋은 OSC 가 아니다 — 리더가 재-attach preamble
+            // 용으로 소비하므로 sink 가 이것들을 보는 일은 없다 (session.rs).
+            OscEvent::DecPrivateMode { .. } | OscEvent::TerminalReset { .. } => {}
         }
     }
 

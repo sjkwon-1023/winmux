@@ -343,14 +343,16 @@ export class TerminalView {
    *  무선택 에러 판정은 호출측(pane-view) 몫이다.
    *
    *  이 메서드와 아래 4개는 pane 간 텍스트 전달(send-mode)의 터미널 측 표면이다.
-   *  **현재 휴면 상태다** — 헤더의 ⤷/⤷⏎ 버튼을 뺀 뒤로 arm 진입점이 UI 에 없어
-   *  아무도 이 경로를 부르지 않는다. 차기 agent-facing 채널이 여기에 재배선될
+   *  **send-mode 경로는 현재 휴면 상태다** — 헤더의 ⤷/⤷⏎ 버튼을 뺀 뒤로 arm
+   *  진입점이 UI 에 없어 아무도 이 경로를 부르지 않는다 (`paste` 만은 Ctrl+V
+   *  클립보드 경로가 함께 쓴다). 차기 agent-facing 채널이 여기에 재배선될
    *  예정이라 구현을 그대로 둔다 (pane-view 의 armSend 주석 참조). */
   getSelection(): string {
     return this.term.getSelection();
   }
 
-  /** 패널 간 텍스트 전달 수신 경로 (17단계 D1 — 계획 v2 8장 sendText).
+  /** 붙여넣기 수신 경로 — 패널 간 텍스트 전달(17단계 D1 — 계획 v2 8장 sendText)과
+   *  Ctrl+V 클립보드 붙여넣기가 함께 지난다.
    *  반드시 xterm 의 term.paste 를 경유한다: bracketed paste 모드 추적을 xterm
    *  이 담당하므로 `ESC[200~` 를 raw 로 PTY 에 쓰지 않는다 (수신 앱이 paste
    *  mode 를 안 켰으면 시퀀스가 입력으로 그대로 들어가는 사고 방지). 결과
@@ -362,10 +364,10 @@ export class TerminalView {
    *  발생하면 로그로 드러낸다. */
   paste(text: string): void {
     if (!this.replayDone) {
-      console.warn(
-        "[winmux] send-mode paste before replay done — text dropped by onData gate",
-        { session: this.session, length: text.length },
-      );
+      console.warn("[winmux] paste before replay done — text dropped by onData gate", {
+        session: this.session,
+        length: text.length,
+      });
     }
     this.term.paste(text);
   }
@@ -620,7 +622,7 @@ export class TerminalView {
       console.error("clipboard read failed", err);
     }
     if (text.length > 0) {
-      this.term.paste(text);
+      this.paste(text);
       return;
     }
     if (await clipboardHasImage()) this.enqueueWrite("\x16");
