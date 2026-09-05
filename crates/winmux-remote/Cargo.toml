@@ -1,0 +1,17 @@
+[package]
+name = "winmux-remote"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 요청 헤드 파서만 빌려 쓴다 — accept 루프·스레드·응답 쓰기는 이 크레이트가 직접 한다
+# (계획 2장: async 런타임을 들이지 않는다).
+httparse = "1"
+# 토큰용 CSPRNG. 0.3 은 Windows 에서 ProcessPrng, unix 에서 getrandom(2) 를 쓰므로
+# 플랫폼 분기를 우리가 들고 있지 않아도 된다.
+getrandom = "0.3"
+base64 = "0.22"
+
+[dev-dependencies]
+# 토큰 파일 테스트의 임시 디렉터리용 (winmux-core 의 persist 테스트와 같은 용도).
+tempfile = "3"

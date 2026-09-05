@@ -4382,6 +4382,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "winmux-remote"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "httparse",
+ "tempfile",
+]
+
+[[package]]
 name = "winmux-spike"
 version = "0.1.0"
 dependencies = [
