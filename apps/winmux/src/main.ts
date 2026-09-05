@@ -29,6 +29,7 @@ import {
   nextTab,
   nextWorkspace,
   paneInDirection,
+  paneTerminalCwd,
   pathBasename,
   workspaceAtOrdinal,
 } from "./keys";
@@ -380,12 +381,14 @@ class App {
       void this.dispatchUI({ type: "focusPane", pane: target });
       return;
     }
+    // panes 맵 키는 문자열 숫자 (JSON object 키 제약 — types.ts 참조).
+    const pane = ws.panes[String(ws.activePane)];
     if (action.type === "newTab") {
-      // 헤더의 새 탭·폴더 아이콘과 같은 명령 — cwd/path 는 null 로 두고 코어가
+      // 헤더의 새 탭·폴더 아이콘과 같은 명령 — 폴더의 path 는 null 로 두어 코어가
       // 워크스페이스 rootPath 로 해석한다 (pane-view 주석 참조).
       const tab =
         action.kind === "terminal"
-          ? ({ type: "terminal", cwd: null } as const)
+          ? ({ type: "terminal", cwd: paneTerminalCwd(pane) } as const)
           : ({ type: "folderBrowser", path: null } as const);
       void this.dispatchUI({ type: "createTab", pane: ws.activePane, tab });
       return;
@@ -396,12 +399,10 @@ class App {
         type: "splitPane",
         pane: ws.activePane,
         direction: action.direction,
-        tab: { type: "terminal", cwd: null },
+        tab: { type: "terminal", cwd: paneTerminalCwd(pane) },
       });
       return;
     }
-    // panes 맵 키는 문자열 숫자 (JSON object 키 제약 — types.ts 참조).
-    const pane = ws.panes[String(ws.activePane)];
     if (pane === undefined) return;
     if (action.type === "closeTab") {
       // 탭 × 버튼과 같은 명령 — 활성 탭이 없는 빈 pane 은 조용한 no-op.

@@ -24,7 +24,8 @@ ConPTY → `wsl.exe` → a login shell. There is no PowerShell or CMD profile.
 
 ## Features
 
-- **Split panes** — split in either direction, drag to resize, `Alt`+arrows to move focus.
+- **Split panes** — split in either direction, drag to resize, `Alt`+arrows to move focus. A
+  new pane or tab opens in the directory the pane's shell is in.
 - **Tabs inside panes** — every pane has its own tab strip; background tabs stay alive.
 - **Workspace sidebar** — one status card per workspace: agent state and its last message.
 - **Agent status** — driven by OSC 777/9 from a Claude Code hook or your shell prompt. No
