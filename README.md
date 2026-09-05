@@ -34,6 +34,7 @@ ConPTY → `wsl.exe` → a login shell. There is no PowerShell or CMD profile.
   you ask to pre-fill the prompt instead.
 - **Viewer tabs** — folder browser, text viewer, and markdown viewer reading over
   `\\wsl.localhost`. Large files page in 512KiB windows.
+- **Remote surface (opt-in)** — set `"remote": { "port": 7331 }` in `settings.json`, pair a phone on the same Wi-Fi from the sidebar's *Pair phone* QR, and read a tab or send it text from the phone's browser. Off by default; plain HTTP on your LAN — the limits are in ADR-0016.
 - **Layout persistence** — workspaces, splits, and tabs come back, each shell respawned in the
   directory it was last in, and a tab that was running an agent comes back with its resume
   command one `Up` away. The agent process is gone; the conversation is not.
