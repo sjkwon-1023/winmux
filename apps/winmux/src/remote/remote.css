@@ -21,6 +21,9 @@ html,
 body {
   margin: 0;
   height: 100%;
+  /* 문서는 스크롤하지 않는다 — 스크롤은 출력 영역 안에서만. 문서가 움직이면 키보드가
+     뜰 때 입력칸이 화면 밖으로 밀린다 (main.ts fitToVisualViewport). */
+  overflow: hidden;
 }
 
 body {
@@ -32,7 +35,13 @@ body {
 }
 
 #app {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  /* 높이는 main.ts 가 보이는 뷰포트에 맞춰 덮어쓴다. */
   height: 100%;
+  overflow: hidden;
 }
 
 .screen {
@@ -56,6 +65,22 @@ body {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.bar-zoom {
+  flex: 0 0 auto;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.bar-title {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .bar-back {
@@ -181,16 +206,25 @@ body {
 
 /* ── 탭 화면 ─────────────────────────────────────────────────── */
 
-/* 화면 폭은 PTY 의 cols 가 정한다 — 폰 화면보다 넓은 것이 정상이라 가로로
-   스크롤한다 (줄바꿈으로 접으면 TUI 레이아웃이 깨져 읽을 수 없다). */
-.screen-scroll {
+/* 화면은 headless xterm 버퍼를 줄바꿈되는 텍스트로 옮긴 것이다 (tab-view.ts) —
+   PTY 의 열 수와 무관하게 세로로만 스크롤한다. 글자 크기는 A−/A+ 가 인라인으로 준다. */
+.screen-text {
   flex: 1 1 auto;
-  overflow: auto;
+  min-height: 0;
+  padding: 6px 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: #000;
+  -webkit-overflow-scrolling: touch;
 }
 
-.screen-host {
-  min-width: max-content;
+.screen-pre {
+  margin: 0;
+  color: #d4d4d4;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  line-height: 1.3;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .composer {
@@ -230,20 +264,23 @@ body {
 .keys {
   display: flex;
   flex: 0 0 auto;
-  flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
   padding: 0 8px 10px;
 }
 
 .key {
-  min-width: var(--touch);
+  flex: 1 1 0;
   min-height: var(--touch);
-  padding: 0 10px;
   color: var(--fg);
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 15px;
+}
+
+.key-stop {
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 button:disabled {

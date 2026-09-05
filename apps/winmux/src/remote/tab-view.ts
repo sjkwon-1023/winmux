@@ -1,19 +1,17 @@
 // 탭 화면 — 한 터미널 탭의 현재 화면과 그 탭으로 보내는 입력.
 //
-// xterm 을 **`disableStdin: true`** 로 띄우는 것이 이 화면의 핵심 결정이다.
-// 우리가 받는 바이트는 데스크톱과 같은 replay/델타이고, 거기에는 프로그램이
-// 남긴 단말 질의(`ESC[6n` 등)가 그대로 들어 있다. xterm 은 그 질의를 보면
-// 자동으로 응답(`ESC[..R`)을 만들어 데이터 이벤트로 흘리는데, 그것이 PTY 로
-// 들어가면 셸의 입력줄에 `;1R` 같은 쓰레기가 남는다. 데스크톱은 replay 구간
-// 동안 그 응답을 막아 두고(`terminal-view.ts` 의 replay 게이트) 실제 응답은
-// 자기가 한다 — 폰은 같은 세션을 **동시에** 보고 있으므로 델타에서도 답하면
-// 안 된다. `disableStdin` 은 xterm 의 데이터 이벤트를 통째로 끊는다.
+// 화면은 **텍스트**로 그린다. 서버가 주는 바이트는 데스크톱과 같은 replay/델타이고
+// PTY 의 열 수도 데스크톱 것이라, xterm 으로 그대로 그리면 폰 화면보다 넓어 가로로
+// 넘친다. 대신 headless xterm 을 화면 **모델**로만 두고(`@xterm/headless` — DOM 도
+// 렌더러도 없다) 그 버퍼의 줄들을 줄바꿈되는 `<pre>` 로 옮긴다. 세로 스크롤만 남고
+// 글자 크기는 CSS 라 폰에서 조절할 수 있다 (screen-text.ts).
 //
-// 그래서 입력은 전부 우리 인코더(`protocol.ts`)가 만들고, 그 인코딩이 읽는
-// `term.modes` 는 `term.write` 의 콜백이 돌아야 반영된다 — 그 전까지 입력
-// 컨트롤을 비활성으로 두는 이유다.
+// headless 인스턴스는 입력 경로가 없다 — 데스크톱이 replay 구간에서 막아 두는 단말
+// 질의 자동 응답(`ESC[..R`)이 여기서 PTY 로 샐 일도 없다. 입력은 전부 우리 인코더
+// (`protocol.ts`)가 만들고, 붙여넣기 감싸기에 필요한 모드는 write 가 끝난 뒤의
+// `term.modes` 에서 읽는다 — 그 전까지 입력 컨트롤을 비활성으로 두는 이유다.
 
-import { Terminal } from "@xterm/xterm";
+import { Terminal } from "@xterm/headless";
 
 import { fetchScreen, HttpError, postInput } from "./api";
 import type { ScreenReply } from "./api";
@@ -29,24 +27,21 @@ import {
   nextRequest,
   screenQuery,
 } from "./protocol";
-import type { InputAction, InputKey } from "./protocol";
+import type { InputAction } from "./protocol";
+import {
+  clampFontPx,
+  DEFAULT_FONT_PX,
+  FONT_STEP_PX,
+  MAX_SCREEN_LINES,
+  tailRange,
+  trimTrailingBlank,
+} from "./screen-text";
 import type { TabId } from "../types";
 
 const POLL_INTERVAL_MS = 2000;
-const FONT_SIZE_PX = 11;
-
-/** 키 버튼 한 줄. 라벨은 사용자 노출 문자열이라 영어다. */
-const KEY_BUTTONS: { key: InputKey; label: string }[] = [
-  { key: "escape", label: "Esc" },
-  { key: "tab", label: "Tab" },
-  { key: "ctrlC", label: "Ctrl+C" },
-  { key: "up", label: "↑" },
-  { key: "down", label: "↓" },
-  { key: "left", label: "←" },
-  { key: "right", label: "→" },
-  { key: "backspace", label: "⌫" },
-  { key: "enter", label: "Enter" },
-];
+const FONT_KEY = "winmux.remoteFontPx";
+/** 이 거리 안이면 "맨 아래를 보고 있다" — 새 출력이 오면 따라 내려간다. */
+const STICK_TO_BOTTOM_PX = 24;
 
 export interface TabViewOptions {
   tab: TabId;
@@ -56,7 +51,8 @@ export interface TabViewOptions {
 
 export class TabView {
   readonly root: HTMLElement;
-  private readonly hostEl: HTMLDivElement;
+  private readonly outputEl: HTMLDivElement;
+  private readonly preEl: HTMLPreElement;
   private readonly noticeEl: HTMLDivElement;
   private readonly textEl: HTMLTextAreaElement;
   private readonly controls: HTMLButtonElement[] = [];
@@ -73,6 +69,7 @@ export class TabView {
    *  되돌린다. 폰에서 손으로 친 것이라 실패 한 번에 사라지면 다시 칠 수밖에
    *  없다. 인코딩된 `data` 를 되돌릴 수는 없다 (브래킷 시퀀스가 딸려 온다). */
   private pendingPaste: { item: InputItem; text: string } | null = null;
+  private fontPx = loadFontPx();
 
   constructor(private readonly options: TabViewOptions) {
     this.root = document.createElement("div");
@@ -88,47 +85,42 @@ export class TabView {
     const title = document.createElement("span");
     title.className = "bar-title";
     title.textContent = options.title;
-    header.append(back, title);
+    const zoomOut = this.zoomButton("A−", -FONT_STEP_PX);
+    const zoomIn = this.zoomButton("A+", FONT_STEP_PX);
+    header.append(back, title, zoomOut, zoomIn);
 
     this.noticeEl = document.createElement("div");
     this.noticeEl.className = "notice";
     this.noticeEl.hidden = true;
 
-    const scroll = document.createElement("div");
-    scroll.className = "screen-scroll";
-    this.hostEl = document.createElement("div");
-    this.hostEl.className = "screen-host";
-    scroll.append(this.hostEl);
+    this.outputEl = document.createElement("div");
+    this.outputEl.className = "screen-text";
+    this.preEl = document.createElement("pre");
+    this.preEl.className = "screen-pre";
+    this.outputEl.append(this.preEl);
+    this.applyFont();
 
     const composer = document.createElement("div");
     composer.className = "composer";
     this.textEl = document.createElement("textarea");
     this.textEl.className = "composer-text";
     this.textEl.rows = 2;
-    this.textEl.placeholder = "Text to send";
+    this.textEl.placeholder = "Text to send (empty = Enter)";
     this.textEl.autocapitalize = "off";
     this.textEl.spellcheck = false;
-    const send = document.createElement("button");
-    send.type = "button";
-    send.className = "composer-send";
-    send.textContent = "Send";
-    send.addEventListener("click", () => this.send());
-    this.controls.push(send);
+    const send = this.actionButton("Send", "composer-send", () => this.send());
     composer.append(this.textEl, send);
 
     const keys = document.createElement("div");
     keys.className = "keys";
-    for (const spec of KEY_BUTTONS) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "key";
-      button.textContent = spec.label;
-      button.addEventListener("click", () => this.enqueue([{ type: "key", key: spec.key }]));
-      this.controls.push(button);
-      keys.append(button);
-    }
+    keys.append(
+      this.actionButton("Stop", "key key-stop", () =>
+        this.enqueue([{ type: "key", key: "ctrlC" }]),
+      ),
+      this.actionButton("Esc", "key", () => this.enqueue([{ type: "key", key: "escape" }])),
+    );
 
-    this.root.append(header, this.noticeEl, scroll, composer, keys);
+    this.root.append(header, this.noticeEl, this.outputEl, composer, keys);
     this.setInputEnabled(false);
 
     this.schedule = new PollSchedule({
@@ -163,6 +155,37 @@ export class TabView {
     this.schedule.stop();
     this.queue.clear();
     this.destroyTerminal();
+  }
+
+  /** 버튼을 눌러도 입력칸의 포커스를 뺏지 않는다 — 폰에서는 포커스가 옮겨 가는 순간
+   *  키보드가 내려가서, 보낼 때마다 다시 띄워야 한다. */
+  private actionButton(label: string, className: string, onClick: () => void): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+    button.addEventListener("click", onClick);
+    this.controls.push(button);
+    return button;
+  }
+
+  private zoomButton(label: string, delta: number): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "bar-zoom";
+    button.textContent = label;
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+    button.addEventListener("click", () => {
+      this.fontPx = clampFontPx(this.fontPx + delta);
+      saveFontPx(this.fontPx);
+      this.applyFont();
+    });
+    return button;
+  }
+
+  private applyFont(): void {
+    this.preEl.style.fontSize = `${this.fontPx}px`;
   }
 
   private setNotice(text: string | null): void {
@@ -201,30 +224,45 @@ export class TabView {
       // 이어 붙일 수 없는 응답이다 — 받은 바이트를 버리고 인스턴스를 접는다.
       // 다음 폴이 `since` 없이 나가 새 스냅샷으로 다시 세운다.
       this.destroyTerminal();
-    } else {
-      this.term?.write(bytes);
+    } else if (bytes.length > 0) {
+      this.write(bytes);
     }
     this.state = nextRequest(this.state, meta);
   }
 
   private createTerminal(cols: number, rows: number, bytes: Uint8Array): void {
     this.destroyTerminal();
-    const term = new Terminal({
-      cols,
-      rows,
-      // 파일 상단: 폰이 단말 질의에 답하면 그 응답이 PTY 로 샌다.
-      disableStdin: true,
-      fontSize: FONT_SIZE_PX,
-      cursorBlink: false,
-      convertEol: false,
-    });
-    term.open(this.hostEl);
-    this.term = term;
+    // 크기는 서버(PTY)의 것 — 그래야 replay 가 데스크톱과 같은 줄로 접힌다. 화면에
+    // 보이는 줄바꿈은 그 위에 CSS 가 한 번 더 접는 것이다.
+    this.term = new Terminal({ cols, rows, scrollback: MAX_SCREEN_LINES });
+    this.write(bytes, () => this.setInputEnabled(true));
+  }
+
+  private write(bytes: Uint8Array, then?: () => void): void {
+    const term = this.term;
+    if (term === null) return;
     const generation = this.schedule.generation;
     term.write(bytes, () => {
-      if (!this.schedule.isCurrent(generation)) return;
-      this.setInputEnabled(true);
+      if (!this.schedule.isCurrent(generation) || this.term !== term) return;
+      this.render(term);
+      then?.();
     });
+  }
+
+  /** 버퍼의 마지막 줄들을 텍스트로 옮긴다. 맨 아래를 보고 있었으면 따라 내려간다 —
+   *  위로 올려 읽는 중이면 자리를 지킨다. */
+  private render(term: Terminal): void {
+    const buffer = term.buffer.active;
+    const [start, end] = tailRange(buffer.length, MAX_SCREEN_LINES);
+    const lines: string[] = [];
+    for (let y = start; y < end; y += 1) {
+      lines.push(buffer.getLine(y)?.translateToString(true) ?? "");
+    }
+    const out = this.outputEl;
+    const atBottom =
+      out.scrollHeight - out.scrollTop - out.clientHeight <= STICK_TO_BOTTOM_PX;
+    this.preEl.textContent = trimTrailingBlank(lines).join("\n");
+    if (atBottom) out.scrollTop = out.scrollHeight;
   }
 
   private destroyTerminal(): void {
@@ -233,7 +271,6 @@ export class TabView {
     this.setInputEnabled(false);
     this.term?.dispose();
     this.term = null;
-    this.hostEl.replaceChildren();
   }
 
   private modes(): TerminalModes {
@@ -246,10 +283,14 @@ export class TabView {
   }
 
   /** Send = 텍스트 한 번, 그 응답 뒤 CR 한 번 (ADR-0016 결정 7). 두 요청으로 나누고
-   *  사이를 벌리는 이유는 `input-queue.ts` 모듈 주석에 있다. */
+   *  사이를 벌리는 이유는 `input-queue.ts` 모듈 주석에 있다. 빈 입력칸의 Send 는
+   *  Enter 하나다 — 확인 프롬프트에 답할 때 쓴다. */
   private send(): void {
     const text = this.textEl.value;
-    if (text === "") return;
+    if (text === "") {
+      this.enqueue([{ type: "key", key: "enter" }]);
+      return;
+    }
     const items = this.enqueue([
       { type: "paste", text },
       { type: "key", key: "enter" },
@@ -317,6 +358,25 @@ export class TabView {
       return;
     }
     this.setNotice("Could not reach winmux — retrying.");
+  }
+}
+
+/** localStorage 는 프라이빗 모드·차단 설정에서 접근 자체가 던진다 — 기본 크기로
+ *  진행하면 되고 페이지가 죽을 일은 아니다. */
+function loadFontPx(): number {
+  try {
+    const raw = window.localStorage.getItem(FONT_KEY);
+    return raw === null ? DEFAULT_FONT_PX : clampFontPx(Number(raw));
+  } catch {
+    return DEFAULT_FONT_PX;
+  }
+}
+
+function saveFontPx(px: number): void {
+  try {
+    window.localStorage.setItem(FONT_KEY, String(px));
+  } catch {
+    // 저장이 안 되면 이번 세션에만 유효한 크기가 된다 — 조용히 진행한다.
   }
 }
 

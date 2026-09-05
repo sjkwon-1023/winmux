@@ -69,14 +69,18 @@ desktop already receives.
 
 7. **Input is raw bytes, and the phone's terminal never emits any.** The server writes the body
    to the PTY verbatim — no CR appended, no interpretation — and refuses chunked transfer,
-   conflicting lengths, `Expect`, and any body that did not arrive whole. The phone's xterm runs
-   with `disableStdin`, because replayed terminal queries (`ESC[6n`) would otherwise make it
-   answer into a PTY the desktop is already answering for; the desktop guards the same hazard
-   with its `replayDone` gate. The phone encodes input itself from `term.modes` — bracketed
-   paste when the mode is on, `ESC[A`/`ESCOA` by DECCKM — sends actions one at a time, and
-   sends Enter as a **separate** request at least 150 ms after a paste, for the reason recorded
-   with the v0.3.16 `winmux send` fix: both agent TUIs treat one burst as a paste and swallow a
-   CR inside it.
+   conflicting lengths, `Expect`, and any body that did not arrive whole. The phone does not
+   run a DOM terminal at all: a headless xterm (`@xterm/headless`) at the PTY's size is the
+   screen *model*, and its buffer is rendered as wrapped text, so the page scrolls vertically
+   only and the font size is a CSS knob (v0.3.18 — the first field round found the desktop-width
+   xterm unreadable and its input bar hidden under the phone keyboard). A headless instance has
+   no input path, so the replayed terminal queries (`ESC[6n`) that the desktop guards with its
+   `replayDone` gate cannot be answered into a PTY the desktop already answers for. The phone
+   encodes input itself from `term.modes` — bracketed paste when the mode is on — sends actions
+   one at a time, and sends Enter as a **separate** request at least 150 ms after a paste, for
+   the reason recorded with the v0.3.16 `winmux send` fix: both agent TUIs treat one burst as a
+   paste and swallow a CR inside it. The page sizes itself to the visual viewport, since phone
+   browsers shrink only the visible window when the keyboard opens.
 
 8. **Static assets are gated by the embedded key set.** Tauri's release asset lookup falls back
    to `index.html` for any unknown path (`manager/mod.rs:406-428` in 2.11.5), so without a gate
