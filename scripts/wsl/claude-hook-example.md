@@ -164,9 +164,9 @@ winmux send -l '#181' 'cargo test'  # literal: only pre-fills the prompt, submit
 winmux send build 'cargo test'      # by title substring instead of id
 ```
 
-The CLI encodes the text, appends a trailing **CR** (unless `-l`), and resolves the
-terminal device with the same two-step discipline as `winmux-notify.sh` — so it works from a
-hook too. Delivery stays silent (exit 0 either way); only a usage error is reported.
+The CLI encodes the text, then (unless `-l`) sends a **CR** as a second OSC 200 ms later,
+and resolves the terminal device with the same two-step discipline as `winmux-notify.sh` — so it
+works from a hook too. Delivery stays silent (exit 0 either way); only a usage error is reported.
 
 The sequence it emits:
 
@@ -205,7 +205,10 @@ a title is the weaker address because a prompt hook may rewrite it on every prom
   byte added. **Include a CR (`\r`)** if the target should run the line — that is the byte a
   real terminal sends for Enter, so it submits in a raw-mode TUI (Codex, Claude Code) as well
   as in a shell, whose `ICRNL` turns it back into a newline. A bare LF only submits in a
-  shell; a TUI takes it into its prompt and sits there.
+  shell; a TUI takes it into its prompt and sits there. Send the CR as its **own**
+  `winmux-send` a beat (≥150 ms) after the text, never appended to it: both TUIs treat bytes
+  that land in one read as a paste, and a CR inside a paste is a newline. The app writes each
+  send to the PTY as it arrives, so two sends spaced apart are two writes.
 - The effective size limit is far below 32 KiB: the OSC scanner discards any payload over
   64 KiB before parsing — sized so the full 32 KiB text contract survives base64
   expansion. Pass a path, not

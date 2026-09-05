@@ -1947,6 +1947,29 @@ comes up in the mode the program set, and that a reset still wins.
    `tput reset`, then switch workspaces and back, and click again: **no junk**. Same check with
    `printf '\ec'` (RIS) in place of `tput reset`.
 
+### v0.3.16 — verification
+
+Needs provisioning **v10**, which runs once on first launch of this build; `~/.winmux/setup.log`
+records it. Check that first.
+
+1. **`winmux send` submits a long line to an agent.** v0.3.11 fixed the byte (CR, not LF) but
+   sent it in the same write as the text, and both agent TUIs treat a burst of bytes that lands
+   in one read as a paste — a CR inside a paste is a newline, so the text arrived intact and the
+   Enter was swallowed. The CLI now sends the CR as a second write 200 ms after the text.
+
+   - **The case that was broken.** Open Codex (or Claude Code) in one tab and a shell in
+     another. From the shell send a line longer than 64 characters:
+     `winmux send '#<agent tab id>' 'please summarize this sentence, which is deliberately long enough to cross the paste threshold of both agents'`.
+     The agent must **start working**, not sit with the text in its prompt. Repeat with a short
+     line (`say hello`) — it must submit too.
+   - **The shell case did not regress.** `winmux send '#<shell tab id>' 'echo delivered'` runs
+     the line; the 200 ms gap is invisible there.
+   - **`-l` still only pre-fills**, long or short, agent or shell.
+   - **The peer-review round trip.** From a Claude Code tab run a `/peer-review` against a shell
+     tab. The runner's `[REVIEW] … 읽고 취합해줘.` reply is well over 64 characters and must land
+     as a **submitted** message in the Claude Code tab, not as text waiting in its prompt — that
+     is the exact field failure this release fixes.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

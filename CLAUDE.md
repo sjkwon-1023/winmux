@@ -185,6 +185,13 @@ Accepted deferrals, one line each. None of these block the MVP.
   TUI. `SETUP_VERSION` 9 reinstalls the CLI for existing users; the contract doc and both copies
   of `SKILL.md` (tracked, and the one embedded in `provision.rs`) say CR now. Verification:
   WINDOWS-BUILD §10 v0.3.11 item 1 — field-only, since the failure is inside an agent's TUI.
+  **Follow-up 2026-09-05** (v0.3.16): a *long* line still did not submit — the byte was right but
+  it shared a write with the text, and both TUIs treat a burst that lands in one read as a paste
+  (Codex's `paste_burst.rs`, Claude Code's chunk-length rule), where a CR is a newline. Seen in
+  the field on a `/peer-review` reply of ~120 bytes. The CLI (setup v10) now sends the CR as a
+  **second OSC 200 ms after the text**; the app writes each send as it arrives (`Osc777Send` is
+  an action, never batched by the router), so the gap survives to the PTY. Any raw sender of
+  the OSC contract has to do the same. Verification: WINDOWS-BUILD §10 v0.3.16.
 - **Cross-workspace send/`ls` would need an explicit opt-in** — both halves of the agent
   channel stop at the requester's own workspace (2026-08-11 decision, ADR-0005 addendum); if
   reaching another project's pane ever becomes a real need it arrives as a named opt-in, never

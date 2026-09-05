@@ -3,7 +3,7 @@
 
 [package]
 name = "winmux-app"
-version = "0.3.15"
+version = "0.3.16"
 edition = "2021"
 
 [build-dependencies]
