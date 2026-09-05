@@ -1711,10 +1711,11 @@ about. Zoom stays session-only: nothing is written back to `settings.json`.
      that tab must come back in that directory, not the workspace root. Do it for two tabs in
      different directories in the same workspace — both must land correctly, which is what proves
      the value is per tab rather than per workspace.
-   - **The prompt is the trigger, and that is fine.** `cd /tmp && sleep 30` then quit *during* the
-     sleep: the tab comes back in `/tmp` (the prompt after the `cd` already reported it). A
-     directory change made by a still-running program is not tracked — that is the documented
-     limit, not a bug.
+   - **The prompt is the trigger, and that is fine.** `cd /tmp`, let the prompt draw, then
+     `sleep 30` and quit *during* the sleep: the tab comes back in `/tmp` (the prompt after the
+     `cd` reported it; the sleep changes nothing). Note `cd /tmp && sleep 30` on one line would
+     *not* do — the prompt only draws after the whole list. A directory change made by a
+     still-running program is not tracked — that is the documented limit, not a bug.
    - **Odd paths survive.** `mkdir -p "/tmp/wm test/100%dir" && cd "/tmp/wm test/100%dir"`, restart:
      the tab must reopen in exactly that directory, spaces, `%` and all.
    - **A deleted directory degrades loudly, not fatally.** `mkdir /tmp/gone && cd /tmp/gone`,
@@ -1872,6 +1873,37 @@ the pointer behaviour and the fact that reordering survives a restart.
 7. **The × button is not a drag handle.** Press the mouse down on a card's ×, move a little, and
    release: nothing may reorder. (Whether the close dialog appears is the existing behaviour, not
    part of this item.)
+
+### v0.3.14 — verification
+
+A new terminal opens where the pane's shell is. The resolution is front-end only and unit-tested
+(`keys.test.ts`, `pane-view.test.ts`); what needs a real window is that the OSC 7 value the pane
+holds is the one the new shell actually lands in.
+
+1. **Split follows the shell.** In a tab, `cd` a few levels below the workspace root, wait for
+   the prompt, then split with the header icon and again with `Ctrl+Shift+E` / `Ctrl+Shift+D`.
+   Every new pane must open in that directory, not the workspace root. `Ctrl+Shift+T` and the
+   header `+` must do the same within the pane.
+
+2. **Per pane, not per workspace.** Two panes in different directories: split each. Each new
+   pane must follow *its own* source pane.
+
+3. **A viewer falls back to the root.** With a folder-browser tab shown in a pane, split it: the
+   new shell must open at the workspace root (there is no shell to follow). Switch that pane back
+   to its terminal tab and split again: it follows the terminal.
+
+4. **Prompt-time, not live.** `cd /tmp`, let the prompt draw, then `sleep 30` and split during
+   the sleep: the new pane opens in `/tmp` (the prompt after the `cd` reported it). `cd /tmp &&
+   sleep 30` on one line would open in the *previous* directory — no prompt draws until the list
+   ends. Then start an agent and let it `cd` somewhere by itself: a split opens where the shell
+   last drew a prompt, not where the agent went — the documented ADR-0011 limit.
+
+5. **A gone directory degrades the way a restart does.** `mkdir /tmp/gone && cd /tmp/gone`, then
+   `rmdir /tmp/gone` from another tab, draw one more prompt in the first, and split: the new pane
+   must come up in `$HOME` with the dim `[winmux] ... is gone` line, not blank.
+
+6. **`Ctrl+Shift+N` is unchanged.** From a tab deep in a directory it must still create a
+   workspace rooted there.
 
 ## 11. ARM64 cross-build notes
 

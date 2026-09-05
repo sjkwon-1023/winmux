@@ -68,7 +68,7 @@
 // 조합만 가로챈다. `[`·`]` 는 그 예외를 정면으로 만나는 자리라 표기 문자와
 // **shift 결과 문자**(`{`·`}`)를 둘 다 매칭한다 (아래 CTRL_SHIFT_KEYS 참조).
 
-import type { PaneId, SplitDirection, TabId, Workspace, WorkspaceId } from "./types";
+import type { Pane, PaneId, SplitDirection, TabId, Workspace, WorkspaceId } from "./types";
 
 /** keydown 판정 입력 — KeyboardEvent 의 구조적 부분집합 (DOM 없이 테스트하기
  *  위한 최소 형태). 실코드에서는 이벤트의 key/ctrlKey/altKey/shiftKey/isComposing
@@ -184,17 +184,22 @@ export function shortcutLabel(id: ShortcutId): string {
   return `Ctrl+Shift+${CTRL_SHIFT_KEYS[id].letter.toUpperCase()}`;
 }
 
-/** `Ctrl+Shift+N` 의 경로 해석 (순수) — 활성 pane 의 표시 탭이 터미널이면 그 cwd
- *  (OSC 7 이 배선돼 있으면 실시간, 아니면 스폰 시점 경로), 아니면 워크스페이스
- *  rootPath. 둘 다 없으면 null — 글루가 에러로 표면화한다. */
-export function activeTerminalCwd(ws: Workspace): string | null {
-  const pane = ws.panes[String(ws.activePane)];
+/** pane 의 표시 탭이 터미널이면 그 cwd — OSC 7 이 배선돼 있으면 마지막 프롬프트 시점의
+ *  경로(ADR-0011), 아니면 스폰 시점 경로 — 뷰어·빈 pane 이면 null. null 은 NewTab 의
+ *  "워크스페이스 rootPath" 기본값과 같은 뜻이라 그대로 넘길 수 있다. 새 터미널 탭·분할이
+ *  그 pane 의 셸이 있는 곳에서 열리게 하는 해석은 코어가 아니라 여기서 한다 — 코어의
+ *  `cwd: None → root_path` 계약과 그 테스트를 건드리지 않는 쪽이 가벼워서다 (사용자 결정
+ *  2026-09-05). */
+export function paneTerminalCwd(pane: Pane | undefined): string | null {
   const active = pane?.activeTab ?? null;
   const tab = active === null ? undefined : pane?.tabs.find((t) => t.id === active);
-  if (tab !== undefined && tab.kind.type === "terminal" && tab.kind.cwd !== null) {
-    return tab.kind.cwd;
-  }
-  return ws.rootPath;
+  return tab !== undefined && tab.kind.type === "terminal" ? tab.kind.cwd : null;
+}
+
+/** `Ctrl+Shift+N` 의 경로 해석 (순수) — 활성 pane 의 터미널 cwd, 아니면 워크스페이스
+ *  rootPath. 둘 다 없으면 null — 글루가 에러로 표면화한다. */
+export function activeTerminalCwd(ws: Workspace): string | null {
+  return paneTerminalCwd(ws.panes[String(ws.activePane)]) ?? ws.rootPath;
 }
 
 /** 리눅스 경로의 마지막 세그먼트 — 새 워크스페이스 기본 이름 (글루

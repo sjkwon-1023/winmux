@@ -45,7 +45,7 @@
 // 이고, placeholder 는 둘 다 없을 때만 뜬다 (동시 표시 금지).
 
 import { respawnTab } from "./backend";
-import { shortcutLabel } from "./keys";
+import { paneTerminalCwd, shortcutLabel } from "./keys";
 import type { ShortcutId } from "./keys";
 import { paneUnread, sameTabButton, tabStripModel, tabStripPlan } from "./tab-strip-model";
 import type { TabButtonModel } from "./tab-strip-model";
@@ -197,6 +197,8 @@ export class PaneView {
   private readonly resizeObserver: ResizeObserver;
   private isActive = false;
   private shown: TabId | null = null;
+  /** 마지막 update 의 pane 스냅샷 — 헤더 버튼이 클릭 시점의 표시 탭 cwd 를 읽는다. */
+  private pane: Pane | undefined = undefined;
 
   constructor(
     readonly paneId: PaneId,
@@ -340,10 +342,12 @@ export class PaneView {
     header.append(
       this.unreadEl,
       this.tabStripEl,
+      // 터미널 cwd 는 클릭 시점의 스냅샷(this.pane)을 thunk 안에서 읽는다 — 클로저에
+      // 굳히면 탭이 바뀐 뒤에도 옛 경로로 연다 (restartTab 필드 주석과 같은 이유).
       this.iconButton("+", withShortcut("New terminal tab", "newTerminalTab"), () => ({
         type: "createTab",
         pane: this.paneId,
-        tab: { type: "terminal", cwd: null },
+        tab: { type: "terminal", cwd: paneTerminalCwd(this.pane) },
       })),
       // 폴더 탐색 탭 (21단계) — path null 이면 워크스페이스 rootPath, 그것도
       // 없으면 "/" 로 코어가 해석한다 (terminal 의 cwd 와 대칭).
@@ -370,7 +374,7 @@ export class PaneView {
           type: "splitPane",
           pane: this.paneId,
           direction: "horizontal",
-          tab: { type: "terminal", cwd: null },
+          tab: { type: "terminal", cwd: paneTerminalCwd(this.pane) },
         }),
       ),
       this.svgButton(
@@ -380,7 +384,7 @@ export class PaneView {
           type: "splitPane",
           pane: this.paneId,
           direction: "vertical",
-          tab: { type: "terminal", cwd: null },
+          tab: { type: "terminal", cwd: paneTerminalCwd(this.pane) },
         }),
       ),
     );
@@ -441,6 +445,7 @@ export class PaneView {
     visibleViewer: VisibleViewer | null,
   ): void {
     this.isActive = active;
+    this.pane = pane;
     this.root.classList.toggle("active", active);
     this.renderTabStrip(pane);
 

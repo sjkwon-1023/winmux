@@ -22,7 +22,12 @@ import type { Command, NotificationState, Pane, PaneId, Tab, TerminalStatus } fr
 
 function terminalTab(
   id: number,
-  opts: { title?: string; status?: TerminalStatus; notification?: NotificationState } = {},
+  opts: {
+    title?: string;
+    status?: TerminalStatus;
+    notification?: NotificationState;
+    cwd?: string;
+  } = {},
 ): Tab {
   return {
     id,
@@ -31,7 +36,7 @@ function terminalTab(
       type: "terminal",
       ptySession: id * 100,
       status: opts.status ?? { type: "running" },
-      cwd: null,
+      cwd: opts.cwd ?? null,
     },
     notification: opts.notification ?? "none",
     lastActivityMs: null,
@@ -464,6 +469,40 @@ describe("PaneView header buttons", () => {
     expect(leftRight.innerHTML).not.toBe(topBottom.innerHTML);
     expect(leftRight.querySelector("path")?.getAttribute("d")).toContain("v10.5");
     expect(topBottom.querySelector("path")?.getAttribute("d")).toContain("h10.5");
+  });
+
+  // 새 셸은 이 pane 의 셸이 있는 곳에서 — 세 버튼 모두 표시 탭의 cwd 를 넘긴다.
+  it("opens a new terminal tab and both splits where the shown terminal's shell is", () => {
+    const { view, headerButton, dispatched } = mount(4);
+    view.update(pane([terminalTab(10, { cwd: "/home/u/proj" })], 10), true, null, null);
+
+    headerButton("New terminal tab").click();
+    headerButton("Split left/right").click();
+    headerButton("Split top/bottom").click();
+
+    const tab = { type: "terminal", cwd: "/home/u/proj" } as const;
+    expect(dispatched).toEqual([
+      { type: "createTab", pane: 4, tab },
+      { type: "splitPane", pane: 4, direction: "horizontal", tab },
+      { type: "splitPane", pane: 4, direction: "vertical", tab },
+    ]);
+  });
+
+  it("reads the cwd at click time, and sends null when a viewer is shown or the tab has no cwd recorded", () => {
+    const { view, headerButton, dispatched } = mount(4);
+    const tabs = [folderTab(10), terminalTab(11), terminalTab(12, { cwd: "/home/u/proj" })];
+    view.update(pane(tabs, 10), true, null, null);
+    headerButton("Split left/right").click();
+    view.update(pane(tabs, 11), true, null, null);
+    headerButton("Split left/right").click();
+    view.update(pane(tabs, 12), true, null, null);
+    headerButton("Split left/right").click();
+
+    expect(dispatched.map((c) => (c.type === "splitPane" ? c.tab : c))).toEqual([
+      { type: "terminal", cwd: null },
+      { type: "terminal", cwd: null },
+      { type: "terminal", cwd: "/home/u/proj" },
+    ]);
   });
 });
 

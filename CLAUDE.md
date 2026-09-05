@@ -416,6 +416,24 @@ Accepted deferrals, one line each. None of these block the MVP.
   rustdoc and the drag code), so one would only restate them. **Not done**: autoscroll when
   dragging past the visible list, which is why the drop boxes are re-measured on every move
   rather than cached — a short list makes both moot for now.
+- **A split or a new tab opened at the workspace root, not where the pane's shell was —
+  fixed 2026-09-05** (user report, v0.3.14). Not a regression: every terminal-creating surface
+  had passed `cwd: null` since the split UI existed, and the core resolves that to the
+  workspace `root_path` — ADR-0011 made a tab's `cwd` *track* its shell, but nothing ever read
+  the value back when creating the next shell. The "follows the pane" behaviour the report
+  remembered is `Ctrl+Shift+N`, which reuses the cwd as a **new workspace's** root. Fixed in
+  the front end (user choice, the lighter of the two): `keys.ts::paneTerminalCwd` reads the
+  source pane's shown tab, and the five creating sites — header `+`, both split icons,
+  `Ctrl+Shift+T`, `Ctrl+Shift+D`/`E` — pass it as the tab `cwd`; a shown viewer tab yields
+  `null`, i.e. the old root behaviour. A shell that never reports (a `.bashrc` that execs
+  another shell) keeps its spawn-time cwd — the root for a first tab, the inherited path for a
+  tab this change created — since the core fills `cwd` at spawn. The core contract
+  (`NewTab::Terminal { cwd: None }` → `root_path`) and its tests are untouched; the rejected
+  alternative, resolving inheritance inside `SplitPane`/`CreateTab`, would have covered every
+  future surface at once at the cost of rewriting that contract and four core tests. The value
+  is the last **prompt-time** cwd (ADR-0011's limit), so a pane whose agent `cd`'d on its own
+  still splits where the shell last drew a prompt. `Ctrl+Shift+N` behaves as before and now
+  shares the helper. Verification: WINDOWS-BUILD §10 v0.3.14.
 - **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
 - **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
   smaller replay cap, progressive replay, hide-until-parsed.

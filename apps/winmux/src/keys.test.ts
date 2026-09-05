@@ -10,12 +10,13 @@ import {
   nextTab,
   nextWorkspace,
   paneInDirection,
+  paneTerminalCwd,
   pathBasename,
   shortcutLabel,
   workspaceAtOrdinal,
 } from "./keys";
 import type { KeySpec, PaneRect } from "./keys";
-import type { Workspace } from "./types";
+import type { Pane, Workspace } from "./types";
 
 /** 기본 no-modifier·조합 아님 spec — 테스트마다 필요한 것만 덮어쓴다. */
 function spec(over: Partial<KeySpec> & { key: string }): KeySpec {
@@ -383,6 +384,30 @@ describe("activeTerminalCwd / pathBasename", () => {
     expect(activeTerminalCwd(ws("/home/dev/proj", "/home/dev"))).toBe("/home/dev/proj");
     expect(activeTerminalCwd(ws(null, "/home/dev"))).toBe("/home/dev");
     expect(activeTerminalCwd(ws(null, null))).toBeNull();
+  });
+
+  // 새 탭·분할의 cwd 재료 — 표시 탭이 터미널일 때만 그 cwd, 나머지는 null 로 코어의
+  // rootPath 기본값에 맡긴다.
+  it("paneTerminalCwd 는 표시 탭이 터미널일 때만 cwd 를 주고, 뷰어·빈 pane·cwd 미기록은 null", () => {
+    expect(paneTerminalCwd(ws("/home/dev/proj", "/home/dev").panes["1"])).toBe("/home/dev/proj");
+    expect(paneTerminalCwd(ws(null, "/home/dev").panes["1"])).toBeNull();
+    expect(paneTerminalCwd(undefined)).toBeNull();
+
+    const viewerShown: Pane = {
+      id: 1,
+      tabs: [
+        {
+          id: 10,
+          title: "t",
+          kind: { type: "folderBrowser", path: "/home/dev/proj" },
+          notification: "none",
+          lastActivityMs: null,
+        },
+      ],
+      activeTab: 10,
+    };
+    expect(paneTerminalCwd(viewerShown)).toBeNull();
+    expect(paneTerminalCwd({ id: 1, tabs: [], activeTab: null })).toBeNull();
   });
 
   it("pathBasename 은 마지막 세그먼트를, 루트는 그대로 돌려준다", () => {
