@@ -694,3 +694,193 @@ fn a_terminal_reset_empties_the_reattach_preamble() {
     );
     session.kill();
 }
+
+// --- screen_since (원격 폴링 관측) ---
+//
+// 폴링 소비자는 데스크톱과 같은 세션을 동시에 본다 — 그래서 이 경로는 flow·sink·
+// dec_modes 어느 것도 건드리지 않는 read-only 여야 한다. 계약은
+// `PtySession::screen_since` rustdoc.
+
+/// `bytes` 선두의 모드 preamble 구간. `dec_mode_preamble` 은 비공개라 기대값을
+/// 만들 수 없으므로, `strip_mode_preamble` 이 걷어 낸 만큼을 preamble 로 본다.
+fn mode_preamble_of(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len() - strip_mode_preamble(bytes).len()]
+}
+
+#[test]
+fn screen_since_none_returns_a_reset_snapshot_with_the_dec_mode_preamble() {
+    let (session, rx) = spawn_script(
+        r"printf '\033[?2004hMARK1\n'; sleep 30",
+        SessionOptions::default(),
+    );
+    wait_for_marker(&rx, "MARK1");
+
+    let screen = session.screen_since(None);
+    assert!(screen.reset, "a first request must be a reset snapshot");
+    // 기대 프리앰블은 하드코딩이다 — `dec_mode_preamble` 이 비공개라 다른 방법이 없고,
+    // `sh -c` 는 비대화형이라 스크립트가 켠 2004 말고는 모드를 건드리지 않는다.
+    assert!(
+        screen.bytes.starts_with(b"\x1b[?2004h"),
+        "reset bytes must lead with the tracked mode; got {:?}",
+        &screen.bytes[..screen.bytes.len().min(32)]
+    );
+    assert!(
+        contains(&screen.bytes, b"MARK1"),
+        "reset bytes must carry the replay snapshot as well"
+    );
+    assert_eq!(screen.end_offset, session.stats().bytes_out);
+    session.kill();
+}
+
+#[test]
+fn screen_since_at_the_current_offset_returns_an_empty_delta() {
+    let (session, rx) = spawn_script(r"printf 'MARK1\n'; sleep 30", SessionOptions::default());
+    wait_for_marker(&rx, "MARK1");
+
+    // 스크립트가 sleep 으로 조용해진 뒤라 두 호출 사이에 새 출력이 끼지 않는다.
+    let first = session.screen_since(None);
+    let delta = session.screen_since(Some(first.end_offset));
+    assert!(!delta.reset, "an up-to-date poll must not force a reset");
+    assert!(delta.bytes.is_empty(), "nothing new means no bytes");
+    assert_eq!(delta.end_offset, first.end_offset);
+    session.kill();
+}
+
+#[test]
+fn screen_since_mid_stream_returns_only_the_new_bytes() {
+    // `read` 핸드셰이크로 두 단계를 가른다 — sleep 으로 시점을 맞추면 부하 걸린
+    // 러너에서 첫 관측이 이미 두 번째 단계 뒤일 수 있다.
+    let (session, rx) = spawn_script(
+        r"printf 'MARK1\n'; read -r _; printf 'SECOND\n'; sleep 30",
+        SessionOptions::default(),
+    );
+    wait_for_marker(&rx, "MARK1");
+    let first = session.screen_since(None);
+
+    session.write(b"\n").expect("release the script's read");
+    wait_for_marker(&rx, "SECOND");
+
+    let delta = session.screen_since(Some(first.end_offset));
+    assert!(!delta.reset, "the offset is inside the retained window");
+    assert!(
+        contains(&delta.bytes, b"SECOND"),
+        "the delta must carry the output produced after the offset"
+    );
+    assert!(
+        !contains(&delta.bytes, b"MARK1"),
+        "the delta must not repeat what the caller already had"
+    );
+    // 델타 구간의 계약: end_offset 은 since 에 델타 길이를 더한 값이다 (reset 과 달리
+    // 스트림에 없던 바이트가 섞이지 않으므로 길이로 구간을 말할 수 있다).
+    assert_eq!(
+        delta.end_offset,
+        first.end_offset + delta.bytes.len() as u64
+    );
+    session.kill();
+}
+
+#[test]
+fn screen_since_older_than_the_retained_window_falls_back_to_reset() {
+    let (session, rx) = spawn_script(
+        r"printf 'MARK1\n'; read -r _; seq 1 4000; printf 'MARK2\n'; sleep 30",
+        small_replay_opts(),
+    );
+    wait_for_marker(&rx, "MARK1");
+    let first = session.screen_since(None);
+
+    // `seq 1 4000`(≈23KB)이 8KB 창을 여러 번 갈아치우므로 first.end_offset 구간의
+    // 바이트는 확실히 evict 됐다.
+    session.write(b"\n").expect("release the script's read");
+    wait_for_marker(&rx, "MARK2");
+
+    let screen = session.screen_since(Some(first.end_offset));
+    assert!(
+        screen.reset,
+        "an offset older than the retained window cannot be served as a delta"
+    );
+    assert!(
+        !screen.bytes.is_empty(),
+        "the fallback must carry the current snapshot"
+    );
+    assert!(screen.end_offset > first.end_offset);
+    session.kill();
+}
+
+#[test]
+fn screen_since_ahead_of_bytes_out_falls_back_to_reset() {
+    let (session, rx) = spawn_script(r"printf 'MARK1\n'; sleep 30", SessionOptions::default());
+    wait_for_marker(&rx, "MARK1");
+
+    let current = session.screen_since(None).end_offset;
+    // 다른 세션(탭 respawn 뒤의 새 PtySession)의 오프셋을 들고 온 경우 — 새 세션의
+    // bytes_out 은 0 부터 다시 시작하므로 옛 오프셋이 미래처럼 보인다.
+    let screen = session.screen_since(Some(current + 4096));
+    assert!(screen.reset, "an offset from another session must reset");
+    assert_eq!(screen.end_offset, current);
+    session.kill();
+}
+
+#[test]
+fn screen_since_carries_the_spawn_size_and_follows_resize() {
+    let (session, rx) = spawn_script(r"printf 'MARK1\n'; sleep 30", SessionOptions::default());
+    wait_for_marker(&rx, "MARK1");
+
+    let spawned = session.screen_since(None);
+    assert_eq!((spawned.cols, spawned.rows), (80, 24));
+
+    session.resize(100, 40).expect("resize the pty");
+    let resized = session.screen_since(None);
+    assert_eq!((resized.cols, resized.rows), (100, 40));
+    session.kill();
+}
+
+#[test]
+fn screen_since_leaves_flow_and_reattach_untouched() {
+    const HIGH: usize = 256 * 1024;
+    let opts = SessionOptions {
+        replay_cap: 64 * 1024,
+        high_water: HIGH,
+        low_water: 64 * 1024,
+        startup_deadline: None,
+    };
+    // 수신자를 비우지 않으므로 ack 이 오지 않는다 — pending 이 쌓여 flow 가 pause 로
+    // 간다. 원격 관측이 그 상태를 건드리면 데스크톱의 backpressure 계정이 지워진다.
+    let (session, _rx) = spawn_script(r"printf '\033[?2004h'; seq 1 200000; sleep 30", opts);
+
+    let deadline = Instant::now() + TIMEOUT;
+    while !session.stats().paused {
+        let _ = remaining(deadline, "paused transition");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // paused 동안 리더는 read 를 멈추므로 bytes_out·pending 이 고정이다.
+    let before = session.stats();
+
+    let screen = session.screen_since(None);
+    assert!(screen.reset);
+    assert_eq!(screen.end_offset, before.bytes_out);
+    let delta = session.screen_since(Some(screen.end_offset));
+    assert!(delta.bytes.is_empty());
+
+    let after = session.stats();
+    assert!(
+        after.paused,
+        "screen_since must not resume a paused session"
+    );
+    assert_eq!(
+        after.pending, before.pending,
+        "flow accounting must not move"
+    );
+    assert_eq!(after.bytes_out, before.bytes_out);
+
+    // reattach 는 그대로 동작해야 한다 — 관측이 그 앞에 끼어들어도 스냅샷 경계와
+    // preamble 이 달라지지 않는다.
+    let (end_offset, bytes) = session.reattach();
+    assert_eq!(end_offset, before.bytes_out);
+    assert!(bytes.starts_with(b"\x1b[?2004h"));
+    assert_eq!(
+        mode_preamble_of(&screen.bytes),
+        mode_preamble_of(&bytes),
+        "both paths must re-assert the same modes"
+    );
+    session.kill();
+}

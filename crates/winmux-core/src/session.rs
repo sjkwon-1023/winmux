@@ -49,6 +49,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -195,6 +196,19 @@ pub struct SessionStats {
     pub alive: bool,
 }
 
+/// [`PtySession::screen_since`] 의 반환 — 폴링 소비자가 화면을 세우는 데 필요한
+/// 전부다. `reset` 이면 `bytes` 는 처음부터 그릴 재료(모드 preamble + 스냅샷)이고,
+/// 아니면 `since` 이후의 raw 델타다. `cols`/`rows` 는 이 세션의 현재 PTY 크기 —
+/// 수신자가 같은 크기로 터미널을 만들어야 replay 가 맞게 그려진다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Screen {
+    pub end_offset: u64,
+    pub reset: bool,
+    pub cols: u16,
+    pub rows: u16,
+    pub bytes: Vec<u8>,
+}
+
 /// 리더 스레드와 세션 핸들이 공유하는 상태.
 struct Shared {
     inner: Mutex<Inner>,
@@ -240,6 +254,12 @@ pub struct PtySession {
     master: SharedMaster,
     /// waiter 스레드가 `Child` 본체(wait 용)를 가져가므로 kill 신호는 분리된 killer 로 보낸다.
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// 현재 PTY 창 크기 (`cols << 16 | rows`). [`screen_since`](Self::screen_since)
+    /// 의 소비자는 데스크톱과 같은 크기의 터미널을 만들어야 하는데 PTY master 에는
+    /// 크기를 되묻는 경로가 없어 세션이 기억한다. `inner` 와 겹치지 않는 별도
+    /// Atomic 인 것은 이 파일에 없던 lock 순서 규약(`inner` ↔ `master`)을 새로
+    /// 만들지 않기 위해서다.
+    size: AtomicU32,
 }
 
 impl PtySession {
@@ -346,6 +366,7 @@ impl PtySession {
             writer,
             master,
             killer: Mutex::new(killer),
+            size: AtomicU32::new(pack_size(spec.cols, spec.rows)),
         })
     }
 
@@ -372,6 +393,9 @@ impl PtySession {
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        // guard 를 놓기 전에 기록한다 — 잠금 밖에서 순차로 쓰면 동시에 온 두 resize 가
+        // PTY 와 이 기록에 서로 다른 순서로 들어가, 실제 크기와 다른 값이 굳는 창이 있다.
+        self.size.store(pack_size(cols, rows), Ordering::Relaxed);
         Ok(())
     }
 
@@ -454,6 +478,52 @@ impl PtySession {
     /// (그 경로는 [`reattach`](Self::reattach)). 진단용 관측 창이다.
     pub fn replay(&self) -> Vec<u8> {
         self.shared.inner.lock().unwrap().replay.snapshot()
+    }
+
+    /// 원격(폴링) 소비자용 **read-only 관측** — `since` 이후에 나온 출력만 돌려준다.
+    /// [`reattach`](Self::reattach) 와 달리 flow 를 리셋하지 않고 sink·dec_modes 도
+    /// 건드리지 않으며 리더를 깨우지도 않는다. 폴링 소비자는 데스크톱 소비자와 **같은
+    /// 세션을 동시에** 보므로, 여기서 flow 를 리셋하면 폰의 폴 한 번이 데스크톱의
+    /// backpressure 계정을 지운다.
+    ///
+    /// `reset` 이 true 면 `bytes` 는 [`reattach`](Self::reattach) 와 같은 재료
+    /// (모드 preamble + replay 스냅샷)이고 수신자는 터미널을 새로 만들어 처음부터
+    /// 그린다. false 면 `bytes` 는 `since` 부터 `end_offset` 까지의 raw 델타이므로
+    /// `end_offset == since + bytes.len()` 이 성립한다.
+    ///
+    /// reset 이 되는 갈래는 셋이다 — `since` 없음(첫 요청), 보관 창보다 오래된 `since`
+    /// (그 구간은 이미 evict 됐다), 그리고 **`since > bytes_out`**. 마지막은 탭
+    /// respawn(ADR-0010)처럼 수신자가 **다른 세션의 오프셋**을 들고 온 경우다: 새
+    /// 세션의 `bytes_out` 은 0 부터 다시 시작하므로 옛 오프셋이 미래처럼 보인다.
+    pub fn screen_since(&self, since: Option<u64>) -> Screen {
+        // 크기는 `inner` 밖의 Atomic 이다. 다른 데이터를 발행하지 않는 단일 값이라
+        // Relaxed 로 충분하고, 여기서 `master` 를 잡으면 lock 순서 규약이 생긴다.
+        let (cols, rows) = unpack_size(self.size.load(Ordering::Relaxed));
+        let inner = self.shared.inner.lock().unwrap();
+        let end_offset = inner.bytes_out;
+        // 보관 창의 시작 오프셋. replay 는 evict 로 앞이 잘리므로 스트림 좌표계로
+        // 환산해야 `since` 가 창 안인지 판정할 수 있다.
+        let retained_start = end_offset.saturating_sub(inner.replay.len() as u64);
+        let (reset, bytes) = match since {
+            Some(since) if since == end_offset => (false, Vec::new()),
+            Some(since) if since >= retained_start && since < end_offset => (
+                false,
+                inner.replay.bytes_from((since - retained_start) as usize),
+            ),
+            _ => {
+                let mut bytes = dec_mode_preamble(&inner.dec_modes);
+                let mut snapshot = inner.replay.snapshot();
+                bytes.append(&mut snapshot);
+                (true, bytes)
+            }
+        };
+        Screen {
+            end_offset,
+            reset,
+            cols,
+            rows,
+            bytes,
+        }
     }
 
     /// 현재 상태 스냅샷.
@@ -747,6 +817,15 @@ fn dec_mode_preamble(modes: &BTreeMap<u16, bool>) -> Vec<u8> {
         out.push(if *set { b'h' } else { b'l' });
     }
     out
+}
+
+/// `PtySession::size` 의 패킹 — cols 를 상위 16비트, rows 를 하위 16비트에 둔다.
+fn pack_size(cols: u16, rows: u16) -> u32 {
+    ((cols as u32) << 16) | rows as u32
+}
+
+fn unpack_size(packed: u32) -> (u16, u16) {
+    ((packed >> 16) as u16, packed as u16)
 }
 
 /// 세션 레지스트리 — `SessionId` 를 발급하고 세션을 보관한다. 내부 동기화는
