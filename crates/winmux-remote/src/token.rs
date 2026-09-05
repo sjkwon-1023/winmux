@@ -89,8 +89,6 @@ pub(crate) fn generate_token() -> String {
 
 /// 상수 시간 비교. **길이가 같은 경우에 대해서만** 상수 시간이다 — 길이가 다르면 즉시
 /// false 이고, 토큰 길이(43)는 공개된 값이라 그것으로 새어 나갈 정보가 없다.
-/// (호출자인 인증 핸들러는 B2 에서 들어온다 — lib.rs 의 모듈 allow 와 같은 이유.)
-#[allow(dead_code)]
 pub(crate) fn token_matches(expected: &str, given: &str) -> bool {
     let (expected, given) = (expected.as_bytes(), given.as_bytes());
     if expected.len() != given.len() {

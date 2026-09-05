@@ -9,18 +9,15 @@
 //!
 //! 계약: `docs/plans/remote-surface-plan.md` 3장.
 //!
-//! 이 크레이트가 밖으로 내보내는 것은 토큰 로딩뿐이다. HTTP 파싱·라우팅·rate limit 은
-//! 서버(B2 의 `server`/`handlers`)만의 내부 부품이라 `pub(crate)` 로 닫아 둔다.
+//! 이 크레이트가 밖으로 내보내는 것은 서버 기동([`serve`])과 토큰 로딩뿐이다. HTTP
+//! 파싱·라우팅·rate limit·핸들러는 서버만의 내부 부품이라 `pub(crate)` 로 닫아 둔다.
 
-// B1 은 순수 모듈만 담는 청크라 이 세 모듈의 유일한 호출자(B2 의 server/handlers)가 아직
-// 없다 — lib 타깃에서는 전부 미사용으로 잡힌다. 각 모듈의 계약은 자기 테스트가 지키고
-// 있으며, B2 가 호출자를 들여오면 이 allow 는 사라진다.
-#[allow(dead_code)]
+mod handlers;
 mod http;
-#[allow(dead_code)]
 mod ratelimit;
-#[allow(dead_code)]
 mod routes;
+mod server;
 mod token;
 
+pub use server::{serve, AssetFn, LogFn, RemoteConfig, RemoteDeps, RemoteServer, StaticAsset};
 pub use token::{load_or_create_token, TokenError};

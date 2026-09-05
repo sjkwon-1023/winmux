@@ -86,6 +86,20 @@ impl RateLimiter {
         }
     }
 
+    /// 창 안에 남아 있는 실패 횟수. 로그 한 줄이 "이 IP 의 몇 번째 실패인가"를 말할 수
+    /// 있게 하는 값이고, 판정에는 쓰이지 않는다 — 판정은
+    /// [`record_failure`](Self::record_failure) 의 반환이 단독으로 한다.
+    pub(crate) fn failures_in_window(&self, ip: IpAddr, now: Instant) -> usize {
+        match self.entries.get(&ip) {
+            Some(entry) => entry
+                .failures
+                .iter()
+                .filter(|at| now.saturating_duration_since(**at) < WINDOW)
+                .count(),
+            None => 0,
+        }
+    }
+
     /// 상한에 닿았으면 `last_seen` 이 가장 오래된 항목 하나를 버린다. 차단 중인 항목도
     /// 예외가 아니지만, 차단된 IP 는 계속 두드리는 동안 [`RateLimiter::check`] 가
     /// `last_seen` 을 갱신해 주므로 실제로 밀려나는 것은 조용해진 IP 다.

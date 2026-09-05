@@ -4385,10 +4385,13 @@ dependencies = [
 name = "winmux-remote"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "getrandom 0.3.4",
  "httparse",
+ "serde_json",
  "tempfile",
+ "winmux-core",
 ]
 
 [[package]]

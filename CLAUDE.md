@@ -536,6 +536,7 @@ Accepted deferrals, one line each. None of these block the MVP.
 ```bash
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 cargo test -p winmux-core
+cargo test -p winmux-remote
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
 cargo check --workspace --target x86_64-pc-windows-msvc

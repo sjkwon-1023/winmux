@@ -57,6 +57,9 @@ jobs:
       - name: Core tests
         run: cargo test -p winmux-core
 
+      - name: Remote crate tests
+        run: cargo test -p winmux-remote
+
       - name: Clippy (x64 Windows target)
         run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 
