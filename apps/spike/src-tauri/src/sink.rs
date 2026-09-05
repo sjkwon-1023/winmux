@@ -81,6 +81,15 @@ impl OscEventPayload {
                 title: String::new(),
                 body: String::new(),
             },
+            // DEC private mode·리셋은 OSC 가 아니라 코어 세션이 소비한다
+            // (재-attach preamble — winmux-core session.rs). sink 까지 오지 않으므로
+            // 여기 팔은 exhaustive 검사를 만족시키는 것이 전부다.
+            OscEvent::DecPrivateMode { .. } | OscEvent::TerminalReset { .. } => Self {
+                id,
+                kind: "dec-mode",
+                title: String::new(),
+                body: String::new(),
+            },
         }
     }
 }

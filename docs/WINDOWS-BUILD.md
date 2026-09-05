@@ -1905,6 +1905,48 @@ holds is the one the new shell actually lands in.
 6. **`Ctrl+Shift+N` is unchanged.** From a tab deep in a directory it must still create a
    workspace rooted there.
 
+### v0.3.15 — verification
+
+Terminal modes survive a re-attach. The core half (the CSI branch, the mode map, the preamble)
+is unit- and integration-tested; what needs a real window is that a *rebuilt* xterm actually
+comes up in the mode the program set, and that a reset still wins.
+
+1. **The reported case.** In a tab where `claude` has been running long enough to have produced
+   a lot of output (a full-file read, a long build — well past a megabyte), switch to another
+   workspace, switch back, and paste two short lines (under 60 characters, so nothing wraps).
+   Both lines must sit in the prompt box unsent. Before the fix the first line was submitted the
+   moment it was pasted.
+
+2. **The deterministic A/B.** No agent needed. In a bash tab:
+
+   ```
+   printf '\e[?2004h'; yes | head -c 2000000; cat -v
+   ```
+
+   Paste anything into the `cat -v`: it must show `^[[200~` before the text and `^[[201~` after.
+   Now switch to another workspace and back, and paste again — the markers must still be there.
+   Before the fix they were gone after the round-trip, which is the whole defect in five
+   seconds. `Ctrl+C` to leave `cat`.
+
+3. **Mouse tracking survives.** Run `htop` and leave it alone for three minutes — every refresh
+   is a full-screen redraw, so at a normal window size a megabyte goes by well inside that, and
+   `htop`'s `?1000h` from startup is out of the replay window. Switch workspaces and back, then
+   click a process row: the selection must follow the click. Before the fix the click did
+   nothing (or, in a shell afterwards, typed `[<0;…` junk). The alt screen is **not** part of
+   this item — ADR-0015 decision 4 deliberately leaves it out, so if `htop`'s own `?1049h` was
+   evicted too, the pane may come back on the normal buffer with the frames in scrollback; that
+   is the pre-existing behaviour, not a regression.
+
+4. **Negative control.** A freshly opened tab — no workspace round-trip — must behave exactly as
+   before: bracketed paste in `cat -v`, `vim` on the alt screen, no stray `[?...h` text printed
+   at the top of the pane. The preamble must never be visible as characters.
+
+5. **A reset stays reset.** In a shell tab turn mouse tracking on by hand — `printf '\e[?1000h'`
+   — and click somewhere: the shell line fills with `[<0;…` junk, which proves the mode is on
+   (`vim`'s `:q` would turn it off itself, so it cannot serve as the setup here). Run
+   `tput reset`, then switch workspaces and back, and click again: **no junk**. Same check with
+   `printf '\ec'` (RIS) in place of `tput reset`.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

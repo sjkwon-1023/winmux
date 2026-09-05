@@ -434,9 +434,26 @@ Accepted deferrals, one line each. None of these block the MVP.
   is the last **prompt-time** cwd (ADR-0011's limit), so a pane whose agent `cd`'d on its own
   still splits where the shell last drew a prompt. `Ctrl+Shift+N` behaves as before and now
   shares the helper. Verification: WINDOWS-BUILD §10 v0.3.14.
+- **A workspace round-trip cost a long-running pane its terminal modes — fixed 2026-09-05**
+  (user report, v0.3.15). Two short lines pasted into a busy Claude Code pane submitted the first
+  one: DECSET/DECRST modes lived only in the front end's xterm instance, and a re-attach
+  (workspace switch, F5, the idle webview reload) builds a **new** `Terminal` that re-derives
+  everything from the 1 MiB replay — a TUI that enables bracketed paste once at startup loses it
+  once a megabyte of output has evicted that sequence. bash never showed it because readline
+  re-enables the mode at every prompt. Fixed in the core: the scanner gained a CSI branch, the
+  session keeps each private mode's current value, and `reattach()` prepends `ESC[?<n>h/l` for
+  them ahead of the replay — mouse tracking, DECCKM and cursor visibility come back with paste.
+  Decisions: [ADR-0015](docs/adr/0015-reassert-terminal-modes-on-reattach.md). Verification:
+  WINDOWS-BUILD §10 v0.3.15. **Still open**: the alt screen is deliberately *not* re-asserted (a
+  pre-replay `?1049h` swallows the pre-vim scrollback), so a TUI whose `?1049h` was evicted still
+  returns on the normal buffer — the candidate is re-asserting only modes whose last change is
+  older than the replay window; and a paste during the replay gate is logged, not buffered.
 - **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
 - **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
-  smaller replay cap, progressive replay, hide-until-parsed.
+  smaller replay cap, progressive replay, hide-until-parsed. Since v0.3.15 the replay
+  window is no longer the only carrier of terminal modes (ADR-0015 re-asserts them from
+  the session instead), so shrinking the cap no longer trades bracketed paste, the alt
+  screen or mouse tracking away — only redraw fidelity.
 - **Per-pane split-button affordance** (ADR-0004) — a first-time user read the header
   buttons as "split the *selected* pane".
 - **The `◎` browser tab button** was removed from the pane header (permanently disabled,

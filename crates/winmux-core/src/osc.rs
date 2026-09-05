@@ -1,10 +1,20 @@
-//! OSC(Operating System Command) 시퀀스 감지기.
+//! 터미널 제어 시퀀스 감지기 — OSC 와 DEC private mode(`CSI ? Pm h/l`).
 //!
 //! PTY 출력 스트림에서 OSC 0/7/9/777 시퀀스를 증분(incremental)으로 감지한다.
 //! 감지 전용이다 — 입력 바이트를 변형하거나 소비 표시하지 않으며, 호출자는 입력을
 //! 그대로 프론트엔드에 passthrough 한다. 계약: `docs/plans/spike-plan.md` 4.1장.
 //! OSC 2(아이콘+창 제목)는 ConPTY 가 제목을 재인코딩할 가능성에 대비해 OSC 0 과 동일하게
 //! `Osc0Title` 로 취급한다.
+//!
+//! # 왜 CSI 인식이 "OSC" 스캐너 안에 있나
+//!
+//! 이름과 달리 이 모듈은 OSC 전용이 아니다. DEC private mode(`ESC [ ? … h/l`)와
+//! 리셋(RIS·DECSTR)은 **같은 바이트 스트림의 같은 ESC 상태 머신**을 지나간다 —
+//! 시퀀스가 청크 경계에서 잘리는 처리도, CAN/SUB 중단 처리도 OSC 와 한 글자도
+//! 다르지 않다. 두 번째 스캐너를 세우면 그 셋을 전부 복제하게 되고, 두 스캐너가
+//! 같은 바이트에 대해 서로 다른 상태를 갖는 순간이 새 버그 표면이 된다.
+//! 여기서 나오는 모드 이벤트를 **누가 소비하는지**(sink 가 아니라 세션)와 어떤
+//! 모드를 추적할지는 [`crate::session`] 의 정책이다 — 이 모듈은 감지만 한다.
 
 /// 감지된 OSC 이벤트. 문자열은 payload 를 UTF-8 lossy 변환한 결과다.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +93,30 @@ pub enum OscEvent {
     /// TERMINAL_THEME 와 **같으므로** xterm 이 자기 테마를 같은 값으로 다시
     /// 세팅할 뿐 무해하다.
     OscColorQuery { code: u8 },
+    /// `CSI ? Pm h` (DECSET) / `CSI ? Pm l` (DECRST) — 실행 중인 프로그램이 켜고
+    /// 끄는 **DEC private mode**. `modes` 는 한 시퀀스가 담은 모드 번호 전부이고
+    /// (`?1000;1006h` → `[1000, 1006]`), `set` 이 `h`(켬) / `l`(끔)이다.
+    ///
+    /// # 왜 감지하나
+    ///
+    /// 이 모드들은 프론트의 xterm 인스턴스 안에만 산다. 재-attach(워크스페이스
+    /// 전환·F5·webview 리로드)는 새 Terminal 을 만들고 replay 바이트만 다시
+    /// 흘리므로, 모드를 켠 시퀀스가 replay 창 밖으로 밀려난 장수 TUI 는 모드를
+    /// 통째로 잃는다 — 실기에서 bracketed paste(2004)가 그렇게 꺼져 여러 줄
+    /// 붙여넣기의 첫 줄이 제출됐다. 그래서 세션이 값을 들고 있다가 재-attach
+    /// preamble 로 다시 세운다 ([`crate::session::PtySession::reattach`]).
+    ///
+    /// 감지 대상은 **private(`?`) 형태의 `h`/`l` 뿐**이다. 질의(`?…$p`)·
+    /// 저장/복원(`?…s`/`?…r`)·비-private CSI 는 이벤트가 되지 않는다.
+    DecPrivateMode { modes: Vec<u16>, set: bool },
+    /// `ESC c`(RIS) 또는 `CSI … ! p`(DECSTR) — 단말의 모드가 기본값으로 돌아갔다.
+    /// 추적 중인 값을 그대로 들고 있으면 재-attach 가 이미 꺼진 마우스 트래킹
+    /// 같은 것을 되살리므로, 세션은 이 이벤트에서 추적 맵을 손본다.
+    ///
+    /// `soft` 는 **되돌아간 범위**를 가른다. RIS(`soft: false`)는 단말 전체를
+    /// 초기화하지만 DECSTR(`soft: true`)은 일부 모드만 건드린다 — 어느 모드가
+    /// 그 일부인지는 소비자(터미널 구현)의 사실이라 [`crate::session`] 이 안다.
+    TerminalReset { soft: bool },
 }
 
 /// payload 상한 (bytes). 초과하는 시퀀스는 통째로 폐기한다 — 악성/폭주 입력 방어.
@@ -91,6 +125,14 @@ pub enum OscEvent {
 /// 상한이 실효 ~3KB 로 무음 축소된다 (리뷰 finding). 버퍼는 세션당 진행 중
 /// 시퀀스 1개뿐이라 메모리 상한은 세션 수 × 64KiB 로 유계다.
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// CSI 파라미터·중간 바이트 상한. 예산의 단위는 모드 하나당 약 5바이트다
+/// (`?`·네 자리 숫자·`;`) — 128 이면 DECSET 한 시퀀스에 모드 25개쯤이 들어오는
+/// 셈이고, 실제 emitter 가 한 번에 나열하는 것은 많아야 서넛이다(마우스 트래킹을
+/// 한 줄에 켜는 `?1000;1002;1003;1006` 이 20 바이트). 상한을 넘으면 그 시퀀스는
+/// 통째로 버려진다 — 즉 모드를 추적하지 않던 이 변경 이전 동작으로 떨어지므로
+/// 실패 방향이 안전하다.
+const MAX_CSI_BYTES: usize = 128;
 
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
@@ -106,6 +148,8 @@ enum State {
     Ground,
     /// ESC 직후 — 다음 바이트로 시퀀스 종류를 판별한다.
     Esc,
+    /// `ESC [` 이후 파라미터·중간 바이트 수집 중 — 최종 바이트(0x40..=0x7E)에서 끝난다.
+    Csi,
     /// `ESC ]` 이후 payload 수집 중.
     Collect,
     /// payload 수집 중 ESC 를 봄 — 다음이 `\` 면 ST 종결.
@@ -145,12 +189,50 @@ impl OscScanner {
                 State::Esc => {
                     if b == b']' {
                         self.begin_collect();
+                    } else if b == b'[' {
+                        self.begin_csi();
+                    } else if b == b'c' {
+                        // RIS — 파라미터가 없는 2바이트 시퀀스라 여기서 끝난다.
+                        events.push(OscEvent::TerminalReset { soft: false });
+                        self.state = State::Ground;
                     } else if b == ESC {
                         // ESC 연속 — 마지막 ESC 기준으로 다시 판별한다.
                         self.state = State::Esc;
                     } else {
-                        // OSC 가 아닌 ESC 시퀀스(CSI 등) — 감지 대상이 아니므로 무시.
+                        // 감지 대상이 아닌 ESC 시퀀스(문자셋 지정 등) — 무시.
                         self.state = State::Ground;
+                    }
+                }
+                State::Csi => {
+                    match b {
+                        // OSC 와 같은 규율 — 실터미널은 이 제어문자에서 진행 중인
+                        // 시퀀스를 버린다.
+                        CAN | SUB => {
+                            self.discard();
+                            self.state = State::Ground;
+                        }
+                        ESC => {
+                            self.discard();
+                            self.state = State::Esc;
+                        }
+                        // 파라미터·중간 바이트.
+                        0x20..=0x3f => {
+                            if self.buf.len() >= MAX_CSI_BYTES {
+                                self.overflow = true;
+                                self.buf.clear();
+                            } else {
+                                self.buf.push(b);
+                            }
+                        }
+                        // 최종 바이트 — 여기서 시퀀스가 끝난다.
+                        0x40..=0x7e => {
+                            if let Some(ev) = self.finish_csi(b) {
+                                events.push(ev);
+                            }
+                        }
+                        // 그 밖(C0 제어문자·DEL)은 실터미널이 시퀀스 도중에도 그대로
+                        // 실행하고 CSI 는 이어진다 — 수집하지 않고 지나간다.
+                        _ => {}
                     }
                 }
                 State::Collect => {
@@ -183,6 +265,16 @@ impl OscScanner {
                     } else if b == b']' {
                         // OSC 도중 새 OSC 시작 — 기존 시퀀스는 미종결로 폐기.
                         self.begin_collect();
+                    } else if b == b'[' {
+                        // 같은 규율의 CSI 판 — 종결되지 않은 OSC 뒤에 붙은 DECSET 을
+                        // 놓치지 않는다.
+                        self.begin_csi();
+                    } else if b == b'c' {
+                        // 같은 이유로 RIS 도 놓치지 않는다. 미종결 OSC 는 폐기하고
+                        // 리셋만 보고한다.
+                        self.discard();
+                        events.push(OscEvent::TerminalReset { soft: false });
+                        self.state = State::Ground;
                     } else if b == ESC {
                         // 기존 시퀀스 폐기, 새 ESC 시퀀스 판별로 진입.
                         self.discard();
@@ -203,6 +295,33 @@ impl OscScanner {
         self.buf.clear();
         self.overflow = false;
         self.state = State::Collect;
+    }
+
+    /// 새 CSI 파라미터 수집을 시작한다.
+    fn begin_csi(&mut self) {
+        self.buf.clear();
+        self.overflow = false;
+        self.state = State::Csi;
+    }
+
+    /// 최종 바이트를 만난 시점의 CSI 처리 — overflow 였으면 폐기, 아니면 분류.
+    ///
+    /// 버퍼를 `take` 하지 않고 빌려 쓴 뒤 `clear` 하는 것은 **hot path 라서**다.
+    /// 출력의 거의 모든 SGR·커서 이동 CSI 가 이 분기를 지나가므로, `take` 로
+    /// 소유권을 넘겼다가 드롭하면 시퀀스마다 malloc/free 가 한 번씩 붙는다.
+    /// `clear` 는 용량을 남기니 두 번째 시퀀스부터는 할당이 없다. OSC 쪽
+    /// [`finish`](Self::finish)는 시퀀스 빈도가 낮고 payload 가 64KiB 까지
+    /// 자랄 수 있어 반대로 버리는 편이 낫다 — 그래서 둘이 다르다.
+    fn finish_csi(&mut self, final_byte: u8) -> Option<OscEvent> {
+        let event = if self.overflow {
+            None
+        } else {
+            parse_csi(&self.buf, final_byte)
+        };
+        self.buf.clear();
+        self.overflow = false;
+        self.state = State::Ground;
+        event
     }
 
     /// 미종결 시퀀스를 버리고 수집 상태를 초기화한다.
@@ -227,6 +346,51 @@ impl OscScanner {
 impl Default for OscScanner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 완성된 CSI(`ESC [` 와 최종 바이트 사이의 파라미터·중간 바이트 + 최종 바이트)를
+/// 이벤트로 분류한다. 감지 대상이 아닌 CSI 는 None — SGR·커서 이동 등 대다수가
+/// 여기로 떨어지고, 그대로 passthrough 된다.
+fn parse_csi(params: &[u8], final_byte: u8) -> Option<OscEvent> {
+    match final_byte {
+        // DECSET/DECRST — private 접두사(`?`)가 붙은 형태만이다. `2J`(비-private)나
+        // `?2004$p`(DECRQM — 중간 바이트 `$` 가 붙어 최종 바이트가 `p`)는 여기 오지
+        // 않거나 아래 `!p` 검사에서 떨어진다.
+        b'h' | b'l' => {
+            let digits = params.strip_prefix(b"?")?;
+            if digits.is_empty() {
+                return None;
+            }
+            let mut modes = Vec::new();
+            for part in digits.split(|&b| b == b';') {
+                // 빈 파라미터·비숫자·u16 범위 초과는 시퀀스 전체를 미감지로
+                // 떨어뜨린다 — 절반만 해석한 모드 목록으로 재-attach preamble 을
+                // 만드는 것보다 아무것도 안 하는 쪽이 안전하다.
+                if part.is_empty() || !part.iter().all(u8::is_ascii_digit) {
+                    return None;
+                }
+                modes.push(std::str::from_utf8(part).ok()?.parse::<u16>().ok()?);
+            }
+            Some(OscEvent::DecPrivateMode {
+                modes,
+                set: final_byte == b'h',
+            })
+        }
+        // DECSTR — soft reset.
+        b'p' if is_decstr_params(params) => Some(OscEvent::TerminalReset { soft: true }),
+        _ => None,
+    }
+}
+
+/// DECSTR 의 파라미터부인지 — 숫자·`;` 뒤에 중간 바이트 `!` 하나로 끝나야 한다.
+/// 파라미터 없는 `CSI ! p` 뿐 아니라 `CSI 0 ! p` 도 DECSTR 이다: xterm 은 중간
+/// 바이트 `!` 와 최종 바이트 `p` 조합만으로 핸들러를 고르고 파라미터는 보지 않는다
+/// (`InputHandler.ts` 의 `registerCsiHandler({ intermediates: '!', final: 'p' })`).
+fn is_decstr_params(params: &[u8]) -> bool {
+    match params.strip_suffix(b"!") {
+        Some(head) => head.iter().all(|b| b.is_ascii_digit() || *b == b';'),
+        None => false,
     }
 }
 
@@ -687,7 +851,10 @@ mod tests {
 
     #[test]
     fn osc_aborted_by_other_escape() {
-        // OSC 도중 ESC + 기타(CSI 시작)면 시퀀스 중단 — 이벤트 없음.
+        // OSC 도중 ESC + 기타면 진행 중이던 OSC 가 버려진다 — 그 OSC 에서는
+        // 아무 이벤트도 나오지 않는다. 뒤따르는 시퀀스 자체는 스캔되므로(CSI·RIS
+        // 는 아래 두 테스트에서 실제로 감지된다) 여기서는 감지 대상이 아닌 SGR 을
+        // 쓴다.
         assert_eq!(
             scan(b"\x1b]0;abandoned\x1b[0m\x1b]9;n\x07"),
             vec![OscEvent::Osc9Notify("n".into())]
@@ -716,6 +883,155 @@ mod tests {
         assert_eq!(
             scan(b"\x1b]0;\x07"),
             vec![OscEvent::Osc0Title(String::new())]
+        );
+    }
+
+    // 편의 헬퍼 — DECSET/DECRST 기대값.
+    fn dec(modes: &[u16], set: bool) -> OscEvent {
+        OscEvent::DecPrivateMode {
+            modes: modes.to_vec(),
+            set,
+        }
+    }
+
+    #[test]
+    fn dec_private_mode_set_and_reset() {
+        assert_eq!(scan(b"\x1b[?2004h"), vec![dec(&[2004], true)]);
+        assert_eq!(scan(b"\x1b[?25l"), vec![dec(&[25], false)]);
+    }
+
+    #[test]
+    fn dec_private_mode_multi_param() {
+        assert_eq!(scan(b"\x1b[?1000;1006h"), vec![dec(&[1000, 1006], true)]);
+        assert_eq!(
+            scan(b"\x1b[?1049;1002;1006l"),
+            vec![dec(&[1049, 1002, 1006], false)]
+        );
+    }
+
+    #[test]
+    fn sequences_split_at_every_byte_boundary() {
+        // 청크 경계는 PTY read 단위라 어디서든 갈라진다 — 모든 분할점에서 같은
+        // 이벤트가 나와야 한다. 상태 머신의 갈래마다(CSI 파라미터 수집, 2바이트
+        // ESC 시퀀스, 중간 바이트, OSC payload) 경계 처리가 다르므로 하나씩 건다.
+        let cases: &[(&[u8], OscEvent)] = &[
+            (b"\x1b[?1000;1006h", dec(&[1000, 1006], true)),
+            (b"\x1b[?1049;1002;1006l", dec(&[1049, 1002, 1006], false)),
+            (b"\x1bc", OscEvent::TerminalReset { soft: false }),
+            (b"\x1b[!p", OscEvent::TerminalReset { soft: true }),
+            (b"\x1b]777;winmux-started\x07", OscEvent::Osc777Started),
+        ];
+        for (input, expected) in cases {
+            for split in 0..=input.len() {
+                let mut s = OscScanner::new();
+                let mut events = s.feed(&input[..split]);
+                events.extend(s.feed(&input[split..]));
+                assert_eq!(events, vec![expected.clone()], "{input:?} split at {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn non_private_csi_ignored() {
+        // private 접두사(`?`)가 없으면 감지 대상이 아니다.
+        assert_eq!(scan(b"\x1b[2J"), vec![]);
+        assert_eq!(scan(b"\x1b[4h"), vec![]);
+        assert_eq!(scan(b"\x1b[20l"), vec![]);
+        assert_eq!(scan(b"\x1b[1;31m"), vec![]);
+    }
+
+    #[test]
+    fn dec_mode_query_and_save_restore_ignored() {
+        // DECRQM(`?…$p`) 은 질의라 상태가 아니고, XTSAVE/XTRESTORE(`?…s`/`?…r`)는
+        // 값을 바꾸지 않는다 — 어느 쪽도 재-attach 때 다시 세울 대상이 아니다.
+        assert_eq!(scan(b"\x1b[?2004$p"), vec![]);
+        assert_eq!(scan(b"\x1b[?1049s"), vec![]);
+        assert_eq!(scan(b"\x1b[?1049r"), vec![]);
+    }
+
+    #[test]
+    fn malformed_dec_mode_params_ignored() {
+        // 파라미터가 없거나(`?h`), 비숫자가 섞였거나, u16 을 넘으면 미감지.
+        assert_eq!(scan(b"\x1b[?h"), vec![]);
+        assert_eq!(scan(b"\x1b[?l"), vec![]);
+        assert_eq!(scan(b"\x1b[?;1h"), vec![]);
+        assert_eq!(scan(b"\x1b[?1;h"), vec![]);
+        assert_eq!(scan(b"\x1b[?1a2h"), vec![]);
+        assert_eq!(scan(b"\x1b[?65536h"), vec![]);
+    }
+
+    #[test]
+    fn csi_aborted_by_can_and_scanner_recovers() {
+        assert_eq!(
+            scan(b"\x1b[?100\x18plain text\x1b]9;n\x07"),
+            vec![OscEvent::Osc9Notify("n".into())]
+        );
+        assert_eq!(
+            scan(b"\x1b[?100\x1aplain text\x1b[?25l"),
+            vec![dec(&[25], false)]
+        );
+    }
+
+    #[test]
+    fn oversized_csi_params_discarded_and_scanner_recovers() {
+        let mut input = Vec::from(&b"\x1b[?"[..]);
+        input.extend(std::iter::repeat_n(b'1', MAX_CSI_BYTES + 1));
+        input.push(b'h');
+        let mut s = OscScanner::new();
+        assert_eq!(s.feed(&input), vec![]);
+        // 폐기 후에도 스캐너는 정상 동작해야 한다.
+        assert_eq!(s.feed(b"\x1b[?25l"), vec![dec(&[25], false)]);
+    }
+
+    #[test]
+    fn ris_and_decstr_are_terminal_resets() {
+        assert_eq!(
+            scan(b"\x1bc"),
+            vec![OscEvent::TerminalReset { soft: false }]
+        );
+        assert_eq!(
+            scan(b"\x1b[!p"),
+            vec![OscEvent::TerminalReset { soft: true }]
+        );
+        // 파라미터가 붙어도 DECSTR 이다 — 실제 emitter 가 쓰는 형태.
+        assert_eq!(
+            scan(b"\x1b[0!p"),
+            vec![OscEvent::TerminalReset { soft: true }]
+        );
+        // 비슷하지만 다른 것들은 리셋이 아니다.
+        assert_eq!(scan(b"\x1b[p"), vec![]);
+        assert_eq!(scan(b"\x1b[!q"), vec![]);
+    }
+
+    #[test]
+    fn ris_after_unterminated_osc_still_detected() {
+        // 종결자 없는 OSC 뒤에 붙은 RIS — 앞 시퀀스만 폐기되고 리셋은 잡힌다.
+        assert_eq!(
+            scan(b"\x1b]0;title\x1bc"),
+            vec![OscEvent::TerminalReset { soft: false }]
+        );
+    }
+
+    #[test]
+    fn osc_immediately_after_csi_in_one_chunk() {
+        // 한 청크에 CSI 와 OSC 가 붙어 와도 둘 다 잡힌다 (상태가 Ground 로
+        // 제대로 복귀하는지 — 셸 프롬프트 한 줄이 실제로 이 모양이다).
+        assert_eq!(
+            scan(b"\x1b[?2004h\x1b]777;winmux-started\x07"),
+            vec![dec(&[2004], true), OscEvent::Osc777Started]
+        );
+        assert_eq!(
+            scan(b"\x1b]0;t\x07\x1b[?1049h"),
+            vec![OscEvent::Osc0Title("t".into()), dec(&[1049], true)]
+        );
+    }
+
+    #[test]
+    fn csi_after_unterminated_osc_still_detected() {
+        // 종결자 없는 OSC 뒤에 붙은 DECSET — 앞 시퀀스만 폐기되고 CSI 는 잡힌다.
+        assert_eq!(
+            scan(b"\x1b]0;abandoned\x1b[?2004h"),
+            vec![dec(&[2004], true)]
         );
     }
 }

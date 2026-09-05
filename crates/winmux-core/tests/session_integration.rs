@@ -103,6 +103,21 @@ fn remaining(deadline: Instant, waiting_for: &str) -> Duration {
         .unwrap_or_else(|| panic!("timed out waiting for {waiting_for}"))
 }
 
+/// `reattach` 반환값 앞머리의 `ESC [ ? <digits> (h|l)` 를 전부 건너뛴다.
+/// preamble 은 스트림에 없던 바이트라 반환값의 길이로 스냅샷 구간을 역산할 수
+/// 없다 (`PtySession::reattach` rustdoc) — 스냅샷만 보려면 여기서 잘라 낸다.
+fn strip_mode_preamble(bytes: &[u8]) -> &[u8] {
+    let mut rest = bytes;
+    while let Some(after) = rest.strip_prefix(b"\x1b[?") {
+        let digits = after.iter().take_while(|b| b.is_ascii_digit()).count();
+        match after.get(digits) {
+            Some(b'h' | b'l') if digits > 0 => rest = &after[digits + 1..],
+            _ => break,
+        }
+    }
+    rest
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -360,27 +375,28 @@ fn reattach_resumes_paused_session_with_continuous_offsets() {
     }
     let pre_reattach_count = chunks.len();
 
-    let (end_offset, replay) = session.reattach();
+    let (end_offset, bytes) = session.reattach();
     assert_eq!(
         end_offset, frozen,
         "end_offset must equal bytes_out at reattach"
     );
+    // 내용 검증: 모드 preamble 을 걷어 낸 나머지가 전달된 스트림의 tail 과 바이트
+    // 단위로 일치해야 한다 (offset dedup 계약의 나머지 절반 — 위치만이 아니라
+    // 내용의 정합). preamble 의 유무는 셸이 무엇이냐에 달렸으므로 — dash 는 모드를
+    // 하나도 켜지 않지만 bash 는 프롬프트에서 bracketed paste 를 건드린다 —
+    // 길이를 빼서 구간을 역산하지 않고 tail 일치로 본다.
+    let snapshot = strip_mode_preamble(&bytes);
     assert!(
-        !replay.is_empty(),
+        !snapshot.is_empty(),
         "replay snapshot must not be empty after flood"
     );
-    // 내용 검증: replay 는 전달된 스트림의 정확한 tail — 구간
-    // [end_offset - replay.len(), end_offset) 과 바이트 단위로 일치해야 한다.
-    // (offset dedup 계약의 나머지 절반 — 위치만이 아니라 내용의 정합.)
     assert_eq!(
         stream.len() as u64,
         frozen,
         "accumulated stream must cover exactly [0, end_offset)"
     );
-    let tail_start = stream.len() - replay.len();
-    assert_eq!(
-        replay.as_slice(),
-        &stream[tail_start..],
+    assert!(
+        stream.ends_with(snapshot),
         "replay snapshot must be the byte-exact tail of the delivered stream"
     );
     // reattach 가 lock 안에서 paused 를 내렸다. 리더가 이 관측 전에 재-pause
@@ -569,5 +585,112 @@ fn startup_marker_disarms_the_watchdog() {
             Err(_) => break,
         }
     }
+    session.kill();
+}
+
+// --- 재-attach 모드 preamble (DECSET/DECRST) ---
+//
+// 실기 결함: 장수 TUI 는 시작할 때 한 번 모드를 켜는데, 그 시퀀스가 replay 창 밖으로
+// 밀려난 뒤 워크스페이스를 왕복하면 새 xterm 이 모드를 통째로 잃는다 (bracketed
+// paste 가 꺼져 여러 줄 붙여넣기의 첫 줄이 제출됐다). 계약은
+// `PtySession::reattach` rustdoc.
+
+/// replay 창을 작게 잡아 evict 를 강제한다 — 아래 스크립트의 `seq 1 4000`(≈23KB)
+/// 이면 모드를 켠 첫 chunk 는 확실히 밀려난다.
+fn small_replay_opts() -> SessionOptions {
+    SessionOptions {
+        replay_cap: 8192,
+        ..SessionOptions::default()
+    }
+}
+
+/// `marker` 가 출력에 나타날 때까지 sink 이벤트를 소비한다 — 그 시점이면 그 앞의
+/// 출력은 전부 replay·모드 맵에 반영돼 있다 (리더가 한 lock 에서 확정한다).
+fn wait_for_marker(rx: &Receiver<Event>, marker: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    let mut acc: Vec<u8> = Vec::new();
+    while !contains(&acc, marker.as_bytes()) {
+        match rx.recv_timeout(remaining(deadline, marker)) {
+            Ok(Event::Output { bytes, .. }) => acc.extend_from_slice(&bytes),
+            Ok(_) => {}
+            Err(err) => panic!("marker {marker} never arrived ({err})"),
+        }
+    }
+}
+
+#[test]
+fn reattach_reasserts_dec_modes_evicted_from_the_replay_window() {
+    let (session, rx) = spawn_script(
+        r"printf '\033[?25l\033[?2004h'; seq 1 4000; printf 'MARK1\n'; sleep 30",
+        small_replay_opts(),
+    );
+    wait_for_marker(&rx, "MARK1");
+
+    let (_end_offset, bytes) = session.reattach();
+    const PREAMBLE: &[u8] = b"\x1b[?25l\x1b[?2004h";
+    assert!(
+        bytes.starts_with(PREAMBLE),
+        "reattach must lead with the tracked modes in ascending order"
+    );
+    // 이 테스트의 핵심 — 원본 시퀀스는 이미 replay 창에서 밀려났다. preamble 이
+    // 없으면 새 터미널은 두 모드를 되찾을 방법이 없다.
+    assert!(
+        !contains(&bytes[PREAMBLE.len()..], b"\x1b[?2004h"),
+        "the script's own DECSET must already be evicted from the replay window"
+    );
+    session.kill();
+}
+
+#[test]
+fn reattach_preamble_carries_the_latest_value_of_a_mode() {
+    // 스크립트가 `read` 로 멈춰 서므로 두 번째 단계는 테스트가 stdin 을 열어 줄
+    // 때만 진행된다 — `sleep` 으로 시점을 맞추면 부하 걸린 러너에서 첫 관측이
+    // 이미 두 번째 단계 뒤일 수 있다.
+    let (session, rx) = spawn_script(
+        r"printf '\033[?25l\033[?2004h'; seq 1 4000; printf 'MARK1\n'; read -r _; printf '\033[?2004lMARK2\n'; sleep 30",
+        small_replay_opts(),
+    );
+    wait_for_marker(&rx, "MARK1");
+    let (_, before) = session.reattach();
+    assert!(
+        before.starts_with(b"\x1b[?25l\x1b[?2004h"),
+        "bracketed paste must still be on before the script turns it off"
+    );
+
+    session.write(b"\n").expect("release the script's read");
+    wait_for_marker(&rx, "MARK2");
+    let (_, after) = session.reattach();
+    assert!(
+        after.starts_with(b"\x1b[?25l\x1b[?2004l"),
+        "the preamble must follow the reset, not re-assert the stale value"
+    );
+    session.kill();
+}
+
+#[test]
+fn a_terminal_reset_empties_the_reattach_preamble() {
+    // 같은 핸드셰이크로 RIS 앞뒤를 갈라, "preamble 이 사라졌다"에 양성 대조군을
+    // 붙인다 — 앞 단계에서 preamble 이 실제로 있었음을 보지 않으면 이 테스트는
+    // 모드 추적이 통째로 고장 나도 통과한다.
+    let (session, rx) = spawn_script(
+        r"printf '\033[?25l\033[?2004hMARK1\n'; read -r _; printf '\033c'; seq 1 4000; printf 'MARK2\n'; sleep 30",
+        small_replay_opts(),
+    );
+    wait_for_marker(&rx, "MARK1");
+    let (_, before) = session.reattach();
+    assert!(
+        before.starts_with(b"\x1b[?25l\x1b[?2004h"),
+        "the modes must be tracked before the reset"
+    );
+
+    session.write(b"\n").expect("release the script's read");
+    wait_for_marker(&rx, "MARK2");
+    let (_, after) = session.reattach();
+    // RIS 가 추적 맵을 비웠고 원본 시퀀스는 evict 됐으므로, 스냅샷 어디에도 private
+    // mode 바이트가 남아 있으면 안 된다.
+    assert!(
+        !contains(&after, b"\x1b[?"),
+        "RIS must clear the tracked modes"
+    );
     session.kill();
 }
