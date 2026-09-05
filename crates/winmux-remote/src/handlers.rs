@@ -5,7 +5,7 @@
 //! 전역이 `.lock().unwrap()` 으로 쓰는 것이라, 원격 스레드가 그 안에서 패닉하면 poison
 //! 이 데스크톱까지 번져 앱이 죽는다. 그래서 lock 안에서는 스냅샷 직렬화와 탭 순회만
 //! 하고, 인덱싱·`unwrap`·패닉 가능 연산을 두지 않는다. `lock()` 자체도 `match` 로 받아
-//! 이미 poisoned 인 경우 500 으로 답한다 (계획 3.4장).
+//! 이미 poisoned 인 경우 500 으로 답한다 (ADR-0016 결정 4).
 
 use std::sync::{Arc, Mutex};
 
@@ -37,7 +37,7 @@ pub(crate) fn state(dispatcher: &Mutex<Dispatcher>) -> Response {
 /// `GET /api/tabs/{id}/screen`.
 ///
 /// `since` 를 그대로 믿지 않는다: 세션 토큰이 없거나 지금 세션의 것이 아니면 그 오프셋은
-/// **다른 세션의 좌표**라 reset 으로 되돌린다 (탭 Restart·앱 재시작 — 계획 3.3장).
+/// **다른 세션의 좌표**라 reset 으로 되돌린다 (탭 Restart·앱 재시작 — ADR-0016 결정 6).
 pub(crate) fn screen(
     dispatcher: &Mutex<Dispatcher>,
     sessions: &SessionManager,
@@ -90,7 +90,7 @@ pub(crate) fn resolve_input_session(
 }
 
 /// 모인 본문을 PTY 에 그대로 쓴다 — CR 도 개행도 덧붙이지 않는다. 무엇을 보낼지는
-/// 클라이언트의 인코더가 정한다 (계획 3.6장: bracketed paste·CR 분리 전송).
+/// 클라이언트의 인코더가 정한다 (ADR-0016 결정 7: bracketed paste·CR 분리 전송).
 pub(crate) fn write_input(pty: &PtySession, body: &[u8], log: &LogFn) -> Response {
     match pty.write(body) {
         Ok(()) => Response::ok_empty(),

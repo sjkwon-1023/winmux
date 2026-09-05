@@ -7,7 +7,7 @@
 //! 위험해지는 로직이라 Linux 게이트에서 실제로 실행되는 자리에 둔다. 글루가 맡는 것은
 //! 설정 읽기·토큰 파일 경로·서버 spawn·정적 자산 콜백·로그 싱크뿐이다.
 //!
-//! 계약: `docs/plans/remote-surface-plan.md` 3장.
+//! 계약: `docs/adr/0016-remote-surface-over-lan.md`.
 //!
 //! 이 크레이트가 밖으로 내보내는 것은 서버 기동([`serve`])과 토큰 로딩뿐이다. HTTP
 //! 파싱·라우팅·rate limit·핸들러는 서버만의 내부 부품이라 `pub(crate)` 로 닫아 둔다.

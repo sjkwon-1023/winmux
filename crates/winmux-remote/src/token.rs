@@ -1,7 +1,7 @@
 //! 페어링 토큰 — 생성·파일 로딩·상수 시간 비교.
 //!
 //! 토큰 파일은 `state.json` 옆(`<app_data_dir>/remote-token`)에 살고, 원격이 꺼져 있으면
-//! 아무도 이 모듈을 부르지 않아 파일도 생기지 않는다(계획 3.1장).
+//! 아무도 이 모듈을 부르지 않아 파일도 생기지 않는다(ADR-0016 결정 1).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,9 @@ pub enum TokenError {
     Io(std::io::Error),
     /// 파일은 있는데 토큰으로 쓸 수 없다.
     Corrupt,
+    /// CSPRNG 가 바이트를 주지 않았다. 약한 대체값으로 토큰을 만들지 않으므로 원격은
+    /// 켜지지 않는다 — 부팅 자체는 계속된다 (글루가 `Failed` 로 보고).
+    Entropy(getrandom::Error),
 }
 
 impl fmt::Display for TokenError {
@@ -28,6 +31,7 @@ impl fmt::Display for TokenError {
             TokenError::Corrupt => {
                 write!(f, "remote-token is corrupt; delete it to regenerate")
             }
+            TokenError::Entropy(e) => write!(f, "cannot draw a remote token: {e}"),
         }
     }
 }
@@ -36,7 +40,7 @@ impl std::error::Error for TokenError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             TokenError::Io(e) => Some(e),
-            TokenError::Corrupt => None,
+            TokenError::Corrupt | TokenError::Entropy(_) => None,
         }
     }
 }
@@ -47,7 +51,7 @@ impl std::error::Error for TokenError {
 /// 검증**한다: 빈 파일·잘린 파일·다른 알파벳이 그대로 인증 비밀이 되면 추측 가능한 토큰으로
 /// 원격이 열린다. 검증에 실패해도 **다시 만들지 않는다** — 조용히 재생성하면 이미 페어링한
 /// 폰이 이유 없이 401 을 받고, 파일이 왜 깨졌는지(디스크·동기화 도구·수동 편집)도 묻히기
-/// 때문이다. 사용자가 파일을 지우는 것이 재발급 절차다(계획 3.2장).
+/// 때문이다. 사용자가 파일을 지우는 것이 재발급 절차다(ADR-0016 결정 9).
 ///
 /// 생성은 원자적이다: 같은 디렉터리의 `<파일>.tmp` 에 쓰고 rename 한다. 부팅 중 죽어도
 /// 반쯤 쓰인 파일이 다음 부팅의 토큰이 되지 않는다.
@@ -62,9 +66,9 @@ pub fn load_or_create_token(path: &Path) -> Result<String, TokenError> {
             Ok(trimmed.to_string())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let token = generate_token();
+            let token = generate_token()?;
             let tmp = tmp_path(path);
-            std::fs::write(&tmp, token.as_bytes()).map_err(TokenError::Io)?;
+            write_private(&tmp, token.as_bytes()).map_err(TokenError::Io)?;
             if let Err(e) = std::fs::rename(&tmp, path) {
                 // 남은 tmp 는 다음 시도의 쓰기가 덮어쓰지만, 실패한 부팅이 파일을 흘리고
                 // 가지 않게 지운다.
@@ -79,12 +83,28 @@ pub fn load_or_create_token(path: &Path) -> Result<String, TokenError> {
 
 /// 32B CSPRNG → base64url 무패딩 43자.
 ///
-/// `getrandom` 실패는 패닉이다. 엔트로피를 못 얻은 자리에서 약한 대체값(시각·pid)으로
-/// 토큰을 만들면 원격이 열린 채 추측 가능해지므로, 어떤 대체 경로도 두지 않는다.
-pub(crate) fn generate_token() -> String {
+/// 엔트로피를 못 얻은 자리에서 약한 대체값(시각·pid)으로 토큰을 만들면 원격이 열린 채
+/// 추측 가능해지므로 대체 경로는 없다 — 실패는 [`TokenError::Entropy`] 로 돌려주고
+/// 원격만 켜지지 않는다.
+pub(crate) fn generate_token() -> Result<String, TokenError> {
     let mut raw = [0u8; TOKEN_BYTES];
-    getrandom::fill(&mut raw).expect("CSPRNG unavailable; refusing to weaken the remote token");
-    URL_SAFE_NO_PAD.encode(raw)
+    getrandom::fill(&mut raw).map_err(TokenError::Entropy)?;
+    Ok(URL_SAFE_NO_PAD.encode(raw))
+}
+
+/// 토큰 파일 쓰기. unix 에서는 소유자만 읽게(0600) 만든다 — 개발기의 홈은 다른 계정이
+/// 읽을 수 있고, 이 파일 하나가 원격 입력 권한이다. Windows 는 `%AppData%` 의 ACL 을
+/// 상속하므로 별도 처리가 없다.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// 상수 시간 비교. **길이가 같은 경우에 대해서만** 상수 시간이다 — 길이가 다르면 즉시
@@ -131,7 +151,7 @@ mod tests {
 
     #[test]
     fn a_generated_token_is_43_url_safe_characters() {
-        let token = generate_token();
+        let token = generate_token().unwrap();
         assert_eq!(token.len(), TOKEN_CHARS);
         assert!(token
             .bytes()
@@ -145,7 +165,7 @@ mod tests {
 
     #[test]
     fn two_generated_tokens_differ() {
-        assert_ne!(generate_token(), generate_token());
+        assert_ne!(generate_token().unwrap(), generate_token().unwrap());
     }
 
     #[test]
@@ -169,7 +189,7 @@ mod tests {
     fn a_trailing_newline_in_the_file_is_tolerated() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remote-token");
-        let token = generate_token();
+        let token = generate_token().unwrap();
         std::fs::write(&path, format!("{token}\r\n")).unwrap();
 
         assert_eq!(load_or_create_token(&path).unwrap(), token);
@@ -181,7 +201,7 @@ mod tests {
         for (name, content) in [
             ("empty", String::new()),
             ("blank", "\n".to_string()),
-            ("truncated", generate_token()[..20].to_string()),
+            ("truncated", generate_token().unwrap()[..20].to_string()),
         ] {
             let path = dir.path().join(name);
             std::fs::write(&path, &content).unwrap();
@@ -203,7 +223,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remote-token");
         // 길이는 43 이지만 표준 base64 의 `+` `/` 는 url-safe 알파벳이 아니다.
-        let token = generate_token();
+        let token = generate_token().unwrap();
         let tampered = format!("+/{}", &token[2..]);
         assert_eq!(tampered.len(), TOKEN_CHARS);
         std::fs::write(&path, &tampered).unwrap();
@@ -216,7 +236,7 @@ mod tests {
 
     #[test]
     fn constant_time_compare_accepts_only_an_exact_match() {
-        let token = generate_token();
+        let token = generate_token().unwrap();
         assert!(token_matches(&token, &token));
 
         let mut wrong = token.clone().into_bytes();
@@ -234,7 +254,7 @@ mod tests {
 
     #[test]
     fn constant_time_compare_rejects_a_length_mismatch() {
-        let token = generate_token();
+        let token = generate_token().unwrap();
         assert!(!token_matches(&token, &token[..42]));
         assert!(!token_matches(&token, &format!("{token}x")));
         assert!(!token_matches(&token, ""));

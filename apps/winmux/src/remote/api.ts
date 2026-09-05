@@ -3,7 +3,7 @@
 // 토큰은 페어링 URL 의 fragment 로 한 번 들어와 localStorage 에 남는다. 그
 // 저장소는 origin(`http://<ip>:<port>`) 에 묶여 있고 그 origin 은 나중에 같은
 // IP 를 받은 다른 기기가 사칭할 수 있다 — 평문 LAN 표면이 받아들인 한계이며
-// (계획 3.4장). 그래서 이 페이지는 모델 문자열을 HTML 로 해석되는 자리에 절대
+// (ADR-0016 의 한계 절). 그래서 이 페이지는 모델 문자열을 HTML 로 해석되는 자리에 절대
 // 넣지 않는다 — 전부 `textContent` 다 (list-view.ts).
 
 import { parseScreenMeta } from "./protocol";
@@ -62,6 +62,9 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(path, { ...init, headers, cache: "no-store" });
+  // 401 은 이 토큰이 더는 유효하지 않다는 뜻이다(재발급·다른 PC). 남겨 두면 다음 방문도
+  // 같은 401 로 끝나므로 지운다 — 그러면 다음 방문은 페어링 안내부터 시작한다.
+  if (response.status === 401) clearToken();
   if (!response.ok) throw new HttpError(response.status, `${init.method ?? "GET"} ${path}`);
   return response;
 }

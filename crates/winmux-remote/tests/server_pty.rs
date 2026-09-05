@@ -66,6 +66,7 @@ impl SessionHost for PtyHost {
 
 struct Harness {
     server: RemoteServer,
+    dispatcher: Arc<Mutex<Dispatcher>>,
     sessions: Arc<SessionManager>,
     log: Arc<Mutex<Vec<String>>>,
     tab: u64,
@@ -112,7 +113,7 @@ fn harness() -> Harness {
             token: TOKEN.to_string(),
         },
         RemoteDeps {
-            dispatcher,
+            dispatcher: Arc::clone(&dispatcher),
             sessions: Arc::clone(&sessions),
             assets: Arc::new(|_: &str| None),
             log: Arc::new(move |line: String| log_sink.lock().unwrap().push(line)),
@@ -121,6 +122,7 @@ fn harness() -> Harness {
     .expect("bind 127.0.0.1:0");
     Harness {
         server,
+        dispatcher,
         sessions,
         log,
         tab,
@@ -199,18 +201,39 @@ fn exchange(addr: SocketAddr, raw: &[u8]) -> Reply {
     read_reply(&mut stream)
 }
 
+/// 같은 Dispatcher·세션 위에 서버를 하나 더 띄운다 — 앱을 재시작한 뒤의 두 번째 프로세스와
+/// 같은 상황(세션 id 는 같고 epoch 만 다르다)을 만드는 가장 가까운 방법이다.
+fn serve_again(h: &Harness) -> RemoteServer {
+    serve(
+        RemoteConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            token: TOKEN.to_string(),
+        },
+        RemoteDeps {
+            dispatcher: Arc::clone(&h.dispatcher),
+            sessions: Arc::clone(&h.sessions),
+            assets: Arc::new(|_: &str| None),
+            log: Arc::new(|_: String| {}),
+        },
+    )
+    .expect("bind a second server")
+}
+
 /// `GET /screen`. `since` 는 (offset, 세션 토큰) — 둘 다 없으면 첫 요청(reset)이다.
 fn screen(h: &Harness, since: Option<(u64, &str)>) -> Reply {
+    screen_on(h.addr(), h.tab, since)
+}
+
+fn screen_on(addr: SocketAddr, tab: u64, since: Option<(u64, &str)>) -> Reply {
     let query = match since {
         Some((offset, session)) => format!("?since={offset}&session={session}"),
         None => String::new(),
     };
     exchange(
-        h.addr(),
+        addr,
         format!(
-            "GET /api/tabs/{}/screen{query} HTTP/1.1\r\nHost: winmux\r\n\
-             Authorization: Bearer {TOKEN}\r\n\r\n",
-            h.tab
+            "GET /api/tabs/{tab}/screen{query} HTTP/1.1\r\nHost: winmux\r\n\
+             Authorization: Bearer {TOKEN}\r\n\r\n"
         )
         .as_bytes(),
     )
@@ -309,6 +332,38 @@ fn screen_delta_with_a_stale_session_token_is_a_reset() {
     assert!(reply.reset(), "an offset from another session must reset");
     assert!(contains(&reply.body, PROMPT));
     assert_eq!(reply.session(), first.session());
+}
+
+#[test]
+fn screen_delta_with_a_token_from_an_earlier_process_is_a_reset() {
+    let h = harness();
+    let first = wait_for(&h, PROMPT);
+    let old_token = first.session();
+    // 두 번째 서버는 같은 세션 id 를 다른 epoch 아래에서 낸다 — 앱 재시작 뒤의 모양이다.
+    let restarted = serve_again(&h);
+    let reply = screen_on(
+        restarted.local_addr(),
+        h.tab,
+        Some((first.end_offset(), &old_token)),
+    );
+    assert_eq!(reply.status, 200);
+    assert!(reply.reset(), "a token from another epoch must reset");
+    assert_ne!(reply.session(), old_token, "the epoch must differ");
+    assert!(
+        reply.session().ends_with(&format!(":{}", h.session)),
+        "the session id itself is unchanged"
+    );
+    // 입력도 같은 판정이다 — 옛 epoch 의 토큰으로는 쓰지 못한다.
+    let refused = exchange(
+        restarted.local_addr(),
+        format!(
+            "POST /api/tabs/{}/input?session={old_token} HTTP/1.1\r\nHost: winmux\r\n\
+             Authorization: Bearer {TOKEN}\r\nContent-Length: 6\r\n\r\necho x\r",
+            h.tab
+        )
+        .as_bytes(),
+    );
+    assert_eq!(refused.status, 409);
 }
 
 #[test]

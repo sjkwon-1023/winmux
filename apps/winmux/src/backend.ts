@@ -154,7 +154,7 @@ export function logLine(text: string): Promise<void> {
   return invoke<void>("log_line", { text });
 }
 
-// --- LAN 원격 표면 (계획 3.5장) -----------------------------------------------
+// --- LAN 원격 표면 (ADR-0016 결정 9) -----------------------------------------------
 
 /** 서버의 현재 상태. `off` 는 설정에 `remote` 키가 없다는 뜻이고, `failed` 는
  *  켜기를 시도했으나 바인드·토큰에서 실패했다는 뜻이라 `reason` 이 온다.

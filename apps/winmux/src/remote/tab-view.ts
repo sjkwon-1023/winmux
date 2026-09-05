@@ -245,7 +245,7 @@ export class TabView {
     };
   }
 
-  /** Send = 텍스트 한 번, 그 응답 뒤 CR 한 번 (계획 3.6장). 두 요청으로 나누고
+  /** Send = 텍스트 한 번, 그 응답 뒤 CR 한 번 (ADR-0016 결정 7). 두 요청으로 나누고
    *  사이를 벌리는 이유는 `input-queue.ts` 모듈 주석에 있다. */
   private send(): void {
     const text = this.textEl.value;

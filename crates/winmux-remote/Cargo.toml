@@ -9,7 +9,7 @@ winmux-core = { path = "../winmux-core" }
 # 스냅샷 직렬화 — 데스크톱의 `state-changed` 와 같은 JSON 을 그대로 내보낸다.
 serde_json = "1"
 # 요청 헤드 파서만 빌려 쓴다 — accept 루프·스레드·응답 쓰기는 이 크레이트가 직접 한다
-# (계획 2장: async 런타임을 들이지 않는다).
+# (ADR-0016 결정 3: async 런타임을 들이지 않는다).
 httparse = "1"
 # 토큰용 CSPRNG. 0.3 은 Windows 에서 ProcessPrng, unix 에서 getrandom(2) 를 쓰므로
 # 플랫폼 분기를 우리가 들고 있지 않아도 된다.

@@ -1,6 +1,6 @@
 //! 요청 헤드 읽기 — 파서만이고 소켓·응답은 여기에 없다.
 //!
-//! 상한(계획 3.3장)은 이 모듈이 소유한다: 헤드 8 KiB·헤더 32개를 넘기면 서버가 431 로
+//! 상한(ADR-0016 결정 4)은 이 모듈이 소유한다: 헤드 8 KiB·헤더 32개를 넘기면 서버가 431 로
 //! 끊고, 본문 상한은 `Content-Length` 로 **읽기 전에** 판정한다. 프레이밍 관련 헤더
 //! (`Content-Length` 중복, `Transfer-Encoding`, `Expect`)는 값을 해석하지 않고 사실만
 //! 실어 보낸다 — 어떻게 응답할지는 서버의 판단이고, 파서는 판단 재료만 만든다.
@@ -26,7 +26,7 @@ pub(crate) enum Method {
 ///
 /// `Authorization`·`Content-Length`·`Transfer-Encoding`·`Expect` 외의 헤더는 이름도 값도
 /// 보관하지 않는다. 쿠키·`X-Forwarded-*` 같은 값이 구조체에 실리지 않으면 로그·에러 본문에
-/// 섞여 나갈 경로 자체가 없다(계획 3.4장의 로그 규율을 자료구조로 강제).
+/// 섞여 나갈 경로 자체가 없다(ADR-0016 결정 4의 로그 규율을 자료구조로 강제).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Head {
     pub(crate) method: Method,

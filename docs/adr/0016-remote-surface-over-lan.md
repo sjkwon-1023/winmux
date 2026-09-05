@@ -86,14 +86,19 @@ desktop already receives.
    bundle has no `remote/index.html` at all. Path segments must match
    `^[A-Za-z0-9][A-Za-z0-9._-]*$` and are never percent-decoded — not decoding is the whole
    traversal defence. The phone page is a second Vite build (`dist/remote/`) so no desktop
-   chunk lands under `/remote/`.
+   chunk lands under `/remote/`. Every response carries `Cache-Control: no-store` and
+   `X-Content-Type-Options: nosniff`, and the HTML carries a `Content-Security-Policy` of
+   `default-src 'self'` (inline styles allowed, since xterm attaches its own), so the page's
+   `textContent`-only rule is enforced by the browser as well as by review.
 
 9. **The pairing token is a 32-byte secret shown once as a QR.** It lives in `remote-token`
    next to `state.json`, is created atomically, validated on read (43 base64url characters that
    decode to 32 bytes) and never silently regenerated — a corrupt file fails loudly, and deleting
    it is the regeneration procedure. It reaches the phone only through the pairing dialog's URL
    fragment, which the page stores and strips from the address bar; `remote_status` reports
-   on/off/failed without it so the token never crosses to the renderer at boot.
+   on/off/failed without it so the token never crosses to the renderer at boot. On unix the
+   file is created owner-readable only. A 401 makes the page forget its stored token, so the
+   next visit starts from the pairing hint instead of repeating the failure.
 
 ## Consequences and accepted limits
 
@@ -102,15 +107,16 @@ desktop already receives.
   impersonate the origin. TLS was excluded: a self-signed certificate has to be installed on
   the phone, and Tailscale — the upgrade path that adds encryption, device identity and valid
   HTTPS without touching winmux — costs a separate process. The pairing dialog says so.
-- **The connection cap does not stop a slowloris.** Thirty-two slots and ten-second timeouts
-  bound the threads; a LAN host can still hold the slots and deny the phone. It cannot reach
-  the desktop.
+- **The connection cap does not stop a slowloris.** Thirty-two slots, a ten-second timeout per
+  read and a fifteen-second deadline per request bound each connection; a LAN host can still
+  cycle through the slots and deny the phone. It cannot reach the desktop.
 - **A remote write shares the tab's `writer` mutex with the desktop.** If the child stops
   reading stdin, the desktop's typing into that tab waits behind the remote write, and closing
   the tab then waits on `PtySession::kill` under the Dispatcher lock — the same path a desktop
-  paste already has (the "input stops reaching a shell" backlog item). The remote adds a
-  trigger, not a new hazard; WINDOWS-BUILD §10 v0.3.17 measures it, and letting `kill()` drop
-  the master before waiting on the writer is the recorded follow-up.
+  paste already has (the "input stops reaching a shell" backlog item). What the remote adds is
+  a trigger that sits across the network, and a second cost: thirty-two remote writes stuck this
+  way also exhaust the connection pool. WINDOWS-BUILD §10 v0.3.17 measures it, and letting
+  `kill()` drop the master before waiting on the writer is the recorded follow-up.
 - **The first frame may be incomplete** until the TUI redraws: the desktop nudges a redraw with
   a rows-1/rows resize after attach, and the remote must not touch the desktop's PTY size. The
   same nudge can show the phone a rows-1 screen for one poll, after which it rebuilds.

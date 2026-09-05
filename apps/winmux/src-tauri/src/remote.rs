@@ -7,7 +7,7 @@
 //! 여기 놓인 코드는 `cargo test` 로 한 줄도 돌릴 수 없다. 인증·라우팅처럼 틀리면
 //! 조용히 위험해지는 판정은 그래서 전부 저쪽에 있다.
 //!
-//! 계약: `docs/plans/remote-surface-plan.md` 3.1·3.2·3.4·3.5장.
+//! 계약: `docs/adr/0016-remote-surface-over-lan.md`.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, UdpSocket};

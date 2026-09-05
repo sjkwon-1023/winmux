@@ -262,7 +262,7 @@ pub fn ack_output(state: State<'_, AppState>, id: SessionId, n: usize) -> Result
 /// 프론트 활동 핑 (계획 16단계 C-2/C-3) — throttled 사용자 입력 신호
 /// (wheel/mousedown/keydown, 10초당 1회) + `document.visibilitychange` 보조 신호.
 /// `visible` 이 Some 이면 visibility 전이도 함께 반영한다. 순수 열람(스크롤백
-/// wheel)도 여기로 잡혀 "활성 사용 중 절대 리셋 금지"가 성립한다 (계획 0장).
+/// wheel)도 여기로 잡혀 "활성 사용 중 절대 리셋 금지"가 성립한다 (ADR-0016 결정 8).
 #[tauri::command]
 pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
     match visible {
@@ -452,7 +452,7 @@ pub fn log_line(text: String) {
 /// 수동 WebView 리셋 — **dev 훅(`window.__winmux.resetUi`)·향후 MCP 전용이며 UI
 /// 버튼으로 노출하지 않는다** (계획 v2 12장 원칙). 코어 Command bus 는 구조 변이
 /// 전용(ADR-0002)이고 리셋은 상태 무변이·Tauri 의존 동작이라 글루 커맨드로 둔다
-/// (계획 0장의 의도적 이탈 — ADR 증류 시 기록).
+/// (ADR-0016 결정 8의 의도적 이탈 — ADR 증류 시 기록).
 #[tauri::command]
 pub fn reset_ui(state: State<'_, AppState>) {
     state.reset.reset_now();
