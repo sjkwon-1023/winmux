@@ -304,6 +304,78 @@ body {
   border-color: var(--accent);
 }
 
+/* "Pair phone" — 원격 표면이 떠 있을 때만 사이드바 푸터에 나타난다
+   (main.ts 가 remote_status 로 판정, sidebar.ts setRemoteEnabled). */
+.sidebar-pair {
+  width: 100%;
+  margin-top: 4px;
+  padding: 4px 6px;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sidebar-pair:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* 페어링 다이얼로그 — 네이티브 <dialog>.showModal() (포커스 트랩·Esc·백드롭은
+   브라우저 몫이다). */
+.pairing-dialog {
+  min-width: 300px;
+  padding: 16px;
+  color: var(--fg);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.pairing-dialog::backdrop {
+  background: rgb(0 0 0 / 50%);
+}
+
+.pairing-dialog h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* QR 은 흰 바탕에 검은 모듈로 그려진다 — 다크 테마 위에서도 대비를 유지해야
+   카메라가 읽는다. */
+.pairing-qr {
+  display: block;
+  margin: 0 auto 12px;
+  background: #fff;
+}
+
+.pairing-url {
+  display: block;
+  margin-bottom: 12px;
+  color: var(--fg-muted);
+  font-family: monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pairing-close {
+  width: 100%;
+  padding: 4px 6px;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pairing-close:hover {
+  border-color: var(--accent);
+}
+
 /* ── split tree (11단계) ─────────────────────────────────────────────
    direction 은 pane 이 나열되는 축이다 — split-layout.ts 의 방향 규약 참조.
    자식 flex 값(inline)은 workspace-view 가 소유한다. */

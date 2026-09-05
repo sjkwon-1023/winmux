@@ -98,6 +98,32 @@ impl ReplayBuffer {
         out
     }
 
+    /// 보관 바이트 중 앞 `pos` 를 건너뛴 나머지를 chunk 순서대로 이어붙인다.
+    /// `pos` 는 [`len`](Self::len) 과 같은 좌표계(= 보관량)이고, `pos >= len()`
+    /// 이면 빈 Vec 이다.
+    ///
+    /// [`snapshot`](Self::snapshot) 과 달리 **evicted head 트림을 적용하지 않는다**.
+    /// 트림은 새 터미널을 처음 그릴 때 선두가 행 중간에서 시작하지 않게 하는 장치인데,
+    /// 이 함수의 소비자(원격 폴링의 델타)는 앞부분을 이미 받아 둔 상태라 여기서
+    /// 트림하면 받은 곳과 이어지지 않는 구멍이 스트림에 생긴다.
+    pub fn bytes_from(&self, pos: usize) -> Vec<u8> {
+        if pos >= self.total {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(self.total - pos);
+        let mut seen = 0usize;
+        for chunk in &self.chunks {
+            if seen + chunk.len() <= pos {
+                seen += chunk.len();
+                continue;
+            }
+            // 첫 부분 포함 chunk 이후로는 seen 이 pos 를 넘어서므로 start 가 0 이 된다.
+            out.extend_from_slice(&chunk[pos.saturating_sub(seen)..]);
+            seen += chunk.len();
+        }
+        out
+    }
+
     /// 보관 중인 총 바이트 수. evicted head 트림과 무관한 **보관량**이다 —
     /// `snapshot().len()` 과 다를 수 있다 (트림은 snapshot 반환값에만 적용).
     pub fn len(&self) -> usize {
@@ -244,6 +270,55 @@ mod tests {
         buf.push(b"d\n"); // 5 → "abc" evict → 2
                           // 유일한 `\n` 이 마지막 바이트 — 트림하면 빈 스냅샷이 되므로 무트림.
         assert_eq!(buf.snapshot(), b"d\n");
+    }
+
+    // --- bytes_from (원격 델타) ---
+
+    #[test]
+    fn bytes_from_zero_returns_everything_untrimmed() {
+        let mut buf = ReplayBuffer::new(100);
+        buf.push(b"hello ");
+        buf.push(b"world");
+        assert_eq!(buf.bytes_from(0), b"hello world");
+    }
+
+    #[test]
+    fn bytes_from_skips_across_chunk_boundaries() {
+        let mut buf = ReplayBuffer::new(100);
+        buf.push(b"aaa");
+        buf.push(b"bbb");
+        buf.push(b"ccc");
+        // chunk 중간에서 시작하는 경우와 chunk 경계에서 시작하는 경우 둘 다.
+        assert_eq!(buf.bytes_from(4), b"bbccc");
+        assert_eq!(buf.bytes_from(3), b"bbbccc");
+        assert_eq!(buf.bytes_from(8), b"c");
+    }
+
+    #[test]
+    fn bytes_from_at_len_returns_empty() {
+        let mut buf = ReplayBuffer::new(100);
+        buf.push(b"abcd");
+        assert_eq!(buf.bytes_from(buf.len()), b"");
+    }
+
+    #[test]
+    fn bytes_from_beyond_len_returns_empty() {
+        let mut buf = ReplayBuffer::new(100);
+        buf.push(b"abcd");
+        assert_eq!(buf.bytes_from(buf.len() + 10), b"");
+    }
+
+    #[test]
+    fn bytes_from_ignores_the_evicted_head_trim() {
+        let mut buf = ReplayBuffer::new(16);
+        buf.push(b"aaaa"); // 4
+        buf.push(b"bb\ncc"); // 9
+        buf.push(b"ddddddddd"); // 18 → "aaaa" evict → 14
+                                // snapshot 은 첫 `\n` 뒤부터지만 델타는 보관 바이트 전체다 —
+                                // 트림하면 수신자가 이미 가진 지점과 이어지지 않는다.
+        assert_eq!(buf.snapshot(), b"ccddddddddd");
+        assert_eq!(buf.bytes_from(0), b"bb\nccddddddddd");
+        assert_eq!(buf.bytes_from(0).len(), buf.len());
     }
 
     #[test]

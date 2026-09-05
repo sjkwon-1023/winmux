@@ -22,7 +22,7 @@ vi.mock("./backend", () => ({
 }));
 
 function settings(log: boolean | null): UiSettings {
-  return { fontFamily: null, fontSize: null, highlightLanguages: null, log };
+  return { fontFamily: null, fontSize: null, highlightLanguages: null, log, remote: null };
 }
 
 /** 조합 이벤트 하나를 흘린다.

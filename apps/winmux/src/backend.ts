@@ -129,6 +129,14 @@ export interface UiSettings {
   /** 런타임 로그 파일을 켤지. null·false 는 꺼진 것이고, 그때 프론트는 로그를
    *  **부르지 않을 뿐 아니라 진단 리스너를 설치조차 하지 않는다** (logging.ts). */
   log: boolean | null;
+  /** LAN 원격 표면. **키가 있으면 켜진 것**이고 port 는 필수다 — 백엔드가
+   *  1024~65535 밖을 fontSize 와 같은 자리에서 reject 한다. null 은 미설정이고
+   *  그때는 리스너·스레드·토큰 파일이 아예 생기지 않는다. */
+  remote: RemoteSettings | null;
+}
+
+export interface RemoteSettings {
+  port: number;
 }
 
 /** 앱 설정 디렉터리의 settings.json 을 읽는다. **파일이 없으면 전부 null 인
@@ -144,6 +152,37 @@ export function getUiSettings(): Promise<UiSettings> {
  *  던지지 않는다: 로그를 남기려다 기능이 죽으면 본말전도다. */
 export function logLine(text: string): Promise<void> {
   return invoke<void>("log_line", { text });
+}
+
+// --- LAN 원격 표면 (ADR-0016 결정 9) -----------------------------------------------
+
+/** 서버의 현재 상태. `off` 는 설정에 `remote` 키가 없다는 뜻이고, `failed` 는
+ *  켜기를 시도했으나 바인드·토큰에서 실패했다는 뜻이라 `reason` 이 온다.
+ *  **토큰은 절대 실리지 않는다** — 페어링 URL 은 별도 커맨드로만 나온다. */
+export interface RemoteStatus {
+  state: "off" | "on" | "failed";
+  port: number | null;
+  reason: string | null;
+}
+
+/** 페어링 URL — `http://<lan-ip>:<port>/#t=<token>`. fragment 라 요청에 실리지
+ *  않는다 (폰 페이지가 받아 localStorage 로 옮기고 주소창에서 지운다). */
+export interface Pairing {
+  url: string;
+}
+
+/** 원격 표면 상태 조회. **설정과 무관하게 부팅 시 한 번 부른다** — settings.json
+ *  은 webview 초기화마다 다시 읽히지만 서버는 앱 부팅 때 한 번 정해지므로,
+ *  설정으로 게이트하면 "설정은 켜져 있는데 서버는 실패로 안 뜬 상태"를 놓친다.
+ *  실패하지 않는다 (Result 가 아니다). */
+export function remoteStatus(): Promise<RemoteStatus> {
+  return invoke<RemoteStatus>("remote_status");
+}
+
+/** 페어링 URL 조회 — **다이얼로그를 열 때만** 부른다 (토큰이 렌더러로 건너오는
+ *  유일한 경로다). 꺼져 있으면 null, 켜기에 실패했으면 사유로 reject 된다. */
+export function remotePairing(): Promise<Pairing | null> {
+  return invoke<Pairing | null>("remote_pairing");
 }
 
 // --- 뷰어 파일 접근 (21단계) --------------------------------------------------

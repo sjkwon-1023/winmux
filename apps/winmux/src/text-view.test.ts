@@ -849,7 +849,7 @@ describe("TextView 하이라이트 적용", () => {
   });
 
   function settings(highlightLanguages: string[] | null): UiSettings {
-    return { fontFamily: null, fontSize: null, highlightLanguages, log: null };
+    return { fontFamily: null, fontSize: null, highlightLanguages, log: null, remote: null };
   }
 
   it("플레인으로 먼저 뜨고, 모듈이 도착한 뒤에 색이 덧입혀진다", async () => {
@@ -985,7 +985,13 @@ describe("TextView 행 격자와 설정 글꼴", () => {
   }
 
   beforeEach(() => {
-    applyViewerFontSettings({ fontFamily: null, fontSize: null, highlightLanguages: null, log: null });
+    applyViewerFontSettings({
+      fontFamily: null,
+      fontSize: null,
+      highlightLanguages: null,
+      log: null,
+      remote: null,
+    });
     document.body.replaceChildren();
   });
 
@@ -993,7 +999,13 @@ describe("TextView 행 격자와 설정 글꼴", () => {
   // 를 띄우는 describe 가 추가되면 여기서 키운 격자를 물려받아 영문 모를 실패를
   // 본다. 나갈 때 되돌려 파일 안 실행 순서에 무관하게 만든다.
   afterAll(() => {
-    applyViewerFontSettings({ fontFamily: null, fontSize: null, highlightLanguages: null, log: null });
+    applyViewerFontSettings({
+      fontFamily: null,
+      fontSize: null,
+      highlightLanguages: null,
+      log: null,
+      remote: null,
+    });
   });
 
   it("기본 크기의 행높이는 종전 상수 그대로다", () => {
@@ -1016,7 +1028,13 @@ describe("TextView 행 격자와 설정 글꼴", () => {
   });
 
   it("설정 크기를 키우면 행높이·spacer 가 같이 커진다", async () => {
-    applyViewerFontSettings({ fontFamily: null, fontSize: 24, highlightLanguages: null, log: null });
+    applyViewerFontSettings({
+      fontFamily: null,
+      fontSize: 24,
+      highlightLanguages: null,
+      log: null,
+      remote: null,
+    });
     const view = await mounted("one\ntwo\nthree\n", 3);
     const lineHeight = lineHeightForFontSize(24);
     expect(lineHeight).toBe(32);

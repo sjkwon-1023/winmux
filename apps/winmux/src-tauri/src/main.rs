@@ -10,7 +10,7 @@
 //! 먼저면 그 창에서 즉사한 셸의 on_exit 이 관리 상태를 못 찾아 소실된다
 //! (restore·Fresh 공통의 manage-first 불변식, 14~15 리뷰 finding). respawn 전 스냅샷의 pty_session
 //! null 인 Running 탭은 무해하다 — view-reconcile 은 세션 없는 탭을 attach 하지
-//! 않고, publish 도착마다 점진 attach 된다 (계획 0장).
+//! 않고, publish 도착마다 점진 attach 된다 (ADR-0016 결정 8).
 
 // Windows 릴리스 빌드에서 콘솔 창을 띄우지 않는다 (디버그 빌드는 콘솔 유지).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -23,6 +23,7 @@ mod commands;
 mod host;
 mod logfile;
 mod provision;
+mod remote;
 mod reset_supervisor;
 mod router;
 mod sink;
@@ -138,7 +139,11 @@ fn main() {
             // managed state 경유로 넣는다.
             let reset = reset_supervisor::ResetSupervisor::spawn(handle.clone());
 
-            // manage 를 재스폰보다 먼저 (계획 0장) — 재스폰된 세션의 on_exit 은
+            // 원격 표면은 `AppState` 와 같은 `SessionManager` 를 읽는다 — 아래 manage
+            // 가 소유권을 가져가므로 그 전에 핸들을 하나 더 잡아 둔다.
+            let sessions_for_remote = Arc::clone(&sessions);
+
+            // manage 를 재스폰보다 먼저 (ADR-0016 결정 8) — 재스폰된 세션의 on_exit 은
             // try_state 로 관리 상태를 찾으므로, 스폰이 먼저면 그 사이 exit
             // 이벤트가 소실되는 창이 생긴다.
             app.manage(state::AppState {
@@ -169,14 +174,14 @@ fn main() {
                 state::publish_state(&handle, d_guard);
             }
 
-            // sanitize·수리 결과를 즉시 디스크에 반영한다 (계획 0장 초기 저장) — 이
+            // sanitize·수리 결과를 즉시 디스크에 반영한다 (ADR-0016 결정 8 초기 저장) — 이
             // 시점 상태가 다음 크래시 복원의 기준선이 된다. Fresh 부팅의 초기
             // 워크스페이스도 이 한 번으로 저장된다. **재스폰보다 먼저** 한다: 재스폰은
             // 이제 별도 스레드에서 천천히 돌고(`boot`), 그 결과는 회당 publish 가
             // 알아서 저장한다.
             saver.schedule(dispatcher.lock().unwrap().state().clone());
 
-            // 탭별 재스폰 — 회당 lock 취득·해제 + publish (계획 0장: lock 사이에
+            // 탭별 재스폰 — 회당 lock 취득·해제 + publish (ADR-0016 결정 8: lock 사이에
             // 도착하는 on_exit/dispatch 가 끼어들 수 있어 이벤트 소실 창이 없다).
             // WSL 예열과 탭 간 간격은 `boot` 모듈 doc 참조 (실기 사고 2026-08-20).
             boot::respawn_restored_tabs(handle.clone(), Arc::clone(&dispatcher));
@@ -196,6 +201,16 @@ fn main() {
             for distro in &distros {
                 provision::ensure_provisioned(&handle, Some(distro));
             }
+
+            // 원격 표면(LAN 폴링)은 **부팅의 맨 끝**이다: 설정에 `remote` 가 없으면
+            // 리스너도 스레드도 토큰 파일도 생기지 않고, 있으면 그때부터 이 프로세스
+            // 밖에서 상태를 읽을 수 있게 된다 — 상태 복원·재스폰이 다 지나간 뒤에
+            // 여는 것이 맞다. 결과는 꺼져 있어도 manage 한다 (`remote` 모듈 doc).
+            app.manage(remote::init(
+                &handle,
+                Arc::clone(&dispatcher),
+                sessions_for_remote,
+            ));
             Ok(())
         })
         // 창 이벤트 두 갈래 — 포커스 전이는 리셋 정책 + 프론트 토스트 억제 신호,
@@ -281,6 +296,10 @@ fn main() {
             commands::fs_list_dir,
             commands::fs_stat,
             commands::fs_read_chunk,
+            // 원격 표면의 부팅 결과와 페어링 URL (ADR-0016 결정 9). 상태는 부팅당 1회,
+            // 페어링은 다이얼로그를 열 때만.
+            remote::remote_status,
+            remote::remote_pairing,
         ])
         .build(tauri::generate_context!())
         .expect("error while building winmux")

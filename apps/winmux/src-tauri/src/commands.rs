@@ -262,7 +262,7 @@ pub fn ack_output(state: State<'_, AppState>, id: SessionId, n: usize) -> Result
 /// 프론트 활동 핑 (계획 16단계 C-2/C-3) — throttled 사용자 입력 신호
 /// (wheel/mousedown/keydown, 10초당 1회) + `document.visibilitychange` 보조 신호.
 /// `visible` 이 Some 이면 visibility 전이도 함께 반영한다. 순수 열람(스크롤백
-/// wheel)도 여기로 잡혀 "활성 사용 중 절대 리셋 금지"가 성립한다 (계획 0장).
+/// wheel)도 여기로 잡혀 "활성 사용 중 절대 리셋 금지"가 성립한다 (ADR-0016 결정 8).
 #[tauri::command]
 pub fn user_activity(state: State<'_, AppState>, visible: Option<bool>) {
     match visible {
@@ -306,11 +306,31 @@ pub struct UiSettings {
     /// 파일도 열지 않고 쓰기 스레드도 뜨지 않는다 ([`crate::logfile`]). 켠 뒤에는
     /// 앱을 다시 시작해야 한다 — 부팅 때 한 번만 읽는다.
     pub log: Option<bool>,
+    /// 원격 표면(LAN 폴링, [`crate::remote`]). **키가 있으면 켜짐**이고 없으면
+    /// 리스너도 스레드도 토큰 파일도 생기지 않는다. `log` 와 같은 규율으로 부팅 때
+    /// 한 번만 읽으므로 바꾼 뒤에는 앱을 다시 시작해야 한다.
+    pub remote: Option<RemoteSettings>,
+}
+
+/// `settings.json` 의 `remote` 객체.
+///
+/// `port` 를 `Option` 으로 두지 않는 것이 계약이다 — 빠지면 serde 가 "missing field"
+/// 로 파일 전체의 파싱을 실패시켜 사용자가 상태 라인에서 이유를 본다. 기본 포트를
+/// 몰래 채우면 사용자가 쓰지 않은 포트가 LAN 에 열린다.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSettings {
+    /// 바인드할 TCP 포트. [`REMOTE_PORT_RANGE`] 밖이면 에러다.
+    pub port: u16,
 }
 
 /// 허용 폰트 크기(px). 밖의 값은 조용히 조정하지 않고 **거부**한다 — 0 이나 5000
 /// 이 들어간 파일을 말없이 고쳐 쓰면 사용자는 자기가 쓴 값이 먹은 줄 안다.
 const FONT_SIZE_RANGE: std::ops::RangeInclusive<u16> = 6..=72;
+
+/// 허용 원격 포트. 1024 미만은 Windows 에서도 관리자 권한이 필요한 well-known 대역이라
+/// 실수로 쓰면 바인드가 통째로 실패한다.
+const REMOTE_PORT_RANGE: std::ops::RangeInclusive<u16> = 1024..=65535;
 
 /// 구문 하이라이팅을 지원하는 언어 이름. 프론트가 언어당 하나씩 lazy-load 하는
 /// hljs 모듈 목록(`apps/winmux/src/text-view.ts` 의 `LANGUAGE_LOADERS`)과 **같은
@@ -368,6 +388,17 @@ pub(crate) fn read_ui_settings(app: &AppHandle) -> Result<UiSettings, String> {
             ));
         }
     }
+    if let Some(remote) = &settings.remote {
+        if !REMOTE_PORT_RANGE.contains(&remote.port) {
+            return Err(format!(
+                "remote.port {} in {} is out of range ({}-{})",
+                remote.port,
+                path.display(),
+                REMOTE_PORT_RANGE.start(),
+                REMOTE_PORT_RANGE.end()
+            ));
+        }
+    }
     // fontSize 와 같은 loud-fail 대칭 (리뷰 finding): 공백뿐인 fontFamily 를 조용히
     // 넘기면 xterm 등폭 렌더가 깨진 채 원인이 숨는다.
     if let Some(family) = &settings.font_family {
@@ -421,7 +452,7 @@ pub fn log_line(text: String) {
 /// 수동 WebView 리셋 — **dev 훅(`window.__winmux.resetUi`)·향후 MCP 전용이며 UI
 /// 버튼으로 노출하지 않는다** (계획 v2 12장 원칙). 코어 Command bus 는 구조 변이
 /// 전용(ADR-0002)이고 리셋은 상태 무변이·Tauri 의존 동작이라 글루 커맨드로 둔다
-/// (계획 0장의 의도적 이탈 — ADR 증류 시 기록).
+/// (ADR-0016 결정 8의 의도적 이탈 — ADR 증류 시 기록).
 #[tauri::command]
 pub fn reset_ui(state: State<'_, AppState>) {
     state.reset.reset_now();

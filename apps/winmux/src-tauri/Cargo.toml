@@ -3,7 +3,7 @@
 
 [package]
 name = "winmux-app"
-version = "0.3.16"
+version = "0.3.17"
 edition = "2021"
 
 [build-dependencies]
@@ -15,6 +15,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 winmux-core = { path = "../../../crates/winmux-core" }
+# 원격 표면(LAN 폴링)의 HTTP 서버. 소켓·파싱·인증·라우팅이 전부 저쪽에 있고 이
+# 크레이트는 설정·토큰 경로·자산 콜백·로그 싱크만 넘긴다 (`remote` 모듈 doc) —
+# src-tauri 는 Linux 개발기에서 컴파일되지 않아 여기 둔 로직은 `cargo test` 로 한
+# 줄도 돌릴 수 없기 때문이다.
+winmux-remote = { path = "../../../crates/winmux-remote" }
 
 # 메모리 워치독 (계획 16단계 C-2) — Toolhelp 자손 스캔 + PrivateUsage 조회.
 # 직접 의존 + features 명시 (계획 0장 — Cargo.lock 전이 의존은 feature 활성이

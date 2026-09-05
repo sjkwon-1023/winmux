@@ -1,5 +1,5 @@
-// 워크스페이스 사이드바 (13단계 D3·D4) — 카드 리스트 + 하단 "+ New workspace"
-// 버튼.
+// 워크스페이스 사이드바 (13단계 D3·D4) — 카드 리스트 + 하단 버튼
+// ("+ New workspace", 그리고 원격 표면이 떠 있을 때만 보이는 "Pair phone").
 //
 // 렌더 전략 (18단계 B-6 — 카드 id 키잉 reconcile): reconcilePlan 의 판정대로
 // skip(무변경, DOM 무접촉) / patch(카드 노드 유지 + 텍스트·클래스만 갱신) /
@@ -24,6 +24,8 @@
 //   호출과 CreateWorkspace dispatch 는 main.ts 글루가 한다. 같은 흐름이
 //   Ctrl+Shift+N 으로도 들어오므로 구현을 한곳에 둔다). 이름·경로·배포판을 손으로
 //   치던 인라인 폼은 없앴다 — 경로는 대화상자가, 이름은 폴더명이 정한다.
+// - "Pair phone" = 페어링 다이얼로그 (onPairing 콜백 — main.ts 글루 소유).
+//   원격 표면이 실제로 떠 있을 때만 보인다 (setRemoteEnabled).
 // - F2 = 활성 카드 이름 인라인 편집 (beginRename — main.ts 글루가 부른다).
 //   Enter 확정 = RenameWorkspace dispatch, Esc·blur = 취소.
 //
@@ -100,6 +102,7 @@ function statusText(model: WorkspaceCardModel): string {
 
 export class Sidebar {
   private readonly cardsEl: HTMLDivElement;
+  private readonly pairBtn: HTMLButtonElement;
   private lastSnapshot: StateSnapshot | null = null;
   /** 직전 렌더의 카드 모델 (첫 렌더 전 null) — reconcilePlan 의 좌변 (파일 상단). */
   private lastCards: WorkspaceCardModel[] | null = null;
@@ -120,6 +123,9 @@ export class Sidebar {
     /** "+ New workspace" 버튼 — 폴더 선택 대화상자 흐름 (main.ts 글루 소유,
      *  Ctrl+Shift+N 과 같은 구현을 탄다). */
     private readonly onNewWorkspace: () => void,
+    /** "Pair phone" 버튼 — 페어링 다이얼로그를 여는 것은 main.ts 글루다.
+     *  버튼은 **원격 표면이 실제로 떠 있을 때만** 보인다 (setRemoteEnabled). */
+    private readonly onPairing: () => void,
   ) {
     this.cardsEl = document.createElement("div");
     this.cardsEl.className = "sidebar-cards";
@@ -135,8 +141,23 @@ export class Sidebar {
     newBtn.title = `New workspace from the current directory (${shortcutLabel("newWorkspace")})`;
     newBtn.addEventListener("click", () => this.onNewWorkspace());
 
-    footer.append(newBtn);
+    this.pairBtn = document.createElement("button");
+    this.pairBtn.type = "button";
+    this.pairBtn.className = "sidebar-pair";
+    this.pairBtn.textContent = "Pair phone";
+    this.pairBtn.title = "Show a QR code that opens this winmux on a phone on the same network";
+    this.pairBtn.hidden = true;
+    this.pairBtn.addEventListener("click", () => this.onPairing());
+
+    footer.append(newBtn, this.pairBtn);
     rootEl.append(this.cardsEl, footer);
+  }
+
+  /** 원격 표면이 떠 있나 — main.ts 가 부팅 시 remote_status 로 판정해 넘긴다.
+   *  꺼져 있거나 실패했으면 버튼을 아예 감춘다: 누를 수 없는 버튼을 남겨 두면
+   *  그 자체가 기능이 있다는 잘못된 신호다. */
+  setRemoteEnabled(on: boolean): void {
+    this.pairBtn.hidden = !on;
   }
 
   /** 스냅샷 반영 진입점 — store 구독에서 revision 순으로 호출된다. */

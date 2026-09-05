@@ -4356,7 +4356,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winmux-app"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "anyhow",
  "rfd",
@@ -4368,6 +4368,7 @@ dependencies = [
  "windows",
  "windows-sys 0.61.2",
  "winmux-core",
+ "winmux-remote",
 ]
 
 [[package]]
@@ -4379,6 +4380,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "winmux-remote"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "httparse",
+ "serde_json",
+ "tempfile",
+ "winmux-core",
 ]
 
 [[package]]

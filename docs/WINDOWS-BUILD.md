@@ -1970,6 +1970,56 @@ records it. Check that first.
      as a **submitted** message in the Claude Code tab, not as text waiting in its prompt — that
      is the exact field failure this release fixes.
 
+### v0.3.17 — verification
+
+All of it is field-only: the server, the asset gate and the phone page only meet a real
+WebView2 bundle, a real Windows firewall and a real phone here. Replace `<ip>` with the PC's
+LAN address and `<port>` with the configured port; the token comes from the pairing dialog.
+
+1. **Off means nothing exists.** With no `"remote"` key in `settings.json`:
+   `netstat -ano | findstr <port>` prints nothing, `%AppData%\app.winmux.desktop\remote-token`
+   does not exist, and `scripts/win/measure.ps1` reads the same as before.
+
+2. **On.** Add `"remote": { "port": 7331 }`, restart. Windows asks whether to allow winmux on
+   the network — allow **private networks only**. The sidebar footer now shows *Pair phone*;
+   click it, scan the QR with the phone, and the phone shows the workspace list. The
+   `remote-token` file now exists (43 characters). A port outside 1024–65535, or a `remote`
+   object without `port`, must put the reason on the status line and leave the server down.
+
+3. **The static gate — positive and negative.** From PowerShell:
+   `curl.exe -si http://<ip>:<port>/` → 200 and the phone page; `/remote/index.html` → 200;
+   `/remote/nope.js` → 404; `/index.html` → 404; `/assets/anything.js` → 404. The desktop
+   page must never come back from a remote path — that is the fallback ADR-0016 decision 8
+   exists to block.
+
+4. **Screen and input.** Open a long-running Claude Code tab on the phone: the screen matches
+   the desktop. Paste two short lines into the phone's text box and press Send: both lines
+   stay in the agent's input box (bracketed paste), and the Enter that follows submits them.
+   Ctrl+C interrupts. Watch the **desktop** shell line of a plain bash tab while the phone is
+   open: no stray `R` or `;1R` may appear — the phone's terminal must not answer replayed
+   queries.
+
+5. **Authentication.** `curl.exe -si http://<ip>:<port>/api/state` → 401.
+   `curl.exe -si "http://<ip>:<port>/api/state?token=<token>"` → 401 (query tokens are
+   ignored). Eleven requests with a wrong bearer token → the eleventh is 429, and for the next
+   minute even `/remote/index.html` is 429 from that machine. With the right token → 200 JSON.
+
+6. **A restarted tab.** While the phone shows a tab, press *Restart* on that tab's pane banner
+   (kill the shell first with `exit`). The phone must reset to the new shell within a poll or
+   two, and text sent from the old screen before the reset must be refused (the phone shows
+   "The shell restarted — input was not sent").
+
+7. **The desktop is unaffected.** With the phone polling a busy tab: `yes | head -c 50000000`
+   in that tab streams at the usual rate, scrolling and workspace switching feel the same, and
+   a desktop paste into the same tab still lands whole.
+
+8. **Blocked write (measures ADR-0016's accepted limit).** In a tab run `sleep 600` (a program
+   that never reads stdin), send 60 KB of text from the phone, then close that tab from the
+   desktop. Record whether the app stalls and for how long — that number belongs in the
+   backlog item, and a stall here is the known limit, not a regression.
+
+9. **RAM.** `scripts/win/measure.ps1` with the remote on and the phone connected, versus off.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

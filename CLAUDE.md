@@ -455,6 +455,27 @@ Accepted deferrals, one line each. None of these block the MVP.
   pre-replay `?1049h` swallows the pre-vim scrollback), so a TUI whose `?1049h` was evicted still
   returns on the normal buffer — the candidate is re-asserting only modes whose last change is
   older than the replay window; and a paste during the replay gate is logged, not buffered.
+- **Remote surface over the LAN — landed 2026-09-05** (user request, v0.3.17). `settings.json`'s
+  `"remote": { "port": N }` starts an HTTP server inside the app (off by default — nothing exists
+  while off) that a phone on the same Wi-Fi reaches after scanning the sidebar's *Pair phone* QR:
+  `/api/state` is the desktop's snapshot JSON, `/api/tabs/{id}/screen` an offset-based, read-only
+  delta of the replay (`PtySession::screen_since` — never `reattach()`, which would reset the
+  desktop's flow control), `/api/tabs/{id}/input` raw bytes written verbatim. Everything
+  network-facing is the new Tauri-free crate `crates/winmux-remote` — its own `httparse` loop,
+  since `tiny_http` has no head cap and drains a rejected body — tested on Linux against a real
+  listener; the glue only reads settings, keeps the token file, gates static assets by the
+  embedded key set (Tauri's release lookup falls back to `index.html` for unknown paths) and
+  serves the second Vite bundle under `/remote/`. The phone's xterm runs with `disableStdin`
+  and the page encodes input itself, sending Enter as a separate request after a paste for the
+  v0.3.16 reason. Decisions and the accepted limits (plain HTTP, slowloris, the shared `writer`
+  mutex, first-frame fidelity): [ADR-0016](docs/adr/0016-remote-surface-over-lan.md).
+  Verification: WINDOWS-BUILD §10 v0.3.17 — all field-only. **Open**: `PtySession::kill` waits
+  on the `writer` mutex under the Dispatcher lock, so a remote write into a shell that stopped
+  reading stdin can stall a `CloseTab` (same root as the "input stops reaching a shell" item; the
+  candidate fix drops the master before the writer); an authenticated client can hammer
+  `since`-less requests (the limiter counts auth failures only); the phone bundle carries its
+  own copy of xterm (~300 KB); `lan_ip()` takes the default-route interface, which on a
+  multi-homed PC may not be the phone's link.
 - **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
 - **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
   smaller replay cap, progressive replay, hide-until-parsed. Since v0.3.15 the replay
@@ -521,6 +542,9 @@ Accepted deferrals, one line each. None of these block the MVP.
 - `crates/winmux-core` — pure Rust core (PTY session, flow control, OSC scanner, replay
   buffer, and the `model`/`command` state + dispatcher). No Tauri dependency; this is
   where unit/integration tests live.
+- `crates/winmux-remote` — the LAN remote surface's HTTP server: head parser on `httparse`,
+  route table, pairing token, per-IP limiter, handlers. Pure Rust, no Tauri; its integration
+  tests run against a real listener on Linux (`tests/server.rs`, unix-only `tests/server_pty.rs`).
 - `apps/winmux` — the MVP app (계획 v2 section 17, stage 10 onward): Tauri v2 + vanilla TS
   frontend driving the `winmux-core` `Dispatcher` over a single serializable `Command` bus.
   Architecture: ADR-0002 (state/bus/attach), ADR-0003 (split/tab UI).
@@ -536,6 +560,7 @@ Accepted deferrals, one line each. None of these block the MVP.
 ```bash
 export PATH="$HOME/.local/node/bin:$HOME/.cargo/bin:$PATH"
 cargo test -p winmux-core
+cargo test -p winmux-remote
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
 cargo check --workspace --target x86_64-pc-windows-msvc
