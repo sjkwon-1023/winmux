@@ -33,7 +33,7 @@ use crate::winlog;
 /// 설치 스크립트 버전. 마커 파일명(`~/.winmux/.setup-v<N>`)에 들어가므로, 스크립트
 /// 내용을 바꿔 기존 사용자에게도 다시 깔아야 할 때 이 값을 올리면 된다 (마커가
 /// 달라져 전원 재실행). 스크립트 본문의 `@SETUP_VERSION@` 자리에 치환된다.
-const SETUP_VERSION: u32 = 9;
+const SETUP_VERSION: u32 = 10;
 
 /// 프로세스 수명 캐시 — **해석된** distro 이름 기준으로 앱 실행당 1회만 스폰한다.
 /// 기본 distro(None)는 claim 전에 실제 이름으로 해석된다 (보안 리뷰 finding):
@@ -550,19 +550,21 @@ cmd_send() {
   esac
 
   require_base64
-  local payload
-  if [[ "$submit" -eq 1 ]]; then
-    # CR, not LF. The bytes land on the target's stdin as if typed, and Enter on a real
-    # terminal is CR: a raw-mode TUI (Codex, Claude Code) takes an LF into its prompt and
-    # never submits, which is exactly what the field showed. A shell is unaffected because
-    # its line discipline has ICRNL on, turning the CR back into a newline.
-    payload="$(printf '%s\r' "$text" | base64 -w0)"
-  else
-    payload="$(printf '%s' "$text" | base64 -w0)"
-  fi
-
   # OSC 777 format: ESC ] 777 ; winmux-send ; target ; base64 BEL
-  winmux_emit "$(printf '\033]777;winmux-send;%s;%s\007' "$target" "$payload")" || true
+  if [[ -n "$text" ]]; then
+    winmux_emit "$(printf '\033]777;winmux-send;%s;%s\007' "$target" "$(printf '%s' "$text" | base64 -w0)")" || true
+  fi
+  if [[ "$submit" -eq 1 ]]; then
+    # Enter is a separate write, a beat after the text. It has to be CR, not LF: a raw-mode
+    # TUI (Codex, Claude Code) takes an LF into its prompt and never submits, while a shell's
+    # ICRNL turns the CR back into a newline. And it has to arrive on its own: both TUIs treat
+    # a burst of bytes that lands in one read as a paste (Codex's paste_burst, Claude Code's
+    # chunk-length rule), and a CR inside a paste is a newline, not Enter -- the field showed a
+    # long line arriving intact with the Enter swallowed. The app writes each OSC send to the
+    # PTY as soon as it arrives, so the pause here is the gap on the wire.
+    sleep 0.2
+    winmux_emit "$(printf '\033]777;winmux-send;%s;%s\007' "$target" "$(printf '\r' | base64 -w0)")" || true
+  fi
   exit 0
 }
 
@@ -971,7 +973,7 @@ reaches only them — a tab in another workspace is unreachable by title and by 
 ## 2. Send
 
 ```bash
-winmux send '#181' 'cargo test'     # arrives with a CR, so the target runs it
+winmux send '#181' 'cargo test'     # text, then Enter (CR) as a second write, so the target runs it
 winmux send -l '#181' 'cargo test'  # literal: pre-fills the prompt, runs nothing
 ```
 
@@ -986,7 +988,7 @@ joined with single spaces, so quote anything your own shell would expand.
 | Your workspace only | Candidates stop at the workspace your own tab is in, and so does `winmux ls`. An id from elsewhere resolves to nothing, exactly like an id that does not exist. |
 | Never yourself | Your own tab is excluded from the candidates either way. |
 | Live terminals only | An exited tab or a viewer tab is never a target, whatever its title. |
-| Raw bytes | The text reaches the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. The trailing CR is what runs it, in a shell and in a TUI agent alike; `-l` leaves it off. |
+| Raw bytes | The text reaches the target's stdin verbatim — no bracketed paste, no quoting, no interpretation. Enter is a CR sent as a **separate write** 200 ms after the text — in one write a TUI treats the burst as a paste and swallows the CR as a newline; `-l` sends no CR. |
 | Size | 32 KiB after decoding. Send a path, not a file. |
 | Silent | No reply, no acknowledgement, no error: success and failure look identical and the exit code is 0 either way. Failures are logged by the winmux app, not by you. |
 
