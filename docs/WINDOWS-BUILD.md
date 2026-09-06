@@ -2036,6 +2036,18 @@ Phone-page only; the server is unchanged.
    empty box is a bare Enter; Stop interrupts; Esc escapes. Tapping a button does not close the
    keyboard.
 
+### v0.3.19 — verification
+
+Phone-page only; the server is unchanged. v0.3.18's tab screen came up black with the composer
+disabled on every phone (`@xterm/headless` gates `buffer` behind `allowProposedApi`, and the
+throw was swallowed inside xterm's write loop), so its list above was never exercised in the
+field and is re-run here.
+
+1. **First frame.** Open a tab: the screen text appears within one poll interval (2 s) and the
+   text box, Send, Stop and Esc become enabled. No notice line is shown. If a notice starting
+   with "Screen render failed:" ever appears, report its text — that is the new guard speaking.
+2. **v0.3.18 items 1–4** in full.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy

@@ -234,7 +234,16 @@ export class TabView {
     this.destroyTerminal();
     // 크기는 서버(PTY)의 것 — 그래야 replay 가 데스크톱과 같은 줄로 접힌다. 화면에
     // 보이는 줄바꿈은 그 위에 CSS 가 한 번 더 접는 것이다.
-    this.term = new Terminal({ cols, rows, scrollback: MAX_SCREEN_LINES });
+    // `allowProposedApi` 는 headless 쪽의 차이다: `@xterm/headless` 5.5.0 은 `buffer`
+    // getter 를 proposed API 로 게이트해 두어 이 옵션 없이는 접근 자체가 던진다 —
+    // 같은 5.5.0 의 `@xterm/xterm` 은 게이트하지 않아 데스크톱에서는 드러나지 않았다
+    // (v0.3.18 필드: 검은 화면에 입력 비활성). `modes` 는 게이트되지 않는다.
+    this.term = new Terminal({
+      cols,
+      rows,
+      scrollback: MAX_SCREEN_LINES,
+      allowProposedApi: true,
+    });
     this.write(bytes, () => this.setInputEnabled(true));
   }
 
@@ -244,8 +253,16 @@ export class TabView {
     const generation = this.schedule.generation;
     term.write(bytes, () => {
       if (!this.schedule.isCurrent(generation) || this.term !== term) return;
-      this.render(term);
-      then?.();
+      // 이 콜백은 xterm 의 write 루프 안에서 돈다. 여기서 던지면 루프가 그 항목을
+      // 넘기지 못한 채 멈추고 이후의 write 는 영영 처리되지 않는다 — 안내문도 없이
+      // 검은 화면만 남는다. 실패는 안내문으로 드러내고 루프는 살려 둔다.
+      try {
+        this.render(term);
+        then?.();
+      } catch (error) {
+        console.error("screen render failed", error);
+        this.setNotice(`Screen render failed: ${describeError(error)}`);
+      }
     });
   }
 
@@ -378,6 +395,10 @@ function saveFontPx(px: number): void {
   } catch {
     // 저장이 안 되면 이번 세션에만 유효한 크기가 된다 — 조용히 진행한다.
   }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function screenErrorText(status: number): string {
