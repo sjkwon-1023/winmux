@@ -41,6 +41,8 @@ export class PollSchedule {
    *  재무장이 해제 예약을 지워 영영 깨어나지 못한다. */
   private pauseTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlight = false;
+  /** `pollNow` 가 인-플라이트 구간에 걸렸다 — 정착하는 대로 대기 없이 한 번 더. */
+  private pollAgain = false;
   private visible = true;
   private running = false;
   private dead = false;
@@ -78,6 +80,18 @@ export class PollSchedule {
     this.running = false;
     this.clearTimer();
     this.clearPauseTimer();
+  }
+
+  /** 간격을 기다리지 말고 지금 한 번 — 입력을 보낸 직후처럼 화면이 방금 바뀐 것이
+   *  확실할 때 쓴다. 겹침 금지는 그대로라, 폴이 나가 있는 중이면 그 응답이 정착한
+   *  뒤로 미룬다. 세대는 건드리지 않는다 — 보고 있는 화면은 그대로다. */
+  pollNow(): void {
+    if (!this.canRun()) return;
+    if (this.inFlight) {
+      this.pollAgain = true;
+      return;
+    }
+    this.fire();
   }
 
   setVisible(visible: boolean): void {
@@ -122,7 +136,10 @@ export class PollSchedule {
       .catch(() => undefined)
       .then(() => {
         this.inFlight = false;
-        this.arm();
+        const immediate = this.pollAgain;
+        this.pollAgain = false;
+        if (immediate) this.fire();
+        else this.arm();
       });
   }
 

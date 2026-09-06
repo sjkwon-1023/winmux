@@ -206,6 +206,16 @@ body {
 
 /* ── 탭 화면 ─────────────────────────────────────────────────── */
 
+/* 스크롤 키를 띄우려고 한 겹 감싼 것이다 — absolute 자식을 스크롤 컨테이너 안에
+   두면 내용과 함께 밀려 올라간다. */
+.screen-area {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
 /* 화면은 headless xterm 버퍼를 줄바꿈되는 텍스트로 옮긴 것이다 (tab-view.ts) —
    PTY 의 열 수와 무관하게 세로로만 스크롤한다. 글자 크기는 A−/A+ 가 인라인으로 준다. */
 .screen-text {
@@ -225,6 +235,30 @@ body {
   line-height: 1.3;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.scroll-keys {
+  position: absolute;
+  right: 8px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* display 를 준 요소에는 `hidden` 속성의 기본 규칙이 지므로 여기서 다시 숨긴다. */
+.scroll-keys[hidden] {
+  display: none;
+}
+
+.scroll-key {
+  width: var(--touch);
+  height: var(--touch);
+  color: var(--fg);
+  background: rgba(37, 37, 38, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  font-size: 16px;
 }
 
 .composer {

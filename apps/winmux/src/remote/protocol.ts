@@ -121,10 +121,15 @@ export function nextRequest(state: ViewState, got: ScreenMeta): ViewState {
 }
 
 /** 폰이 보낼 수 있는 입력. 텍스트는 붙여넣기 한 덩어리이고, 나머지는 버튼 하나에
- *  키 하나다 — xterm 이 `disableStdin` 이라 인코딩은 전부 여기서 한다. */
+ *  키 하나다 — xterm 이 `disableStdin` 이라 인코딩은 전부 여기서 한다.
+ *
+ *  `wheel` 은 폰에 없는 마우스 휠을 대신한다. 대체 화면(`ESC[?1049h`)에는
+ *  스크롤백이 없어 이전 내역은 그 안에서 도는 TUI 만 되감을 수 있고, 데스크톱에서
+ *  그 일을 하는 것이 휠이다. */
 export type InputAction =
   | { type: "paste"; text: string }
-  | { type: "key"; key: InputKey };
+  | { type: "key"; key: InputKey }
+  | { type: "wheel"; direction: "up" | "down"; col: number; row: number; notches: number };
 
 export type InputKey =
   | "escape"
@@ -135,13 +140,22 @@ export type InputKey =
   | "up"
   | "down"
   | "left"
-  | "right";
+  | "right"
+  | "pageUp"
+  | "pageDown";
 
 const ARROW_FINAL: Record<"up" | "down" | "left" | "right", string> = {
   up: "A",
   down: "B",
   right: "C",
   left: "D",
+};
+
+/** SGR 마우스 리포트(`ESC[?1006h`)의 휠 버튼 번호. 휠은 버튼 코드 64 에 방향이
+ *  더해지고, 눌림만 있고 뗌이 없어 최종 바이트는 항상 `M` 이다. */
+const WHEEL_BUTTON: Record<"up" | "down", number> = {
+  up: 64,
+  down: 65,
 };
 
 /** 액션 → PTY 로 그대로 흘려보낼 문자열.
@@ -152,11 +166,20 @@ const ARROW_FINAL: Record<"up" | "down" | "left" | "right", string> = {
  *
  *  화살표가 두 벌인 것은 DECCKM(application cursor keys) 때문이다 — 이 모드를
  *  켠 TUI(vim·readline 의 일부 모드)는 `ESC O A` 를 기대하고 `ESC [ A` 를 다른
- *  뜻으로 읽는다. 두 모드 값 모두 write 가 끝난 뒤의 `term.modes` 에서 온다. */
+ *  뜻으로 읽는다. 두 모드 값 모두 write 가 끝난 뒤의 `term.modes` 에서 온다.
+ *
+ *  휠은 모드를 보지 않는다 — 좌표와 방향만으로 결정되고, 이 인코딩을 읽을 수 있는
+ *  프로그램인지는 호출자가 이미 판정한 뒤다 (tab-view.ts). 여러 노치를 한 문자열로
+ *  잇는 것은 그것이 한 번의 write 로 나가야 하기 때문이다: 요청을 쪼개면 TUI 가
+ *  리포트 사이에 다른 입력을 끼워 읽을 수 있고, 왕복 지연만큼 스크롤이 끊긴다. */
 export function encodeInput(action: InputAction, modes: TerminalModes): string {
   if (action.type === "paste") {
     if (!modes.bracketedPasteMode) return action.text;
     return `\x1b[200~${action.text}\x1b[201~`;
+  }
+  if (action.type === "wheel") {
+    const report = `\x1b[<${WHEEL_BUTTON[action.direction]};${action.col};${action.row}M`;
+    return report.repeat(action.notches);
   }
   switch (action.key) {
     case "escape":
@@ -169,6 +192,10 @@ export function encodeInput(action: InputAction, modes: TerminalModes): string {
       return "\x7f";
     case "enter":
       return "\r";
+    case "pageUp":
+      return "\x1b[5~";
+    case "pageDown":
+      return "\x1b[6~";
     default: {
       const final = ARROW_FINAL[action.key];
       return modes.applicationCursorKeysMode ? `\x1bO${final}` : `\x1b[${final}`;

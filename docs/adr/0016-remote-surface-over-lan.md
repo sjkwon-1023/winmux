@@ -82,6 +82,20 @@ desktop already receives.
    paste and swallow a CR inside it. The page sizes itself to the visual viewport, since phone
    browsers shrink only the visible window when the keyboard opens.
 
+   *Amendment (v0.3.20).* The text rendering has no history to show for the programs the surface
+   exists for: Claude Code 2.1.x and Codex 0.153.x both run on the **alternate screen** by
+   default and take the mouse (`?1049h`, `?1000/1002/1003/1006h`, read off a live tab), and an
+   alternate buffer has no scrollback — the desktop shows earlier content only because the wheel
+   reaches the TUI and it scrolls its own transcript. So the one exception to "the phone's
+   terminal never emits any input" is deliberate and narrow: ▲/▼ buttons, shown only while the
+   active buffer is the alternate one or mouse tracking is on, send five SGR wheel notches aimed
+   at the screen centre, or PageUp/PageDown when the program has mouse tracking without SGR or
+   no mouse at all — the phone tracks `?1006` with a CSI hook on the headless parser and never
+   sends the X10 encoding. The mouse modes survive replay eviction because the snapshot preamble
+   re-asserts them; 1049 does not (ADR-0015), which is why the mouse condition is part of the
+   rule. Every input burst also triggers an immediate poll when the queue drains, since a
+   2 s wait after a scroll tap reads as a dead button.
+
 8. **Static assets are gated by the embedded key set.** Tauri's release asset lookup falls back
    to `index.html` for any unknown path (`manager/mod.rs:406-428` in 2.11.5), so without a gate
    `/remote/typo` would serve the desktop page to an unauthenticated client. The glue collects
