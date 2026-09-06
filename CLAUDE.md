@@ -468,14 +468,23 @@ Accepted deferrals, one line each. None of these block the MVP.
   serves the second Vite bundle under `/remote/`. The phone renders a headless xterm buffer as
   wrapped text (v0.3.18: vertical scroll only, A−/A+ font size, Send/Stop/Esc, the app box sized
   to the visual viewport so the composer stays above the keyboard) and encodes input itself,
-  sending Enter as a separate request after a paste for the v0.3.16 reason. Decisions and the accepted limits (plain HTTP, slowloris, the shared `writer`
-  mutex, first-frame fidelity): [ADR-0016](docs/adr/0016-remote-surface-over-lan.md).
+  sending Enter as a separate request after a paste for the v0.3.16 reason. **v0.3.18 shipped
+  blind** (user report 2026-09-06, fixed in v0.3.19): every phone showed a black tab screen with
+  the composer disabled, because `@xterm/headless` 5.5.0 gates `buffer` behind
+  `allowProposedApi` — the browser build of the same version does not — and the throw landed
+  inside xterm's write loop, where nothing reports it and the queue stays wedged. Fixed with the
+  option, a guard that turns a render failure into a visible notice, and `tab-view.test.ts`,
+  which drives a real headless instance through the first frame under happy-dom. It was
+  reproduced on the dev box by running the built phone code in Windows Chrome headless against a
+  mock server; the field-only checklist had no browser step, which is what let it ship.
+  Decisions and the accepted limits (plain HTTP, slowloris, the shared `writer` mutex,
+  first-frame fidelity): [ADR-0016](docs/adr/0016-remote-surface-over-lan.md).
   Verification: WINDOWS-BUILD §10 v0.3.17 — all field-only. **Open**: `PtySession::kill` waits
   on the `writer` mutex under the Dispatcher lock, so a remote write into a shell that stopped
   reading stdin can stall a `CloseTab` (same root as the "input stops reaching a shell" item; the
   candidate fix drops the master before the writer); an authenticated client can hammer
   `since`-less requests (the limiter counts auth failures only); the phone bundle carries its
-  own copy of xterm (~300 KB); `lan_ip()` takes the default-route interface, which on a
+  own copy of xterm (the ~150 KB headless build); `lan_ip()` takes the default-route interface, which on a
   multi-homed PC may not be the phone's link.
 - **Splitter resize is mouse-drag only** — no keyboard equivalent for the drag handle.
 - **1MiB-replay workspace switch is ~236ms with visible flicker** (ADR-0004) — candidates:
