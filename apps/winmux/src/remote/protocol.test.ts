@@ -128,5 +128,25 @@ describe("encodeInput", () => {
     expect(encodeInput({ type: "key", key: "ctrlC" }, on)).toBe("\x03");
     expect(encodeInput({ type: "key", key: "backspace" }, on)).toBe("\x7f");
     expect(encodeInput({ type: "key", key: "enter" }, on)).toBe("\r");
+    expect(encodeInput({ type: "key", key: "pageUp" }, on)).toBe("\x1b[5~");
+    expect(encodeInput({ type: "key", key: "pageDown" }, on)).toBe("\x1b[6~");
+  });
+
+  it("a wheel action is one SGR report per notch", () => {
+    const at = { col: 60, row: 15, notches: 1 } as const;
+    expect(encodeInput({ type: "wheel", direction: "up", ...at }, off)).toBe("\x1b[<64;60;15M");
+    expect(encodeInput({ type: "wheel", direction: "down", ...at }, off)).toBe("\x1b[<65;60;15M");
+    // 노치가 여럿이어도 한 문자열이다 — 한 번의 write 로 나가야 한다.
+    expect(encodeInput({ type: "wheel", direction: "up", col: 60, row: 15, notches: 3 }, off)).toBe(
+      "\x1b[<64;60;15M\x1b[<64;60;15M\x1b[<64;60;15M",
+    );
+    // 좌표는 호출자가 준 1-based 값 그대로 들어간다.
+    expect(
+      encodeInput({ type: "wheel", direction: "down", col: 1, row: 200, notches: 1 }, off),
+    ).toBe("\x1b[<65;1;200M");
+    // 모드는 보지 않는다.
+    expect(
+      encodeInput({ type: "wheel", direction: "up", ...at }, { ...off, bracketedPasteMode: true }),
+    ).toBe("\x1b[<64;60;15M");
   });
 });

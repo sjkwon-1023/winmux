@@ -42,6 +42,9 @@ const POLL_INTERVAL_MS = 2000;
 const FONT_KEY = "winmux.remoteFontPx";
 /** 이 거리 안이면 "맨 아래를 보고 있다" — 새 출력이 오면 따라 내려간다. */
 const STICK_TO_BOTTOM_PX = 24;
+/** ▲/▼ 한 번이 보내는 휠 노치 수. TUI 는 대개 노치당 몇 줄씩 움직이므로 다섯이면
+ *  반 화면쯤이다 — 한 노치씩 보내면 폴 왕복마다 몇 줄이라 되감기가 쓸 수 없다. */
+const WHEEL_NOTCHES_PER_TAP = 5;
 
 export interface TabViewOptions {
   tab: TabId;
@@ -53,6 +56,7 @@ export class TabView {
   readonly root: HTMLElement;
   private readonly outputEl: HTMLDivElement;
   private readonly preEl: HTMLPreElement;
+  private readonly scrollKeysEl: HTMLDivElement;
   private readonly noticeEl: HTMLDivElement;
   private readonly textEl: HTMLTextAreaElement;
   private readonly controls: HTMLButtonElement[] = [];
@@ -69,6 +73,9 @@ export class TabView {
    *  되돌린다. 폰에서 손으로 친 것이라 실패 한 번에 사라지면 다시 칠 수밖에
    *  없다. 인코딩된 `data` 를 되돌릴 수는 없다 (브래킷 시퀀스가 딸려 온다). */
   private pendingPaste: { item: InputItem; text: string } | null = null;
+  /** 이 인스턴스가 `ESC[?1006h` 를 봤나. `term.modes` 는 추적 **모드**만 알려 주고
+   *  리포트 **인코딩**은 알려 주지 않아서, 파서를 직접 들여다보는 수밖에 없다. */
+  private sgrMouse = false;
   private fontPx = loadFontPx();
 
   constructor(private readonly options: TabViewOptions) {
@@ -100,6 +107,17 @@ export class TabView {
     this.outputEl.append(this.preEl);
     this.applyFont();
 
+    this.scrollKeysEl = document.createElement("div");
+    this.scrollKeysEl.className = "scroll-keys";
+    this.scrollKeysEl.hidden = true;
+    this.scrollKeysEl.append(
+      this.actionButton("\u25b2", "scroll-key scroll-up", () => this.scrollTui("up")),
+      this.actionButton("\u25bc", "scroll-key scroll-down", () => this.scrollTui("down")),
+    );
+    const screenArea = document.createElement("div");
+    screenArea.className = "screen-area";
+    screenArea.append(this.outputEl, this.scrollKeysEl);
+
     const composer = document.createElement("div");
     composer.className = "composer";
     this.textEl = document.createElement("textarea");
@@ -120,7 +138,7 @@ export class TabView {
       this.actionButton("Esc", "key", () => this.enqueue([{ type: "key", key: "escape" }])),
     );
 
-    this.root.append(header, this.noticeEl, this.outputEl, composer, keys);
+    this.root.append(header, this.noticeEl, screenArea, composer, keys);
     this.setInputEnabled(false);
 
     this.schedule = new PollSchedule({
@@ -139,6 +157,9 @@ export class TabView {
       onError: (error, item) => this.reportInputError(error, item),
       onIdle: () => {
         this.pendingPaste = null;
+        // 방금 보낸 것이 화면에 나타나기까지 폴 간격(2초)을 기다릴 이유가 없다 —
+        // 스크롤 버튼은 누른 만큼 화면이 움직여야 다음을 누를지 판단할 수 있다.
+        this.schedule.pollNow();
       },
     });
   }
@@ -238,12 +259,25 @@ export class TabView {
     // getter 를 proposed API 로 게이트해 두어 이 옵션 없이는 접근 자체가 던진다 —
     // 같은 5.5.0 의 `@xterm/xterm` 은 게이트하지 않아 데스크톱에서는 드러나지 않았다
     // (v0.3.18 필드: 검은 화면에 입력 비활성). `modes` 는 게이트되지 않는다.
-    this.term = new Terminal({
+    const term = new Terminal({
       cols,
       rows,
       scrollback: MAX_SCREEN_LINES,
       allowProposedApi: true,
     });
+    // 스냅샷 앞에는 서버가 붙인 DEC private mode 재선언이 온다 (ADR-0015) — 켜져
+    // 있던 인코딩은 이 인스턴스에도 곧 다시 알려지므로 꺼진 채로 시작하면 된다.
+    this.sgrMouse = false;
+    const trackSgrMouse = (on: boolean) => (params: (number | number[])[]) => {
+      // 서브파라미터가 있으면 그 자리가 배열로 오므로 숫자만 본다.
+      if (params.some((param) => param === 1006)) this.sgrMouse = on;
+      // false 를 돌려줘야 xterm 의 기본 처리로 넘어간다 — 여기서 true 를 돌려주면
+      // 이 시퀀스가 우리 것으로 소비돼 `term.modes` 가 영영 갱신되지 않는다.
+      return false;
+    };
+    term.parser.registerCsiHandler({ prefix: "?", final: "h" }, trackSgrMouse(true));
+    term.parser.registerCsiHandler({ prefix: "?", final: "l" }, trackSgrMouse(false));
+    this.term = term;
     this.write(bytes, () => this.setInputEnabled(true));
   }
 
@@ -280,6 +314,40 @@ export class TabView {
       out.scrollHeight - out.scrollTop - out.clientHeight <= STICK_TO_BOTTOM_PX;
     this.preEl.textContent = trimTrailingBlank(lines).join("\n");
     if (atBottom) out.scrollTop = out.scrollHeight;
+    // 대체 화면에는 스크롤백이 없어 우리가 가진 것은 뷰포트 한 장뿐이고, 이전
+    // 내역은 TUI 만 되감을 수 있다. 마우스 추적도 같이 보는 것은 1049 가 재선언
+    // 대상이 아니어서다 (ADR-0015) — 오래 돈 탭은 `?1049h` 가 replay 창 밖으로
+    // 밀려 여기서는 일반 버퍼로 보이지만, 그 안의 TUI 는 여전히 휠을 기다린다.
+    const alt = buffer.type === "alternate";
+    const mouse = term.modes.mouseTrackingMode !== "none";
+    this.scrollKeysEl.hidden = !(alt || mouse);
+  }
+
+  /** ▲/▼ — 대체 화면 안에서 도는 프로그램에게 "되감아라"라고 말하는 두 방법.
+   *
+   *  Claude Code·Codex 는 SGR 마우스 추적을 켜고 휠 리포트로 스크롤한다. less·vim
+   *  처럼 마우스를 켜지 않는 프로그램은 PageUp/PageDown 을 받는다.
+   *
+   *  추적이 켜졌는데 SGR 이 아니면 키로 폴백한다 — 옛 X10 인코딩(`ESC[M` 뒤에
+   *  좌표를 실은 원시 바이트)은 절대 보내지 않는다. 좌표가 223 열에서 끊기고,
+   *  받는 쪽이 그 형식을 읽지 않으면 그 바이트들이 그대로 입력으로 남는다. */
+  private scrollTui(direction: "up" | "down"): void {
+    const term = this.term;
+    if (term !== null && term.modes.mouseTrackingMode !== "none" && this.sgrMouse) {
+      this.enqueue([
+        {
+          type: "wheel",
+          direction,
+          // 화면 한가운데를 가리킨다 — TUI 는 휠 리포트의 좌표로 어느 영역을
+          // 스크롤할지 고르고, 가장자리는 입력창이나 상태줄일 수 있다.
+          col: Math.max(1, Math.floor(this.state.cols / 2)),
+          row: Math.max(1, Math.floor(this.state.rows / 2)),
+          notches: WHEEL_NOTCHES_PER_TAP,
+        },
+      ]);
+      return;
+    }
+    this.enqueue([{ type: "key", key: direction === "up" ? "pageUp" : "pageDown" }]);
   }
 
   private destroyTerminal(): void {

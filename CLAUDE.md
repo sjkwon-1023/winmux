@@ -477,6 +477,18 @@ Accepted deferrals, one line each. None of these block the MVP.
   which drives a real headless instance through the first frame under happy-dom. It was
   reproduced on the dev box by running the built phone code in Windows Chrome headless against a
   mock server; the field-only checklist had no browser step, which is what let it ship.
+  **The phone could not scroll back — v0.3.20** (user report 2026-09-06): Claude Code 2.1.x and
+  Codex 0.153.x both run on the **alternate screen** by default (read off a live tab's bytes:
+  `?1049h` plus SGR mouse tracking `?1000/1002/1003/1006h`), and that buffer has no scrollback —
+  the phone's headless instance held exactly the viewport, so there was nothing above to scroll
+  to; a plain shell's history scrolled fine (checked in Chrome against the real CSS). The desktop
+  has history there only because the wheel goes to the TUI, which scrolls its own transcript. The
+  phone now floats ▲/▼ over the output whenever the active buffer is the alternate one *or* mouse
+  tracking is on (the snapshot preamble re-asserts mouse modes but not 1049, ADR-0015, so an old
+  tab can look normal-buffered), and a tap sends five SGR wheel notches at the screen centre — or
+  PageUp/PageDown when the program takes no SGR mouse, tracked with a CSI hook on the headless
+  parser; X10 encoding is never sent. The input queue also triggers an immediate poll when it
+  drains, so a tap or a Send shows its effect in a few hundred ms rather than up to 2 s.
   Decisions and the accepted limits (plain HTTP, slowloris, the shared `writer` mutex,
   first-frame fidelity): [ADR-0016](docs/adr/0016-remote-surface-over-lan.md).
   Verification: WINDOWS-BUILD §10 v0.3.17 — all field-only. **Open**: `PtySession::kill` waits

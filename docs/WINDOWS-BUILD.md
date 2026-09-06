@@ -2048,6 +2048,18 @@ field and is re-run here.
    with "Screen render failed:" ever appears, report its text — that is the new guard speaking.
 2. **v0.3.18 items 1–4** in full.
 
+### v0.3.20 — verification
+
+Phone-page only; the server is unchanged.
+
+1. **Alt-screen scroll.** Open a Claude Code or Codex tab: ▲/▼ float at the lower right of the
+   output. ▲ moves the agent's transcript towards older content, ▼ back down, and each tap lands
+   within about half a second. On a plain shell tab the buttons do not appear and dragging the
+   text scrolls the history as before.
+2. **Faster echo.** Send text: the submitted line shows up on the phone well under a second, not
+   after the next 2 s poll.
+3. **v0.3.19 item 1 and v0.3.18 items 1–4** still hold.
+
 ## 11. ARM64 cross-build notes
 
 The dev machine that produced this repo's crates is x86_64; the eventual target device policy
